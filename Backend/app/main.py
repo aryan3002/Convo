@@ -64,6 +64,16 @@ def parse_working_hours() -> tuple[time, time]:
     return time(start_hour, start_minute), time(end_hour, end_minute)
 
 
+def is_working_day(local_date: date) -> bool:
+    return local_date.weekday() in settings.working_days_list
+
+
+def get_stylist_hours(stylist: Stylist) -> tuple[time, time]:
+    if stylist.work_start and stylist.work_end:
+        return stylist.work_start, stylist.work_end
+    return parse_working_hours()
+
+
 def overlap(start_a: datetime, end_a: datetime, start_b: datetime, end_b: datetime) -> bool:
     return start_a < end_b and start_b < end_a
 
@@ -180,6 +190,11 @@ async def list_services(session: AsyncSession = Depends(get_session)):
     ]
 
 
+@app.get("/health")
+async def healthcheck():
+    return {"ok": True}
+
+
 @app.get("/availability")
 async def get_availability(
     service_id: int,
@@ -192,6 +207,9 @@ async def get_availability(
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format")
 
+    if not is_working_day(local_date):
+        return []
+
     service = await fetch_service(session, service_id)
     # Get stylists in same shop
     result = await session.execute(
@@ -201,15 +219,20 @@ async def get_availability(
     if not stylists:
         return []
 
-    working_start, working_end = parse_working_hours()
     now = datetime.now(timezone.utc)
     slots: list[AvailabilitySlot] = []
 
-    day_start_utc = to_utc_from_local(local_date, working_start, tz_offset_minutes)
-    day_end_utc = to_utc_from_local(local_date, working_end, tz_offset_minutes)
-
     for stylist in stylists:
-        blocked = await get_active_bookings_for_stylist(session, stylist.id, day_start_utc, day_end_utc, now)
+        working_start, working_end = get_stylist_hours(stylist)
+        day_start_utc = to_utc_from_local(local_date, working_start, tz_offset_minutes)
+        day_end_utc = to_utc_from_local(local_date, working_end, tz_offset_minutes)
+        blocked = await get_active_bookings_for_stylist(
+            session,
+            stylist.id,
+            day_start_utc,
+            day_end_utc,
+            now,
+        )
         slots.extend(
             make_slots_for_stylist(
                 stylist,
@@ -246,7 +269,10 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid start_time")
 
-    working_start, working_end = parse_working_hours()
+    if not is_working_day(local_date):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Outside working days")
+
+    working_start, working_end = get_stylist_hours(stylist)
     duration = timedelta(minutes=service.duration_minutes)
     local_end_time = (datetime.combine(local_date, local_time) + duration).time()
 

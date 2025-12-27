@@ -151,6 +151,7 @@ export default function ChatPage() {
   const [holdLoading, setHoldLoading] = useState(false);
   const [holdError, setHoldError] = useState<string | null>(null);
   const [heldSlot, setHeldSlot] = useState<Slot | null>(null);
+  const holdRef = useRef<HoldResponse | null>(null);
 
   const [confirmLoading, setConfirmLoading] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
@@ -160,6 +161,7 @@ export default function ChatPage() {
   const [usingDemo, setUsingDemo] = useState<boolean>(DEMO_MODE === "on");
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const nameRef = useRef(name);
 
   const tzOffset = useMemo(() => {
     const browserAhead = -new Date().getTimezoneOffset();
@@ -186,6 +188,14 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, servicesLoading, slotsLoading, holdLoading, confirmLoading]);
+
+  useEffect(() => {
+    nameRef.current = name;
+  }, [name]);
+
+  useEffect(() => {
+    holdRef.current = hold;
+  }, [hold]);
 
   // ---------- Demo/Backend ----------
   async function isBackendUp(): Promise<boolean> {
@@ -248,7 +258,7 @@ export default function ChatPage() {
         date: dateStr,
         start_time: startHHMM,
         stylist_id: slot.stylist_id,
-        customer_name: name,
+        customer_name: nameRef.current.trim() || null,
         tz_offset_minutes: tzOffset,
       }),
     });
@@ -284,6 +294,7 @@ export default function ChatPage() {
     setSelectedService(svc);
     setSlots([]);
     setHold(null);
+    holdRef.current = null;
     setHeldSlot(null);
     setConfirmed(false);
     setHoldError(null);
@@ -328,6 +339,7 @@ export default function ChatPage() {
     setSlotsError(null);
     setSlots([]);
     setHold(null);
+    holdRef.current = null;
     setHeldSlot(null);
     setConfirmed(false);
     setConfirmError(null);
@@ -376,6 +388,7 @@ export default function ChatPage() {
     setHoldLoading(true);
     setHoldError(null);
     setHold(null);
+    holdRef.current = null;
     setHeldSlot(null);
     setConfirmed(false);
     setConfirmError(null);
@@ -386,6 +399,7 @@ export default function ChatPage() {
     try {
       const data = await holdBooking(service, slot);
       setHold(data);
+      holdRef.current = data;
       setHeldSlot(slot);
 
       assistantSay("✅ Slot held. Ready to confirm?", [
@@ -404,16 +418,20 @@ export default function ChatPage() {
   }
 
   async function onConfirm() {
-    if (!hold) return;
+    const activeHold = holdRef.current;
+    if (!activeHold) {
+      assistantSay("Please hold a slot before confirming.");
+      return;
+    }
     setConfirmLoading(true);
     setConfirmError(null);
 
     userSay("Confirm");
 
     try {
-      await confirmBooking(hold.booking_id);
+      await confirmBooking(activeHold.booking_id);
       setConfirmed(true);
-      assistantSay(`✅ You’re booked! Your booking ID is ${hold.booking_id}.`, []);
+      assistantSay(`✅ You’re booked! Your booking ID is ${activeHold.booking_id}.`, []);
     } catch (e: any) {
       setConfirmError(e?.message ?? "Failed to confirm");
       assistantSay(`Sorry — confirmation failed. ${(e?.message ?? "").trim()}`);

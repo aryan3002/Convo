@@ -1,2 +1,6 @@
 .DS_Store
 .frontend-git-backup
+__pycache__/
+*.pyc
+Backend/.venv/
+Backend/.env

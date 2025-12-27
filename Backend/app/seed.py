@@ -1,3 +1,5 @@
+from datetime import time
+
 from sqlalchemy import select
 
 from .core.config import get_settings
@@ -24,21 +26,27 @@ async def seed_initial_data(session):
             [
                 Service(
                     shop_id=shop.id,
-                    name="Haircut",
+                    name="Men's Haircut",
                     duration_minutes=30,
                     price_cents=3500,
                 ),
                 Service(
                     shop_id=shop.id,
+                    name="Women's Haircut",
+                    duration_minutes=45,
+                    price_cents=5500,
+                ),
+                Service(
+                    shop_id=shop.id,
                     name="Beard Trim",
-                    duration_minutes=30,
+                    duration_minutes=15,
                     price_cents=2000,
                 ),
                 Service(
                     shop_id=shop.id,
-                    name="Haircut + Beard",
-                    duration_minutes=60,
-                    price_cents=5000,
+                    name="Hair Color",
+                    duration_minutes=90,
+                    price_cents=12000,
                 ),
             ]
         )
@@ -48,8 +56,20 @@ async def seed_initial_data(session):
     if not stylists:
         session.add_all(
             [
-                Stylist(shop_id=shop.id, name="Alex", active=True),
-                Stylist(shop_id=shop.id, name="Sam", active=True),
+                Stylist(
+                    shop_id=shop.id,
+                    name="Alex",
+                    work_start=time(10, 0),
+                    work_end=time(18, 0),
+                    active=True,
+                ),
+                Stylist(
+                    shop_id=shop.id,
+                    name="Jamie",
+                    work_start=time(11, 0),
+                    work_end=time(19, 0),
+                    active=True,
+                ),
             ]
         )
 
