@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from typing import List
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,12 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .core.db import AsyncSessionLocal, Base, engine, get_session
+from .chat import ChatRequest, chat_with_ai
 from .models import Booking, BookingStatus, Service, Stylist
 from .seed import seed_initial_data
 
 
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
+
+
+def get_local_now() -> datetime:
+    """Get the current datetime in the configured timezone (Arizona)."""
+    tz = ZoneInfo(settings.chat_timezone)
+    return datetime.now(tz)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +47,7 @@ class HoldRequest(BaseModel):
     start_time: str  # HH:MM in local time
     stylist_id: int
     customer_name: str | None = None
+    customer_email: str | None = None
     tz_offset_minutes: int = Field(default=0, description="Minutes ahead of UTC. Browser offset is negative for Phoenix.")
 
 
@@ -138,6 +147,7 @@ def make_slots_for_stylist(
     working_start: time,
     working_end: time,
     blocked: List[Booking],
+    now_utc: datetime,
 ) -> List[AvailabilitySlot]:
     day_start_utc = to_utc_from_local(local_date, working_start, tz_offset_minutes)
     day_end_utc = to_utc_from_local(local_date, working_end, tz_offset_minutes)
@@ -150,6 +160,11 @@ def make_slots_for_stylist(
     while cursor + duration <= day_end_utc:
         slot_start = cursor
         slot_end = cursor + duration
+
+        # Skip slots that have already started (are in the past)
+        if slot_start <= now_utc:
+            cursor += step
+            continue
 
         conflict = any(overlap(slot_start, slot_end, b.start_at_utc, b.end_at_utc) for b in blocked)
         if not conflict:
@@ -242,6 +257,7 @@ async def get_availability(
                 working_start,
                 working_end,
                 blocked,
+                now,
             )
         )
 
@@ -257,6 +273,9 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
 
     if stylist.shop_id != service.shop_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Stylist does not belong to this shop")
+
+    if not payload.customer_email or not payload.customer_email.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer email is required to hold a slot")
 
     try:
         local_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
@@ -308,11 +327,13 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
             )
 
     hold_expires_at = now + timedelta(minutes=settings.hold_ttl_minutes)
+    customer_email = payload.customer_email.strip().lower()
     booking = Booking(
         shop_id=service.shop_id,
         service_id=service.id,
         stylist_id=stylist.id,
         customer_name=payload.customer_name,
+        customer_email=customer_email,
         start_at_utc=start_at_utc,
         end_at_utc=end_at_utc,
         status=BookingStatus.HOLD,
@@ -369,3 +390,64 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
     await session.commit()
     await session.refresh(booking)
     return ConfirmResponse(ok=True, booking_id=booking.id, status=booking.status)
+
+
+class BookingTrackResponse(BaseModel):
+    booking_id: uuid.UUID
+    service_name: str
+    stylist_name: str
+    customer_name: str | None
+    customer_email: str | None
+    start_time: datetime
+    end_time: datetime
+    status: str
+    created_at: datetime
+
+
+@app.get("/bookings/track")
+async def track_bookings(email: str, session: AsyncSession = Depends(get_session)):
+    """Track bookings by customer email."""
+    if not email or not email.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")
+
+    normalized_email = email.strip().lower()
+
+    # Get all bookings for this email
+    result = await session.execute(
+        select(Booking)
+        .where(Booking.customer_email == normalized_email)
+        .order_by(Booking.start_at_utc.desc())
+    )
+    bookings = result.scalars().all()
+    
+    # Fetch service and stylist names for each booking
+    response = []
+    for booking in bookings:
+        # Get service name
+        svc_result = await session.execute(select(Service).where(Service.id == booking.service_id))
+        service = svc_result.scalar_one_or_none()
+        
+        # Get stylist name
+        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
+        stylist = stylist_result.scalar_one_or_none()
+        
+        response.append(BookingTrackResponse(
+            booking_id=booking.id,
+            service_name=service.name if service else "Unknown Service",
+            stylist_name=stylist.name if stylist else "Unknown Stylist",
+            customer_name=booking.customer_name,
+            customer_email=booking.customer_email,
+            start_time=booking.start_at_utc,
+            end_time=booking.end_at_utc,
+            status=booking.status.value,
+            created_at=booking.created_at,
+        ))
+    
+    return response
+
+
+@app.post("/chat")
+async def chat(payload: ChatRequest, session: AsyncSession = Depends(get_session)):
+    """Chat endpoint that delegates to the AI booking assistant."""
+    chat_response = await chat_with_ai(payload.messages, session, context=payload.context)
+    return chat_response.model_dump()

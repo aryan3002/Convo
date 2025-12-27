@@ -77,6 +77,7 @@ class Booking(Base):
     service_id: Mapped[int] = mapped_column(ForeignKey("services.id"), nullable=False, index=True)
     stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
     customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     start_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     end_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[BookingStatus] = mapped_column(PgEnum(BookingStatus), nullable=False)

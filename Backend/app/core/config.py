@@ -10,12 +10,15 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://postgres:postgres@localhost:55432/convo",
         alias="DATABASE_URL",
     )
+    openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     allowed_origins: str = Field(default="http://localhost:3000", alias="ALLOWED_ORIGINS")
     hold_ttl_minutes: int = Field(default=5, alias="HOLD_TTL_MINUTES")
     working_hours_start: str = Field(default="09:00", alias="WORKING_HOURS_START")
     working_hours_end: str = Field(default="17:00", alias="WORKING_HOURS_END")
-    working_days: str = Field(default="1,2,3,4,5,6", alias="WORKING_DAYS")
+    # Default Monday-Saturday (0 = Monday, 6 = Sunday)
+    working_days: str = Field(default="0,1,2,3,4,5", alias="WORKING_DAYS")
     default_shop_name: str = Field(default="Bishops Tempe", alias="DEFAULT_SHOP_NAME")
+    chat_timezone: str = Field(default="America/Phoenix", alias="CHAT_TIMEZONE")
 
     model_config = SettingsConfigDict(env_file=(".env", "Backend/.env", "backend/.env"), extra="ignore")
 
@@ -25,7 +28,11 @@ class Settings(BaseSettings):
 
     @property
     def working_days_list(self) -> List[int]:
-        return [int(day) for day in self.working_days.split(",") if day.strip()]
+        raw_days = [int(day) for day in self.working_days.split(",") if day.strip()]
+        # If user supplied 1-7 (Mon-Sun), normalize to Python weekday() 0-6 (Mon-Sun)
+        if raw_days and min(raw_days) >= 1 and max(raw_days) <= 7 and 0 not in raw_days:
+            return sorted({(day - 1) % 7 for day in raw_days})
+        return raw_days
 
 
 @lru_cache
