@@ -35,3 +35,4 @@ Visit docs: http://localhost:8000/docs
 - Hold TTL defaults to 5 minutes; working hours default to 09:00–17:00 (local time per `tz_offset_minutes`).
 - Working days default to Tuesday–Sunday (`WORKING_DAYS=1,2,3,4,5,6`).
 - Times are stored in UTC; holds and confirmed bookings block overlapping slots. Confirm will fail if a hold expired.
+- Chat uses `CHAT_TIMEZONE` (default `America/Phoenix`) and logs to `CHAT_LOG_PATH` when set.

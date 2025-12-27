@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 Backend/.venv/
 Backend/.env
+Backend/chat_logs.jsonl
+Backend/uvicorn.log
+Backend/tests/replay_results.jsonl

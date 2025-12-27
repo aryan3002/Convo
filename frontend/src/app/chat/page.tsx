@@ -39,6 +39,18 @@ type Chip = {
   disabled?: boolean;
 };
 
+type AIAction = {
+  type: string;
+  params: Record<string, any>;
+};
+
+type ChatAPIResponse = {
+  reply: string;
+  action: AIAction | null;
+  next_state?: string;
+  chips?: string[] | null;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 const DEFAULT_TZ_OFFSET_MINUTES = Number(
   process.env.NEXT_PUBLIC_TZ_OFFSET_MINUTES ?? "0"
@@ -135,6 +147,9 @@ export default function ChatPage() {
   ]);
 
   const [chips, setChips] = useState<Chip[]>([]);
+  const [inputValue, setInputValue] = useState("");
+  const [isAIChatLoading, setIsAIChatLoading] = useState(false);
+  const [aiEnabled, setAiEnabled] = useState(true);
 
   const [services, setServices] = useState<Service[]>([]);
   const [servicesLoading, setServicesLoading] = useState(false);
@@ -159,6 +174,8 @@ export default function ChatPage() {
 
   const [name, setName] = useState("Aryan");
   const [usingDemo, setUsingDemo] = useState<boolean>(DEMO_MODE === "on");
+  const [hasPickedDate, setHasPickedDate] = useState(false);
+  const [showDatePicker, setShowDatePicker] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const nameRef = useRef(name);
@@ -196,6 +213,235 @@ export default function ChatPage() {
   useEffect(() => {
     holdRef.current = hold;
   }, [hold]);
+
+  // ---------- AI Chat ----------
+  async function sendMessageToAI(userMessage: string) {
+    if (!userMessage.trim() || isAIChatLoading) return;
+
+    setIsAIChatLoading(true);
+    setInputValue("");
+    
+    // Add user message to chat
+    const userMsg: Message = { id: uid(), role: "user", text: userMessage };
+    setMessages((prev) => [...prev, userMsg]);
+    setChips([]);
+
+    // Build conversation history for API
+    const conversationHistory = [...messages, userMsg].map((m) => ({
+      role: m.role,
+      content: m.text,
+    }));
+
+    // Build context
+    const context: Record<string, any> = {};
+    if (selectedService) {
+      context.selected_service = `${selectedService.name} (ID: ${selectedService.id})`;
+    }
+    if (hasPickedDate && dateStr) {
+      context.selected_date = dateStr;
+    }
+    if (name) {
+      context.customer_name = name;
+    }
+    if (heldSlot) {
+      context.held_slot = `${formatTime(heldSlot.start_time)} with ${heldSlot.stylist_name}`;
+    }
+    if (hold) {
+      context.booking_id = hold.booking_id;
+    }
+    context.tz_offset_minutes = tzOffset;
+
+    let bookingState = "NEED_SERVICE";
+    if (confirmed) {
+      bookingState = "CONFIRMED";
+    } else if (hold) {
+      bookingState = "HOLDING";
+    } else if (slots.length > 0) {
+      bookingState = "SHOWING_SLOTS";
+    } else if (selectedService && hasPickedDate) {
+      bookingState = "NEED_TIME";
+    } else if (selectedService) {
+      bookingState = "NEED_DATE";
+    }
+    context.booking_state = bookingState;
+    if (slots.length > 0) {
+      context.available_slots = slots.slice(0, 5).map(s => 
+        `${formatTime(s.start_time)} (${s.stylist_name})`
+      );
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: conversationHistory,
+          context: Object.keys(context).length > 0 ? context : null,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Chat API error: ${res.status}`);
+      }
+
+      const data: ChatAPIResponse = await res.json();
+      
+      // Add AI response
+      setMessages((prev) => [
+        ...prev,
+        { id: uid(), role: "assistant", text: data.reply },
+      ]);
+
+      // Handle action if present
+      if (data.action) {
+        await handleAIAction(data.action);
+      }
+
+      if (data.chips && data.chips.length > 0) {
+        setChips(
+          data.chips.map((label) => ({
+            id: `chip_${label.replace(/\s+/g, "_")}`,
+            label,
+            onClick: () => {
+              if (label.toLowerCase().includes("pick a date")) {
+                setShowDatePicker(true);
+                clearChips();
+                return;
+              }
+              sendMessageToAI(label);
+            },
+          }))
+        );
+      } else if (data.next_state === "NEED_DATE") {
+        setShowDatePicker(true);
+      } else if (data.next_state === "NEED_SERVICE") {
+        showServiceChips();
+      }
+    } catch (error: any) {
+      console.error("AI chat error:", error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid(),
+          role: "assistant",
+          text: "Sorry, I'm having trouble connecting. Let me show you our services instead.",
+        },
+      ]);
+      // Fallback to showing services
+      showServiceChips();
+    } finally {
+      setIsAIChatLoading(false);
+    }
+  }
+
+  async function handleAIAction(action: AIAction) {
+    // Safety check for params
+    if (!action.params) {
+      action.params = {};
+    }
+    
+    switch (action.type) {
+      case "show_services":
+        showServiceChips();
+        break;
+        
+      case "select_service":
+        const svc = services.find((s) => s.id === action.params?.service_id);
+        if (svc) {
+          setSelectedService(svc);
+          // Show date chips after service selection
+          const today = new Date();
+          const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          setChips([
+            {
+              id: "date_today",
+              label: "Today",
+              onClick: () => {
+                const todayStr = toLocalDateInputValue(today);
+                setDateStr(todayStr);
+                userSay(`Date: ${todayStr}`);
+                fetchAvailability(svc, todayStr);
+              },
+            },
+            {
+              id: "date_tomorrow",
+              label: "Tomorrow",
+              onClick: () => {
+                const tomorrowStr = toLocalDateInputValue(tomorrow);
+                setDateStr(tomorrowStr);
+                userSay(`Date: ${tomorrowStr}`);
+                fetchAvailability(svc, tomorrowStr);
+              },
+            },
+          ]);
+        }
+        break;
+        
+      case "select_date":
+        if (action.params?.date) {
+          setDateStr(action.params.date);
+          setHasPickedDate(true);
+          if (selectedService) {
+            await fetchAvailability(selectedService, action.params.date);
+          }
+        }
+        break;
+        
+      case "fetch_availability":
+        const service = services.find((s) => s.id === action.params?.service_id);
+        if (service && action.params?.date) {
+          setSelectedService(service);
+          setDateStr(action.params.date);
+          setHasPickedDate(true);
+          await fetchAvailability(service, action.params.date);
+        }
+        break;
+        
+      case "hold_slot":
+        const holdService = services.find((s) => s.id === action.params?.service_id);
+        const holdSlot = slots.find(
+          (s) =>
+            s.stylist_id === action.params?.stylist_id &&
+            s.start_time.includes(action.params?.start_time || "")
+        );
+        if (holdService && holdSlot) {
+          await onHoldSlot(holdService, holdSlot);
+        }
+        break;
+        
+      case "confirm_booking":
+        await onConfirm();
+        break;
+        
+      case "show_slots":
+        if (slots.length > 0) {
+          setChips(
+            slots.slice(0, 8).map((slot) => ({
+              id: `slot_${slot.stylist_id}_${slot.start_time}`,
+              label: slotChipLabel(slot),
+              onClick: () => {
+                if (selectedService) {
+                  onHoldSlot(selectedService, slot);
+                }
+              },
+            }))
+          );
+        }
+        break;
+    }
+  }
+
+  function showServiceChips() {
+    if (services.length > 0) {
+      setChips(
+        services.map((svc) => ({
+          id: `svc_${svc.id}`,
+          label: svc.name,
+          onClick: () => onSelectService(svc),
+        }))
+      );
+    }
+  }
 
   // ---------- Demo/Backend ----------
   async function isBackendUp(): Promise<boolean> {
@@ -299,6 +545,8 @@ export default function ChatPage() {
     setConfirmed(false);
     setHoldError(null);
     setConfirmError(null);
+    setHasPickedDate(false);
+    setShowDatePicker(false);
 
     userSay(svc.name);
 
@@ -313,6 +561,7 @@ export default function ChatPage() {
         label: "Today",
         onClick: () => {
           setDateStr(todayStr);
+          setHasPickedDate(true);
           userSay(`Date: ${todayStr}`);
           fetchAvailability(svc, todayStr);
         },
@@ -322,6 +571,7 @@ export default function ChatPage() {
         label: "Tomorrow",
         onClick: () => {
           setDateStr(tomorrowStr);
+          setHasPickedDate(true);
           userSay(`Date: ${tomorrowStr}`);
           fetchAvailability(svc, tomorrowStr);
         },
@@ -329,7 +579,10 @@ export default function ChatPage() {
       {
         id: "date_pick",
         label: "Pick a date below ↓",
-        onClick: () => clearChips(),
+        onClick: () => {
+          setShowDatePicker(true);
+          clearChips();
+        },
       },
     ]);
   }
@@ -344,6 +597,8 @@ export default function ChatPage() {
     setConfirmed(false);
     setConfirmError(null);
     setHoldError(null);
+    setHasPickedDate(true);
+    setShowDatePicker(false);
 
     try {
       const data = await getAvailability(service, date);
@@ -529,14 +784,111 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {(servicesLoading || slotsLoading || holdLoading || confirmLoading) && (
-                <div className="text-sm text-neutral-500">Working…</div>
+              {showDatePicker && (
+                <div className="mt-3 rounded-2xl border bg-white p-4 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-neutral-900">Pick a date</div>
+                      <div className="text-xs text-neutral-500">We're open Tue-Sun</div>
+                    </div>
+                    <button
+                      onClick={() => setShowDatePicker(false)}
+                      className="text-xs text-neutral-500 hover:text-neutral-700"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <input
+                      type="date"
+                      value={dateStr}
+                      onChange={(e) => setDateStr(e.target.value)}
+                      className="rounded-xl border px-3 py-2 text-sm"
+                    />
+                    <button
+                      onClick={() => {
+                        if (!selectedService) return;
+                        userSay(`Date: ${dateStr}`);
+                        fetchAvailability(selectedService, dateStr);
+                      }}
+                      className="rounded-xl bg-black px-4 py-2 text-sm text-white"
+                    >
+                      Check times
+                    </button>
+                    <button
+                      onClick={() => {
+                        const todayStr = toLocalDateInputValue(new Date());
+                        setDateStr(todayStr);
+                        setHasPickedDate(true);
+                        if (!selectedService) return;
+                        userSay(`Date: ${todayStr}`);
+                        fetchAvailability(selectedService, todayStr);
+                      }}
+                      className="rounded-xl border px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+                    >
+                      Today
+                    </button>
+                    <button
+                      onClick={() => {
+                        const tomorrowStr = toLocalDateInputValue(new Date(Date.now() + 24 * 60 * 60 * 1000));
+                        setDateStr(tomorrowStr);
+                        setHasPickedDate(true);
+                        if (!selectedService) return;
+                        userSay(`Date: ${tomorrowStr}`);
+                        fetchAvailability(selectedService, tomorrowStr);
+                      }}
+                      className="rounded-xl border px-4 py-2 text-sm text-neutral-700 hover:bg-neutral-50"
+                    >
+                      Tomorrow
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {(servicesLoading || slotsLoading || holdLoading || confirmLoading || isAIChatLoading) && (
+                <div className="flex items-center gap-2 text-sm text-neutral-500">
+                  <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  {isAIChatLoading ? "Thinking..." : "Working…"}
+                </div>
               )}
               <div ref={bottomRef} />
             </div>
           </div>
 
-          {/* Optional: keep your form UI for now */}
+          {/* Chat Input */}
+          <div className="border-t p-3">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                sendMessageToAI(inputValue);
+              }}
+              className="flex gap-2"
+            >
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder="Type a message... (e.g., 'I want a haircut tomorrow')"
+                className="flex-1 rounded-xl border px-4 py-2.5 text-sm focus:border-neutral-400 focus:outline-none"
+                disabled={isAIChatLoading}
+              />
+              <button
+                type="submit"
+                disabled={!inputValue.trim() || isAIChatLoading}
+                className="rounded-xl bg-black px-4 py-2.5 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Send
+              </button>
+            </form>
+            <p className="mt-2 text-center text-xs text-neutral-400">
+              Powered by GPT-4o-mini • Or tap the chips above to navigate
+            </p>
+          </div>
+
+          {/* Booking Summary */}
           <div className="border-t p-4 space-y-4">
             <div className="rounded-2xl border bg-neutral-50/70 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
