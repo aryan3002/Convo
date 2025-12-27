@@ -14,6 +14,7 @@ from .core.db import AsyncSessionLocal, Base, engine, get_session
 from .chat import ChatRequest, chat_with_ai
 from .models import Booking, BookingStatus, Service, Stylist
 from .seed import seed_initial_data
+from .chat import ChatRequest, ChatResponse, chat_with_ai
 
 
 settings = get_settings()
@@ -208,6 +209,12 @@ async def list_services(session: AsyncSession = Depends(get_session)):
 @app.get("/health")
 async def healthcheck():
     return {"ok": True}
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(get_session)):
+    """AI-powered chat endpoint for booking appointments."""
+    return await chat_with_ai(request.messages, session, request.context)
 
 
 @app.get("/availability")
