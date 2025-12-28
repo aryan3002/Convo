@@ -54,18 +54,6 @@ type BookingTrack = {
   created_at: string;
 };
 
-type AIAction = {
-  type: string;
-  params: Record<string, any>;
-};
-
-type ChatAPIResponse = {
-  reply: string;
-  action: AIAction | null;
-  next_state?: string;
-  chips?: string[] | null;
-};
-
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 
 function uid(prefix = "m") {
@@ -178,12 +166,25 @@ export default function ChatPage() {
   }
 
   function describeSlots(slotsToDescribe: Slot[], date: string) {
-    if (!slotsToDescribe.length) return "I don't see any openings for that day. Want to try another date?";
-    const firstFew = slotsToDescribe.slice(0, 5);
-    const times = firstFew
-      .map((s) => `${formatTime(s.start_time)} with ${s.stylist_name}`)
-      .join(", ");
-    return `Here are the next available times on ${formatDateLabel(date)}: ${times}.`;
+    if (!slotsToDescribe.length) return "No openings on " + formatDateLabel(date) + ". Try another date?";
+    
+    // Group slots by time to show all stylists available at each time
+    const timeMap = new Map<string, string[]>();
+    slotsToDescribe.forEach((s) => {
+      const timeKey = formatTime(s.start_time);
+      if (!timeMap.has(timeKey)) {
+        timeMap.set(timeKey, []);
+      }
+      timeMap.get(timeKey)!.push(s.stylist_name);
+    });
+    
+    // Format: "10:00 AM (Alex, Jamie), 10:30 AM (Alex)..."
+    const timeEntries = Array.from(timeMap.entries());
+    const formatted = timeEntries
+      .map(([time, stylists]) => `${time} (${stylists.join(", ")})`)
+      .join(" • ");
+    
+    return `Available on ${formatDateLabel(date)}:\n${formatted}`;
   }
 
   // Scroll to bottom on new messages
@@ -356,8 +357,8 @@ export default function ChatPage() {
       }
       case "show_slots": {
         if (params.slots) {
-          setSlots(params.slots);
-          appendAssistantMessage(describeSlots(params.slots, dateStr));
+          setSlots(params.slots as Slot[]);
+          appendAssistantMessage(describeSlots(params.slots as Slot[], dateStr));
         }
         break;
       }
@@ -369,10 +370,10 @@ export default function ChatPage() {
       case "hold_slot": {
         if (params.service_id && params.stylist_id && params.date && params.start_time) {
           await createHoldRequest({
-            serviceId: params.service_id,
-            stylistId: params.stylist_id,
-            date: params.date,
-            startTime: params.start_time,
+            serviceId: params.service_id as number,
+            stylistId: params.stylist_id as number,
+            date: params.date as string,
+            startTime: params.start_time as string,
           });
         } else {
           appendAssistantMessage("I need the service, date, and time before I can reserve that.");
@@ -380,7 +381,7 @@ export default function ChatPage() {
         break;
       }
       case "confirm_booking": {
-        const bookingId = params.booking_id ?? hold?.booking_id;
+        const bookingId = (params.booking_id as string) ?? hold?.booking_id;
         if (bookingId) {
           await confirmBooking(bookingId);
         } else {
@@ -461,7 +462,7 @@ export default function ChatPage() {
           const dateObj = new Date(`${args.date}T${args.startTime}`);
           setSelectedSlot({
             stylist_id: args.stylistId,
-            stylist_name: urlSlot?.stylist_name || "Selected stylist",
+            stylist_name: "Selected stylist",
             start_time: dateObj.toISOString(),
             end_time: new Date(dateObj.getTime() + (svc.duration_minutes || 30) * 60000).toISOString(),
           });
