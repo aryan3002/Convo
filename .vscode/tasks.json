@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Start Backend Server",
+			"type": "shell",
+			"command": "cd /Users/ashmit/Downloads/Convo-main-3/Backend && /Users/ashmit/Downloads/Convo-main-3/Backend/venv/bin/uvicorn app.main:app --reload --host 0.0.0.0 --port 8000",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
