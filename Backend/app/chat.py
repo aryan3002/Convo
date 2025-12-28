@@ -58,10 +58,10 @@ DATE RULES:
 
 CRITICAL RULES:
 - NEVER make up or list time slots yourself - the system displays them automatically
-- When user asks about times, just use fetch_availability action - the UI shows all actual slots
+- When user mentions a date, IMMEDIATELY use fetch_availability - the UI shows slots automatically
 - Slots are every 30 minutes (10:00, 10:30, 11:00, etc.) 
 - If user picks a time that doesn't exist (like 9:30 or 2:30), tell them to pick from the displayed slots
-- DO NOT say "one moment" or "checking" - just include the action
+- NEVER say "let me check", "I'll check", "one moment", "checking" - just include the action and say "Here are the available times:"
 - Before holding: collect BOTH name AND email from user
 
 ACTIONS (add at END of message):
@@ -70,19 +70,20 @@ ACTIONS (add at END of message):
 Actions:
 - select_service: {{"service_id": <id>, "service_name": "<name>"}}
 - fetch_availability: {{"service_id": <id>, "date": "YYYY-MM-DD"}}
-- hold_slot: {{"service_id": <id>, "stylist_id": <id>, "date": "YYYY-MM-DD", "start_time": "HH:MM"}}
-- confirm_booking: {{"booking_id": "<uuid>"}}
+- hold_slot: {{"service_id": <id>, "stylist_id": <id>, "date": "YYYY-MM-DD", "start_time": "HH:MM", "customer_name": "<name>", "customer_email": "<email>"}}
+- confirm_booking: {{}}
 
 BOOKING FLOW:
 1. User picks service → select_service action, ask for date
-2. User picks date → fetch_availability action (UI auto-displays ALL available 30-min slots)
-3. User picks time from displayed slots → ask stylist preference (Alex=ID 1, Jamie=ID 2) + name + email
-4. Have name + email + time + stylist → hold_slot action
-5. Slot held → confirm_booking action
+2. User picks date → IMMEDIATELY use fetch_availability action and say "Here are the available times for [date]:" (slots appear automatically)
+3. User picks time from displayed slots → ask which stylist (Alex=ID 1, Jamie=ID 2) + their name + their email
+4. Once you have ALL of: time + stylist + name + email → immediately use hold_slot action with ALL params
+5. After hold succeeds → use confirm_booking action to finalize
 
 RESPONSE STYLE:
 - Be friendly and brief
-- After fetch_availability, say something like "Here are the available times:" - the UI shows them
+- When fetching availability, just say "Here are the available times for [date]:" and include the action - slots show automatically
+- NEVER announce you're checking or looking - just do it
 - Don't list times yourself - they appear automatically in the chat
 """
 
@@ -244,23 +245,6 @@ async def chat_with_ai(
         
         ai_response = response.choices[0].message.content or ""
         clean_response, action = parse_action_from_response(ai_response)
-
-        # Enforce name and email collection before any hold/confirm step.
-        action_type = action.get("type") if isinstance(action, dict) else None
-        needs_details = action_type in {"hold_slot", "confirm_booking"}
-        has_email = bool((context or {}).get("customer_email"))
-        has_name = bool((context or {}).get("customer_name"))
-        
-        if needs_details and (not has_email or not has_name):
-            missing = []
-            if not has_name:
-                missing.append("name")
-            if not has_email:
-                missing.append("email")
-            return ChatResponse(
-                reply=f"Please provide your {' and '.join(missing)} to complete the booking.",
-                action=None,
-            )
         
         return ChatResponse(reply=clean_response, action=action)
         

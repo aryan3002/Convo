@@ -143,6 +143,23 @@ export default function ChatPage() {
     }
   };
 
+  const handleNameFromChat = (text: string) => {
+    // Try to extract name when user provides it along with email or standalone
+    // Look for patterns like "Name is X", "I'm X", "my name is X", or just a capitalized word before email
+    const namePatterns = [
+      /(?:my name is|name is|i'm|i am)\s+([A-Z][a-z]+)/i,
+      /^([A-Z][a-z]+)\s+(?:and|,)/i,  // "Ash and ash@gmail.com"
+      /^([A-Z][a-z]+)$/i,  // Just a name by itself
+    ];
+    for (const pattern of namePatterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        setCustomerName(match[1]);
+        return;
+      }
+    }
+  };
+
   function buildConversationContext() {
     return {
       selected_service: selectedService?.name,
@@ -276,6 +293,7 @@ export default function ChatPage() {
   async function sendMessage(text: string) {
     if (!text.trim() || isLoading) return;
     handleEmailFromChat(text);
+    handleNameFromChat(text);
 
     setInputValue("");
     const userMsg: Message = { id: uid(), role: "user", text };
@@ -374,9 +392,11 @@ export default function ChatPage() {
             stylistId: params.stylist_id as number,
             date: params.date as string,
             startTime: params.start_time as string,
+            customerName: params.customer_name as string | undefined,
+            customerEmail: params.customer_email as string | undefined,
           });
         } else {
-          appendAssistantMessage("I need the service, date, and time before I can reserve that.");
+          appendAssistantMessage("I need the service, stylist, date, and time before I can reserve that.");
         }
         break;
       }
@@ -399,6 +419,8 @@ export default function ChatPage() {
     stylistId: number;
     date: string;
     startTime: string;
+    customerName?: string;
+    customerEmail?: string;
   }) {
     const svc = services.find((s) => s.id === args.serviceId) || selectedService;
     if (!svc) {
@@ -406,14 +428,21 @@ export default function ChatPage() {
       return;
     }
 
-    const email = customerEmail.trim();
+    // Use params from AI action, fallback to state
+    const email = args.customerEmail?.trim() || customerEmail.trim();
+    const name = args.customerName?.trim() || customerName.trim() || "Guest";
+    
     if (!email) {
-      appendAssistantMessage("What's the best email to use for your booking?");
+      appendAssistantMessage("I need your email address to hold the slot. What's your email?");
       return;
     }
 
-    const name = customerName.trim() || "Guest";
+    // Update state with collected info
+    if (args.customerEmail) setCustomerEmail(args.customerEmail);
+    if (args.customerName) setCustomerName(args.customerName);
+    
     setSelectedService(svc);
+    setMode("chat");
     setMode("chat");
 
     setHoldLoading(true);
@@ -763,30 +792,31 @@ export default function ChatPage() {
               </div>
             </div>
 
-            <div className="mt-4 bg-white/70 backdrop-blur rounded-2xl shadow p-4 border border-gray-100">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-gray-900">Booking details</p>
-                  <p className="text-xs text-gray-500">Share your name and email so we can save your booking.</p>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-2 sm:w-2/3">
-                  <input
-                    type="text"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    placeholder="Your name"
-                    className="flex-1 px-4 py-3 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-400"
-                  />
-                  <input
-                    type="email"
-                    value={customerEmail}
-                    onChange={(e) => setCustomerEmail(e.target.value)}
-                    placeholder="Email for confirmations"
-                    className="flex-1 px-4 py-3 bg-gray-100 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-gray-400"
-                  />
+            {/* Booking Status - only show when we have collected info */}
+            {(customerName || customerEmail || hold) && (
+              <div className="mt-4 bg-white/70 backdrop-blur rounded-2xl shadow p-4 border border-gray-100">
+                <div className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-900">Booking Status</p>
+                    <div className="flex flex-wrap gap-3 mt-1 text-xs text-gray-600">
+                      {customerName && <span>👤 {customerName}</span>}
+                      {customerEmail && <span>✉️ {customerEmail}</span>}
+                      {hold && <span className="text-green-600 font-medium">✓ Slot held</span>}
+                      {confirmed && <span className="text-green-600 font-medium">✓ Confirmed!</span>}
+                    </div>
+                  </div>
+                  {hold && !confirmed && (
+                    <button
+                      onClick={() => confirmBooking()}
+                      disabled={confirmLoading}
+                      className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white text-sm rounded-lg font-medium transition-all"
+                    >
+                      {confirmLoading ? "..." : "Confirm"}
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
+            )}
 
 
 
