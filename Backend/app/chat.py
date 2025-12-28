@@ -2,6 +2,7 @@
 AI Chat module using GPT-4o-mini for conversational appointment booking.
 """
 import json
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -50,6 +51,9 @@ STYLISTS: {stylists}
 
 NOW: {today} at {current_time} (Arizona/MST)
 WORKING HOURS: {working_hours} ({working_days})
+CURRENT STAGE: {stage}
+SELECTED SERVICE: {selected_service}
+SELECTED DATE: {selected_date}
 
 DATE RULES:
 - Today: {today_date}, Tomorrow: {tomorrow_date}, Current year: {current_year}
@@ -57,12 +61,14 @@ DATE RULES:
 - Always format dates as YYYY-MM-DD
 
 CRITICAL RULES:
-- NEVER make up or list time slots yourself - the system displays them automatically
-- When user mentions a date, IMMEDIATELY use fetch_availability - the UI shows slots automatically
-- Slots are every 30 minutes (10:00, 10:30, 11:00, etc.) 
-- If user picks a time that doesn't exist (like 9:30 or 2:30), tell them to pick from the displayed slots
-- NEVER say "let me check", "I'll check", "one moment", "checking" - just include the action and say "Here are the available times:"
-- Before holding: collect BOTH name AND email from user
+- Be brief. One sentence only. Never list more than 3 items in text.
+- Do NOT list time slots in text. The UI shows them as buttons.
+- Do NOT confirm or hold bookings. The UI handles hold/confirm actions.
+- If user mentions a date, use fetch_availability and say: "Here are a few good options. Tap one to continue."
+- If user tries to type a time, ask them to tap a time option.
+- Before holding: collect BOTH name AND email from user.
+- Follow the CURRENT STAGE and do not skip steps.
+- Only use show_services, select_service, or fetch_availability actions unless explicitly asked for help with a non-booking question.
 
 ACTIONS (add at END of message):
 [ACTION: {{"type": "action_type", "params": {{...}}}}]
@@ -81,11 +87,40 @@ BOOKING FLOW:
 5. After hold succeeds → use confirm_booking action to finalize
 
 RESPONSE STYLE:
-- Be friendly and brief
-- When fetching availability, just say "Here are the available times for [date]:" and include the action - slots show automatically
-- NEVER announce you're checking or looking - just do it
-- Don't list times yourself - they appear automatically in the chat
+- Be professional and brief (one sentence)
+- When fetching availability, say "Here are a few good options. Tap one to continue."
+- Never list times, names, or multiple options in plain text
 """
+
+ALLOWED_STAGES = {
+    "WELCOME",
+    "SELECT_SERVICE",
+    "SELECT_DATE",
+    "SELECT_SLOT",
+    "HOLDING",
+    "CONFIRMING",
+    "DONE",
+}
+
+ALLOWED_ACTIONS = {
+    "WELCOME": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "SELECT_SERVICE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "SELECT_DATE": {"fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "SELECT_SLOT": {"hold_slot", "confirm_booking", "show_slots"},
+    "HOLDING": {"confirm_booking", "hold_slot"},
+    "CONFIRMING": {"confirm_booking"},
+    "DONE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+}
+
+STAGE_PROMPTS = {
+    "WELCOME": "Welcome! What service would you like to book?",
+    "SELECT_SERVICE": "Which service would you like? Please tap a service.",
+    "SELECT_DATE": "Pick a date below to see times.",
+    "SELECT_SLOT": "Here are a few good options. Tap one to continue.",
+    "HOLDING": "One moment while I reserve that.",
+    "CONFIRMING": "Tap confirm to finalize your booking.",
+    "DONE": "You are all set. Anything else I can help with?",
+}
 
 
 def parse_action_from_response(response: str) -> tuple[str, dict | None]:
@@ -124,6 +159,24 @@ def parse_action_from_response(response: str) -> tuple[str, dict | None]:
             clean_response = re.sub(r'\[ACTION:.*?\]\]?', '', response, flags=re.DOTALL).strip()
     
     return clean_response, action
+
+
+def normalize_stage(value: Any) -> str:
+    if not value:
+        return "WELCOME"
+    text = str(value).strip().upper()
+    return text if text in ALLOWED_STAGES else "WELCOME"
+
+
+def shorten_reply(text: str) -> str:
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return ""
+    first_line = cleaned.split("\n", 1)[0]
+    sentence = re.split(r"(?<=[.!?])\s", first_line)[0]
+    if len(sentence) > 160:
+        sentence = sentence[:157].rstrip() + "..."
+    return sentence
 
 
 async def get_services_context(session: AsyncSession) -> str:
@@ -197,6 +250,10 @@ async def chat_with_ai(
     
     working_hours_text = f'{settings.working_hours_start} to {settings.working_hours_end}'
     
+    stage = normalize_stage(context.get("stage") if context else None)
+    selected_service = context.get("selected_service") if context else None
+    selected_date = context.get("selected_date") if context else None
+
     system_prompt = SYSTEM_PROMPT.format(
         services=services_text,
         stylists=stylists_text,
@@ -207,7 +264,10 @@ async def chat_with_ai(
         current_year=current_year,
         next_year=next_year,
         working_days=working_days_text,
-        working_hours=working_hours_text
+        working_hours=working_hours_text,
+        stage=stage,
+        selected_service=selected_service or "None",
+        selected_date=selected_date or "None",
     )
     
     # Add context information if available
@@ -239,14 +299,38 @@ async def chat_with_ai(
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=openai_messages,
-            max_tokens=1000,
-            temperature=0.7,
+            max_tokens=200,
+            temperature=0.2,
         )
         
         ai_response = response.choices[0].message.content or ""
         clean_response, action = parse_action_from_response(ai_response)
-        
-        return ChatResponse(reply=clean_response, action=action)
+
+        allowed = ALLOWED_ACTIONS.get(stage, set())
+        if action and action.get("type") not in allowed:
+            # allow if it's a sensible downstream action
+            if action.get("type") in {"hold_slot", "confirm_booking", "fetch_availability", "select_service", "show_slots"}:
+                pass
+            else:
+                action = None
+
+        reply = shorten_reply(clean_response)
+        if not reply:
+            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+
+        # Guardrail: never list slots or long text
+        if stage == "SELECT_SLOT":
+            reply = STAGE_PROMPTS["SELECT_SLOT"]
+        if not action and stage in {"SELECT_SERVICE", "SELECT_DATE", "SELECT_SLOT", "HOLDING", "CONFIRMING"}:
+            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+        if not action and stage not in {"DONE"}:
+            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+        if action and action.get("type") == "fetch_availability":
+            reply = "Here are a few good options. Tap one to continue."
+        if action and action.get("type") == "select_service":
+            reply = "Great choice. Pick a date below to see times."
+
+        return ChatResponse(reply=reply, action=action)
         
     except Exception as e:
         import traceback
