@@ -1148,61 +1148,89 @@ export default function ChatPage() {
     return dates;
   }, []);
 
-  // Confirmation success screen
-  if (confirmed) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full text-center animate-fadeIn">
-          <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
-            <svg className="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h1 className="text-3xl font-semibold text-gray-900 mb-2">Booking Confirmed!</h1>
-          <p className="text-gray-600 mb-8">
-            We have sent a confirmation to your email. See you soon!
-          </p>
-          <div className="bg-white rounded-2xl shadow-lg p-6 text-left mb-8">
-            <div className="space-y-4">
+  // Confirmation success popup (dismissible)
+  const [showConfirmationPopup, setShowConfirmationPopup] = useState(false);
+
+  // Show popup when confirmed
+  React.useEffect(() => {
+    if (confirmed) {
+      setShowConfirmationPopup(true);
+    }
+  }, [confirmed]);
+
+  const dismissConfirmation = () => {
+    setShowConfirmationPopup(false);
+  };
+
+  const bookAnotherAndDismiss = () => {
+    setShowConfirmationPopup(false);
+    resetBooking();
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
+      {/* Confirmation Popup */}
+      {showConfirmationPopup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full animate-fadeIn relative">
+            {/* Close button */}
+            <button
+              onClick={dismissConfirmation}
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            
+            {/* Success icon */}
+            <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-7 h-7 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            
+            <h2 className="text-xl font-semibold text-gray-900 text-center mb-1">Booking Confirmed!</h2>
+            <p className="text-sm text-gray-500 text-center mb-4">Confirmation sent to your email.</p>
+            
+            {/* Booking details */}
+            <div className="bg-gray-50 rounded-xl p-4 text-sm space-y-2 mb-4">
               <div className="flex justify-between">
                 <span className="text-gray-500">Service</span>
-                <span className="font-medium">{selectedService?.name}</span>
+                <span className="font-medium text-gray-900">{selectedService?.name}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Date</span>
-                <span className="font-medium">{formatDateLabel(dateStr)}</span>
+                <span className="font-medium text-gray-900">{formatDateLabel(dateStr)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Time</span>
-                <span className="font-medium">
+                <span className="font-medium text-gray-900">
                   {selectedSlot && formatTime(selectedSlot.start_time)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Stylist</span>
-                <span className="font-medium">{selectedSlot?.stylist_name}</span>
+                <span className="font-medium text-gray-900">{selectedSlot?.stylist_name}</span>
               </div>
-              <div className="border-t pt-4 flex justify-between">
+              <div className="border-t border-gray-200 pt-2 flex justify-between">
                 <span className="text-gray-500">Total</span>
-                <span className="font-semibold text-lg">
+                <span className="font-semibold text-gray-900">
                   {selectedService && formatMoney(selectedService.price_cents)}
                 </span>
               </div>
             </div>
+            
+            <button
+              onClick={bookAnotherAndDismiss}
+              className="w-full py-2.5 text-blue-600 hover:text-blue-700 font-medium text-sm hover:bg-blue-50 rounded-lg transition-colors"
+            >
+              Book another appointment
+            </button>
           </div>
-          <button
-            onClick={resetBooking}
-            className="text-blue-600 hover:text-blue-700 font-medium"
-          >
-            Book another appointment
-          </button>
         </div>
-      </div>
-    );
-  }
+      )}
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-100">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4">
