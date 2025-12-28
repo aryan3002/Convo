@@ -1,0 +1,14 @@
+.DS_Store
+.frontend-git-backup
+__pycache__/
+*.pyc
+Backend/.venv/
+Backend/.env
+Backend/venv/
+Backend/server.log
+frontend/node_modules/
+frontend/.next/
+.env
+.env.local
+*.log
+node_modules/
