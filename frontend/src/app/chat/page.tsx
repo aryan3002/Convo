@@ -32,14 +32,25 @@ type HoldResponse = {
 
 type BookingMode = "chat" | "track";
 
+type Stage =
+  | "WELCOME"
+  | "SELECT_SERVICE"
+  | "SELECT_DATE"
+  | "SELECT_SLOT"
+  | "HOLDING"
+  | "CONFIRMING"
+  | "DONE";
+
 type AIAction = {
   type: string;
-  params?: Record<string, unknown>;
+  params?: Record<string, any>;
 };
 
 type ChatAPIResponse = {
   reply: string;
   action: AIAction | null;
+  next_state?: string;
+  chips?: string[] | null;
 };
 
 type BookingTrack = {
@@ -94,11 +105,12 @@ function formatDateLabel(dateStr: string) {
 
 export default function ChatPage() {
   const [mode, setMode] = useState<BookingMode>("chat");
+  const [stage, setStage] = useState<Stage>("WELCOME");
   const [messages, setMessages] = useState<Message[]>([
     {
       id: uid(),
       role: "assistant",
-      text: "Hi there! 👋 I'm your booking assistant. Tell me what you're looking for and I'll help you find the perfect appointment.",
+      text: "Hi! What service would you like to book?",
     },
   ]);
 
@@ -130,6 +142,16 @@ export default function ChatPage() {
 
   const tzOffset = useMemo(() => -new Date().getTimezoneOffset(), []);
 
+  const stagePrompts: Record<Stage, string> = {
+    WELCOME: "Welcome! What service would you like to book?",
+    SELECT_SERVICE: "Please choose a service below.",
+    SELECT_DATE: "Pick a date below to see times.",
+    SELECT_SLOT: "Here are a few good options. Tap one to continue.",
+    HOLDING: "One moment while I reserve that.",
+    CONFIRMING: "Tap Confirm booking to finalize.",
+    DONE: "You are all set. Anything else I can help with?",
+  };
+
   const appendAssistantMessage = (text: string) => {
     setMessages((prev) => [...prev, { id: uid(), role: "assistant", text }]);
   };
@@ -143,25 +165,48 @@ export default function ChatPage() {
     }
   };
 
+  const extractEmail = (text: string) => {
+    const extracted = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+    return extracted ? extracted[0].trim().toLowerCase() : "";
+  };
+
   const handleNameFromChat = (text: string) => {
     // Try to extract name when user provides it along with email or standalone
     // Look for patterns like "Name is X", "I'm X", "my name is X", or just a capitalized word before email
     const namePatterns = [
-      /(?:my name is|name is|i'm|i am)\s+([A-Z][a-z]+)/i,
-      /^([A-Z][a-z]+)\s+(?:and|,)/i,  // "Ash and ash@gmail.com"
-      /^([A-Z][a-z]+)$/i,  // Just a name by itself
+      /(?:my name is|name is|i'm|i am)\s+([A-Za-z][a-z]+)/i,
+      /^([A-Za-z][a-z]+)\s+(?:and|,)/i,  // "Ash and ash@gmail.com"
+      /^([A-Za-z][a-z]+)$/i,  // Just a name by itself
     ];
     for (const pattern of namePatterns) {
       const match = text.match(pattern);
       if (match && match[1]) {
-        setCustomerName(match[1]);
+        const normalizedName = match[1].trim();
+        setCustomerName(normalizedName.charAt(0).toUpperCase() + normalizedName.slice(1));
         return;
       }
     }
   };
 
+  const extractName = (text: string) => {
+    const namePatterns = [
+      /(?:my name is|name is|i'm|i am)\s+([A-Za-z][a-z]+)/i,
+      /^([A-Za-z][a-z]+)\s+(?:and|,)/i,
+      /^([A-Za-z][a-z]+)$/i,
+    ];
+    for (const pattern of namePatterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        const normalizedName = match[1].trim();
+        return normalizedName.charAt(0).toUpperCase() + normalizedName.slice(1);
+      }
+    }
+    return "";
+  };
+
   function buildConversationContext() {
     return {
+      stage,
       selected_service: selectedService?.name,
       selected_service_id: selectedService?.id,
       selected_date: dateStr,
@@ -183,25 +228,10 @@ export default function ChatPage() {
   }
 
   function describeSlots(slotsToDescribe: Slot[], date: string) {
-    if (!slotsToDescribe.length) return "No openings on " + formatDateLabel(date) + ". Try another date?";
-    
-    // Group slots by time to show all stylists available at each time
-    const timeMap = new Map<string, string[]>();
-    slotsToDescribe.forEach((s) => {
-      const timeKey = formatTime(s.start_time);
-      if (!timeMap.has(timeKey)) {
-        timeMap.set(timeKey, []);
-      }
-      timeMap.get(timeKey)!.push(s.stylist_name);
-    });
-    
-    // Format: "10:00 AM (Alex, Jamie), 10:30 AM (Alex)..."
-    const timeEntries = Array.from(timeMap.entries());
-    const formatted = timeEntries
-      .map(([time, stylists]) => `${time} (${stylists.join(", ")})`)
-      .join(" • ");
-    
-    return `Available on ${formatDateLabel(date)}:\n${formatted}`;
+    if (!slotsToDescribe.length) {
+      return `No openings on ${formatDateLabel(date)}. Try another date?`;
+    }
+    return `Here are a few good options for ${formatDateLabel(date)}. Tap one to continue.`;
   }
 
   // Scroll to bottom on new messages
@@ -217,6 +247,7 @@ export default function ChatPage() {
         if (res.ok) {
           const data = await res.json();
           setServices(data);
+          setStage("SELECT_SERVICE");
         }
       } catch (e) {
         console.error("Failed to load services:", e);
@@ -225,19 +256,19 @@ export default function ChatPage() {
     loadServices();
   }, []);
 
-  // Load slots when a service/date is selected
-  useEffect(() => {
-    if (selectedService && dateStr) {
-      loadSlots(selectedService, dateStr);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedService, dateStr]);
+  // Slots are loaded only when the user picks a date (guardrailed flow).
 
-  async function loadSlots(service: Service, date: string, options?: { announce?: boolean }) {
+  async function loadSlots(
+    service: Service,
+    date: string,
+    options?: { announce?: boolean }
+  ): Promise<Slot[]> {
     setDateStr(date);
     setSlotsLoading(true);
     setSlots([]);
     setSelectedSlot(null);
+    setStage("SELECT_SLOT");
+    let fetchedSlots: Slot[] = [];
     try {
       const url = new URL(`${API_BASE}/availability`);
       url.searchParams.set("service_id", String(service.id));
@@ -246,24 +277,34 @@ export default function ChatPage() {
       const res = await fetch(url.toString());
       if (res.ok) {
         const data = await res.json();
+        fetchedSlots = data;
         setSlots(data);
+        if (!data.length) {
+          setStage("SELECT_DATE");
+        }
         if (options?.announce) {
           appendAssistantMessage(describeSlots(data, date));
         }
       }
     } catch (e) {
       console.error("Failed to load slots:", e);
+      setStage("SELECT_DATE");
     } finally {
       setSlotsLoading(false);
     }
+    return fetchedSlots;
   }
 
-  async function loadSlotsByIds(serviceId: number | string, date: string, options?: { announce?: boolean }) {
+  async function loadSlotsByIds(
+    serviceId: number | string,
+    date: string,
+    options?: { announce?: boolean }
+  ): Promise<Slot[]> {
     const numericId = typeof serviceId === 'string' ? parseInt(serviceId, 10) : serviceId;
     const svc = services.find((s) => s.id === numericId);
     if (svc) {
       setSelectedService(svc);
-      await loadSlots(svc, date, options);
+      return await loadSlots(svc, date, options);
     } else {
       // If service not found in loaded services, try to load slots anyway
       // by creating a temporary service object
@@ -277,9 +318,11 @@ export default function ChatPage() {
           const data = await res.json();
           setSlots(data);
           setDateStr(date);
+          setStage(data.length ? "SELECT_SLOT" : "SELECT_DATE");
           if (options?.announce) {
             appendAssistantMessage(describeSlots(data, date));
           }
+          return data;
         } else {
           appendAssistantMessage("I couldn't find available slots for that service. Please try again.");
         }
@@ -288,12 +331,199 @@ export default function ChatPage() {
         appendAssistantMessage("I had trouble checking availability. Please try again.");
       }
     }
+    return [];
+  }
+
+  async function onSelectService(svc: Service) {
+    setSelectedService(svc);
+    setStage("SELECT_DATE");
+    appendAssistantMessage(`Great choice. Pick a date below for your ${svc.name}.`);
+  }
+
+  async function onSelectDate(date: string) {
+    if (!selectedService) {
+      appendAssistantMessage(stagePrompts.SELECT_SERVICE);
+      return;
+    }
+    await loadSlots(selectedService, date, { announce: true });
+  }
+
+  async function onSelectSlot(slot: Slot) {
+    if (!selectedService) {
+      appendAssistantMessage(stagePrompts.SELECT_SERVICE);
+      return;
+    }
+    setSelectedSlot(slot);
+    setStage("HOLDING");
+    const start = new Date(slot.start_time);
+    const hh = String(start.getHours()).padStart(2, "0");
+    const mm = String(start.getMinutes()).padStart(2, "0");
+    await createHoldRequest({
+      serviceId: selectedService.id,
+      stylistId: slot.stylist_id,
+      date: dateStr,
+      startTime: `${hh}:${mm}`,
+      slot,
+    });
+  }
+
+  function findServiceMatch(text: string): Service | null {
+    const normalized = text.toLowerCase();
+    for (const svc of services) {
+      const name = svc.name.toLowerCase();
+      if (normalized.includes(name)) {
+        return svc;
+      }
+      if (name.includes("men") && normalized.includes("mens haircut")) {
+        return svc;
+      }
+      if (name.includes("women") && normalized.includes("womens haircut")) {
+        return svc;
+      }
+      if (name.includes("beard") && normalized.includes("beard")) {
+        return svc;
+      }
+      if (name.includes("color") && normalized.includes("color")) {
+        return svc;
+      }
+    }
+    return null;
+  }
+
+  function parseDateFromText(text: string): string | null {
+    const normalized = text.toLowerCase();
+    if (normalized.includes("today")) {
+      return toLocalDateInputValue(new Date());
+    }
+    if (normalized.includes("tomorrow")) {
+      return toLocalDateInputValue(new Date(Date.now() + 24 * 60 * 60 * 1000));
+    }
+    const isoMatch = normalized.match(/\b20\d{2}-\d{2}-\d{2}\b/);
+    if (isoMatch) {
+      return isoMatch[0];
+    }
+    const ordinalMatch = normalized.match(/\b(\d{1,2})(st|nd|rd|th)?\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/);
+    if (ordinalMatch) {
+      const day = parseInt(ordinalMatch[1], 10);
+      const monthKey = ordinalMatch[3];
+      const monthMap: Record<string, number> = {
+        jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+        jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+      };
+      const month = monthMap[monthKey];
+      if (month !== undefined) {
+        const now = new Date();
+        let year = now.getFullYear();
+        const candidate = new Date(year, month, day);
+        if (candidate < now) {
+          year += 1;
+        }
+        return toLocalDateInputValue(new Date(year, month, day));
+      }
+    }
+    const monthFirstMatch = normalized.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s*(\d{1,2})(st|nd|rd|th)?\b/);
+    if (monthFirstMatch) {
+      const monthKey = monthFirstMatch[1];
+      const day = parseInt(monthFirstMatch[2], 10);
+      const monthMap: Record<string, number> = {
+        jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+        jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+      };
+      const month = monthMap[monthKey];
+      if (month !== undefined) {
+        const now = new Date();
+        let year = now.getFullYear();
+        const candidate = new Date(year, month, day);
+        if (candidate < now) {
+          year += 1;
+        }
+        return toLocalDateInputValue(new Date(year, month, day));
+      }
+    }
+    return null;
+  }
+
+  function parseTimeFromText(text: string): { hours: number; minutes: number } | null {
+    const normalized = text.toLowerCase().replace(/\./g, "");
+    if (normalized.includes("noon")) {
+      return { hours: 12, minutes: 0 };
+    }
+    if (normalized.includes("midnight")) {
+      return { hours: 0, minutes: 0 };
+    }
+
+    const ampmMatch = normalized.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+    if (ampmMatch) {
+      let hours = parseInt(ampmMatch[1], 10);
+      const minutes = ampmMatch[2] ? parseInt(ampmMatch[2], 10) : 0;
+      const meridiem = ampmMatch[3];
+      if (meridiem === "pm" && hours < 12) hours += 12;
+      if (meridiem === "am" && hours === 12) hours = 0;
+      return { hours, minutes };
+    }
+
+    const militaryMatch = normalized.match(/\b(\d{1,2}):(\d{2})\b/);
+    if (militaryMatch) {
+      const hours = parseInt(militaryMatch[1], 10);
+      const minutes = parseInt(militaryMatch[2], 10);
+      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+        return { hours, minutes };
+      }
+    }
+
+    return null;
+  }
+
+  function parseStylistFromText(text: string): string | null {
+    const normalized = text.toLowerCase();
+    if (normalized.includes("alex")) return "Alex";
+    if (normalized.includes("jamie")) return "Jamie";
+    return null;
+  }
+
+  function matchSlotByTime(
+    slotsToMatch: Slot[],
+    targetTime: { hours: number; minutes: number },
+    stylistName?: string | null
+  ): Slot | null {
+    const timeMatches = slotsToMatch.filter((slot) => {
+      const dt = new Date(slot.start_time);
+      return dt.getHours() === targetTime.hours && dt.getMinutes() === targetTime.minutes;
+    });
+    if (!timeMatches.length) return null;
+    if (stylistName) {
+      const normalized = stylistName.toLowerCase();
+      const stylistMatch = timeMatches.find((slot) =>
+        slot.stylist_name.toLowerCase().includes(normalized)
+      );
+      return stylistMatch || timeMatches[0];
+    }
+    return timeMatches[0];
+  }
+
+  function isSimpleQuestion(text: string) {
+    const normalized = text.toLowerCase();
+    return (
+      normalized.includes("?") ||
+      normalized.includes("price") ||
+      normalized.includes("cost") ||
+      normalized.includes("hours") ||
+      normalized.includes("open") ||
+      normalized.includes("close")
+    );
   }
 
   async function sendMessage(text: string) {
     if (!text.trim() || isLoading) return;
-    handleEmailFromChat(text);
-    handleNameFromChat(text);
+    const extractedEmail = extractEmail(text);
+    const extractedName = extractName(text);
+    if (extractedEmail) {
+      setCustomerEmail(extractedEmail);
+      setTrackEmail(extractedEmail);
+    }
+    if (extractedName) {
+      setCustomerName(extractedName);
+    }
 
     setInputValue("");
     const userMsg: Message = { id: uid(), role: "user", text };
@@ -301,6 +531,113 @@ export default function ChatPage() {
     setIsLoading(true);
 
     try {
+      const normalized = text.toLowerCase();
+      const matchedService = findServiceMatch(text);
+      const parsedDate = parseDateFromText(text);
+      const parsedTime = parseTimeFromText(text);
+      const parsedStylist = parseStylistFromText(text);
+      const wantsConfirm = /confirm|book|schedule|reserve|lock in|finalize/.test(normalized);
+
+      if (matchedService && selectedService?.id !== matchedService.id) {
+        setSelectedService(matchedService);
+      }
+      if (parsedDate) {
+        setDateStr(parsedDate);
+      }
+
+      // Fast-path: if the user typed a clear service/date/time, advance without waiting for LLM
+      if (!isSimpleQuestion(text)) {
+        const serviceForFlow = matchedService ?? selectedService;
+        const dateForFlow = parsedDate ?? dateStr;
+
+        if (serviceForFlow && parsedDate && parsedTime) {
+          const fetchedSlots = await loadSlots(serviceForFlow, dateForFlow, { announce: false });
+          if (!fetchedSlots.length) {
+            appendAssistantMessage(describeSlots(fetchedSlots, dateForFlow));
+            setIsLoading(false);
+            return;
+          }
+
+          const slotMatch = matchSlotByTime(fetchedSlots, parsedTime, parsedStylist);
+          if (slotMatch) {
+            const start = new Date(slotMatch.start_time);
+            const hh = String(start.getHours()).padStart(2, "0");
+            const mm = String(start.getMinutes()).padStart(2, "0");
+            await createHoldRequest({
+              serviceId: serviceForFlow.id,
+              stylistId: slotMatch.stylist_id,
+              date: dateForFlow,
+              startTime: `${hh}:${mm}`,
+              slot: slotMatch,
+              customerName: extractedName || customerName,
+              customerEmail: extractedEmail || customerEmail,
+              announce: !wantsConfirm,
+              autoConfirm: wantsConfirm,
+            });
+            setIsLoading(false);
+            return;
+          }
+
+          appendAssistantMessage("I couldn't find that exact time. Tap a time option to continue.");
+          appendAssistantMessage(describeSlots(fetchedSlots, dateForFlow));
+          setStage("SELECT_SLOT");
+          setIsLoading(false);
+          return;
+        }
+
+        if (stage === "SELECT_SLOT" && selectedService && parsedTime) {
+          const slotMatch = matchSlotByTime(slots, parsedTime, parsedStylist);
+          if (slotMatch) {
+            const start = new Date(slotMatch.start_time);
+            const hh = String(start.getHours()).padStart(2, "0");
+            const mm = String(start.getMinutes()).padStart(2, "0");
+            await createHoldRequest({
+              serviceId: selectedService.id,
+              stylistId: slotMatch.stylist_id,
+              date: dateStr,
+              startTime: `${hh}:${mm}`,
+              slot: slotMatch,
+              customerName: extractedName || customerName,
+              customerEmail: extractedEmail || customerEmail,
+              announce: !wantsConfirm,
+              autoConfirm: wantsConfirm,
+            });
+          } else {
+            appendAssistantMessage("Please tap one of the time options shown.");
+          }
+          setIsLoading(false);
+          return;
+        }
+
+        if (stage === "CONFIRMING" && hold?.booking_id && /confirm|yes|yep|book|finalize/.test(normalized)) {
+          await confirmBooking(hold.booking_id);
+          setIsLoading(false);
+          return;
+        }
+
+        if ((stage === "WELCOME" || stage === "SELECT_SERVICE") && matchedService) {
+          if (parsedDate) {
+            await loadSlots(matchedService, parsedDate, { announce: true });
+          } else {
+            await onSelectService(matchedService);
+          }
+          setIsLoading(false);
+          return;
+        }
+
+        if ((stage === "SELECT_DATE" || stage === "WELCOME" || stage === "SELECT_SERVICE") && serviceForFlow && parsedDate) {
+          await loadSlots(serviceForFlow, parsedDate, { announce: true });
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // Allow free-text parsing: service/date/time can still be parsed downstream by the AI.
+      // Minimal guardrails to keep DONE loop clean.
+      if (!isSimpleQuestion(text) && stage === "DONE") {
+        setStage("SELECT_SERVICE");
+      }
+
       const conversationHistory = [...messages, userMsg].map((m) => ({
         role: m.role,
         content: m.text,
@@ -343,6 +680,11 @@ export default function ChatPage() {
     const params = action.params || {};
 
     switch (action.type) {
+      case "show_services": {
+        setStage("SELECT_SERVICE");
+        appendAssistantMessage(stagePrompts.SELECT_SERVICE);
+        break;
+      }
       case "select_service": {
         const serviceId = params.service_id;
         if (serviceId) {
@@ -350,6 +692,7 @@ export default function ChatPage() {
           const svc = services.find((s) => s.id === numericId);
           if (svc) {
             setSelectedService(svc);
+            setStage("SELECT_DATE");
           }
         }
         break;
@@ -374,9 +717,11 @@ export default function ChatPage() {
         break;
       }
       case "show_slots": {
-        if (params.slots) {
-          setSlots(params.slots as Slot[]);
-          appendAssistantMessage(describeSlots(params.slots as Slot[], dateStr));
+        if (Array.isArray(params.slots)) {
+          const nextSlots = params.slots as Slot[];
+          setSlots(nextSlots);
+          setStage(nextSlots.length ? "SELECT_SLOT" : "SELECT_DATE");
+          appendAssistantMessage(describeSlots(nextSlots, dateStr));
         }
         break;
       }
@@ -386,12 +731,16 @@ export default function ChatPage() {
         break;
       }
       case "hold_slot": {
-        if (params.service_id && params.stylist_id && params.date && params.start_time) {
+        const serviceId = Number(params.service_id);
+        const stylistId = Number(params.stylist_id);
+        const date = typeof params.date === "string" ? params.date : "";
+        const startTime = typeof params.start_time === "string" ? params.start_time : "";
+        if (serviceId && stylistId && date && startTime) {
           await createHoldRequest({
-            serviceId: params.service_id as number,
-            stylistId: params.stylist_id as number,
-            date: params.date as string,
-            startTime: params.start_time as string,
+            serviceId,
+            stylistId,
+            date,
+            startTime,
             customerName: params.customer_name as string | undefined,
             customerEmail: params.customer_email as string | undefined,
           });
@@ -421,6 +770,9 @@ export default function ChatPage() {
     startTime: string;
     customerName?: string;
     customerEmail?: string;
+    slot?: Slot;
+    announce?: boolean;
+    autoConfirm?: boolean;
   }) {
     const svc = services.find((s) => s.id === args.serviceId) || selectedService;
     if (!svc) {
@@ -443,17 +795,21 @@ export default function ChatPage() {
     
     setSelectedService(svc);
     setMode("chat");
-    setMode("chat");
+    const announceHold = args.announce !== false;
+    const autoConfirm = Boolean(args.autoConfirm);
 
     setHoldLoading(true);
     try {
+      setStage("HOLDING");
       const [holdHour, holdMinute] = args.startTime.split(":").map(Number);
-      const urlSlot = slots.find(
-        (slot) =>
-          slot.stylist_id === args.stylistId &&
-          new Date(slot.start_time).getHours() === holdHour &&
-          new Date(slot.start_time).getMinutes() === holdMinute
-      );
+      const urlSlot: Slot | undefined =
+        args.slot ||
+        slots.find(
+          (slot) =>
+            slot.stylist_id === args.stylistId &&
+            new Date(slot.start_time).getHours() === holdHour &&
+            new Date(slot.start_time).getMinutes() === holdMinute
+        );
 
       const payload = {
         service_id: svc.id,
@@ -491,21 +847,29 @@ export default function ChatPage() {
           const dateObj = new Date(`${args.date}T${args.startTime}`);
           setSelectedSlot({
             stylist_id: args.stylistId,
-            stylist_name: "Selected stylist",
+            stylist_name: urlSlot?.stylist_name || "Selected stylist",
             start_time: dateObj.toISOString(),
             end_time: new Date(dateObj.getTime() + (svc.duration_minutes || 30) * 60000).toISOString(),
           });
         }
-        appendAssistantMessage("Got it! I reserved that time. Want me to confirm it?");
+        setStage("CONFIRMING");
+        if (announceHold) {
+          appendAssistantMessage("Slot reserved. Tap Confirm booking to finalize.");
+        }
         // Immediately refresh booking list for this email
         if (email) {
           await trackBookings(email);
         }
+        if (autoConfirm) {
+          await confirmBooking(data.booking_id);
+        }
       } else {
         alert("This slot is no longer available. Please select another.");
+        setStage("SELECT_SLOT");
       }
     } catch {
       alert("Failed to hold slot. Please try again.");
+      setStage("SELECT_SLOT");
     } finally {
       setHoldLoading(false);
     }
@@ -523,6 +887,7 @@ export default function ChatPage() {
       stylistId: selectedSlot.stylist_id,
       date: dateStr,
       startTime: `${hh}:${mm}`,
+      slot: selectedSlot,
     });
   }
 
@@ -540,7 +905,8 @@ export default function ChatPage() {
 
       if (res.ok) {
         setConfirmed(true);
-        appendAssistantMessage("You're all set! Your booking is confirmed.");
+        setStage("DONE");
+        appendAssistantMessage("You're all set. Your booking is confirmed.");
         if (customerEmail.trim()) {
           await trackBookings(customerEmail.trim());
         }
@@ -593,6 +959,7 @@ export default function ChatPage() {
     setConfirmed(false);
     setCustomerName("");
     setCustomerEmail("");
+    setStage("SELECT_SERVICE");
   }
 
   // Generate next 7 days for date selection
@@ -744,21 +1111,67 @@ export default function ChatPage() {
                 </div>
               </div>
 
-              {/* Quick Service Chips */}
-              {messages.length <= 2 && (
+              {/* Guardrailed controls */}
+              {stage === "SELECT_SERVICE" && services.length > 0 && (
                 <div className="px-6 pb-4">
-                  <p className="text-xs text-gray-500 mb-3">Popular services:</p>
+                  <p className="text-xs text-gray-500 mb-3">Choose a service:</p>
                   <div className="flex flex-wrap gap-2">
-                    {services.slice(0, 4).map((svc) => (
+                    {services.map((svc) => (
                       <button
                         key={svc.id}
-                        onClick={() => sendMessage(`I'd like to book a ${svc.name}`)}
+                        onClick={() => onSelectService(svc)}
                         className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
                       >
                         {svc.name}
                       </button>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {stage === "SELECT_DATE" && selectedService && (
+                <div className="px-6 pb-4">
+                  <p className="text-xs text-gray-500 mb-3">Pick a date:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {dateOptions.map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => onSelectDate(opt.value)}
+                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {stage === "SELECT_SLOT" && slots.length > 0 && (
+                <div className="px-6 pb-4">
+                  <p className="text-xs text-gray-500 mb-3">Pick a time:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {slots.slice(0, 8).map((slot) => (
+                      <button
+                        key={`${slot.stylist_id}_${slot.start_time}`}
+                        onClick={() => onSelectSlot(slot)}
+                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                      >
+                        {formatTime(slot.start_time)} · {slot.stylist_name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {stage === "CONFIRMING" && hold && !confirmed && (
+                <div className="px-6 pb-4">
+                  <button
+                    onClick={() => confirmBooking()}
+                    disabled={confirmLoading}
+                    className="w-full py-3 bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white rounded-xl font-semibold transition-all"
+                  >
+                    {confirmLoading ? "Confirming..." : "Confirm booking"}
+                  </button>
                 </div>
               )}
 
