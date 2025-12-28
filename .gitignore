@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 Backend/.venv/
+Backend/venv/
 Backend/.env
 Backend/chat_logs.jsonl
 Backend/uvicorn.log
