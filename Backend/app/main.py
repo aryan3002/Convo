@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from typing import List
@@ -11,10 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .core.db import AsyncSessionLocal, Base, engine, get_session
-from .chat import ChatRequest, chat_with_ai
-from .models import Booking, BookingStatus, Service, Stylist
-from .seed import seed_initial_data
 from .chat import ChatRequest, ChatResponse, chat_with_ai
+from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
+from .models import Booking, BookingStatus, Service, ServiceRule, Shop, Stylist
+from .seed import seed_initial_data
 
 
 settings = get_settings()
@@ -100,6 +101,25 @@ async def fetch_service(session: AsyncSession, service_id: int) -> Service:
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     return service
+
+
+async def fetch_service_by_name(session: AsyncSession, name: str, shop_id: int) -> Service | None:
+    if not name:
+        return None
+    result = await session.execute(
+        select(Service).where(Service.shop_id == shop_id, Service.name.ilike(f"%{name}%"))
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_default_shop(session: AsyncSession) -> Shop:
+    result = await session.execute(select(Shop).where(Shop.name == settings.default_shop_name))
+    shop = result.scalar_one_or_none()
+    if not shop:
+        shop = Shop(name=settings.default_shop_name)
+        session.add(shop)
+        await session.flush()
+    return shop
 
 
 async def fetch_stylist(session: AsyncSession, stylist_id: int) -> Stylist:
@@ -206,6 +226,25 @@ async def list_services(session: AsyncSession = Depends(get_session)):
     ]
 
 
+async def list_services_with_rules(session: AsyncSession, shop_id: int):
+    result = await session.execute(
+        select(Service).where(Service.shop_id == shop_id).order_by(Service.id)
+    )
+    services = result.scalars().all()
+    rules_result = await session.execute(select(ServiceRule))
+    rules = {rule.service_id: rule.rule for rule in rules_result.scalars().all()}
+    return [
+        {
+            "id": svc.id,
+            "name": svc.name,
+            "duration_minutes": svc.duration_minutes,
+            "price_cents": svc.price_cents,
+            "availability_rule": rules.get(svc.id, "none"),
+        }
+        for svc in services
+    ]
+
+
 @app.get("/health")
 async def healthcheck():
     return {"ok": True}
@@ -214,7 +253,292 @@ async def healthcheck():
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(get_session)):
     """AI-powered chat endpoint for booking appointments."""
-    return await chat_with_ai(request.messages, session, request.context)
+    ai_response = await chat_with_ai(request.messages, session, request.context)
+    action = ai_response.action or {}
+    data: dict | None = None
+    reply_override: str | None = None
+
+    action_type = action.get("type")
+    params = action.get("params") or {}
+
+    try:
+        if action_type == "show_services":
+            services = await list_services(session)
+            data = {"services": services}
+        elif action_type == "select_service":
+            service_id = int(params.get("service_id") or 0)
+            if not service_id and params.get("service_name"):
+                svc_name = str(params.get("service_name")).strip().lower()
+                result = await session.execute(select(Service).where(Service.name.ilike(f"%{svc_name}%")))
+                svc = result.scalar_one_or_none()
+            else:
+                svc = await fetch_service(session, service_id) if service_id else None
+            if svc:
+                data = {
+                    "selected_service_id": svc.id,
+                    "selected_service_name": svc.name,
+                }
+        elif action_type == "fetch_availability":
+            service_id = int(params.get("service_id") or 0)
+            if not service_id:
+                service_id = int((request.context or {}).get("selected_service_id") or 0)
+            date_str = params.get("date") or (request.context or {}).get("selected_date")
+            tz_offset = params.get("tz_offset_minutes")
+            if tz_offset is None:
+                tz_offset = (request.context or {}).get("tz_offset_minutes", 0)
+            if service_id and date_str:
+                slots = await get_availability(
+                    service_id=service_id,
+                    date=date_str,
+                    tz_offset_minutes=int(tz_offset),
+                    session=session,
+                )
+                data = {
+                    "slots": slots,
+                    "selected_service_id": service_id,
+                    "selected_date": date_str,
+                }
+                if not slots:
+                    reply_override = f"No openings on {date_str}. Try another date?"
+                else:
+                    reply_override = "Here are a few good options. Tap one to continue."
+        elif action_type == "hold_slot":
+            service_id = int(params.get("service_id") or 0)
+            stylist_id = int(params.get("stylist_id") or 0)
+            date_str = params.get("date") or ""
+            start_time = params.get("start_time") or ""
+            tz_offset = params.get("tz_offset_minutes")
+            if tz_offset is None:
+                tz_offset = (request.context or {}).get("tz_offset_minutes", 0)
+            customer_name = params.get("customer_name") or (request.context or {}).get("customer_name")
+            customer_email = params.get("customer_email") or (request.context or {}).get("customer_email")
+            payload = HoldRequest(
+                service_id=service_id,
+                date=date_str,
+                start_time=start_time,
+                stylist_id=stylist_id,
+                customer_name=customer_name,
+                customer_email=customer_email,
+                tz_offset_minutes=int(tz_offset),
+            )
+            hold_result = await create_hold(payload, session)
+
+            svc = await fetch_service(session, service_id)
+            stylist = await fetch_stylist(session, stylist_id)
+            local_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            hour, minute = map(int, start_time.split(":"))
+            local_time = time(hour=hour, minute=minute)
+            start_at_utc = to_utc_from_local(local_date, local_time, int(tz_offset))
+            end_at_utc = start_at_utc + timedelta(minutes=svc.duration_minutes)
+
+            slot = AvailabilitySlot(
+                stylist_id=stylist.id,
+                stylist_name=stylist.name,
+                start_time=start_at_utc,
+                end_time=end_at_utc,
+            )
+
+            data = {
+                "hold": hold_result.model_dump(),
+                "selected_service_id": service_id,
+                "selected_date": date_str,
+                "selected_slot": slot.model_dump(),
+            }
+            reply_override = "Slot reserved. Tap Confirm booking to finalize."
+        elif action_type == "confirm_booking":
+            booking_id = params.get("booking_id")
+            if not booking_id:
+                booking_id = (request.context or {}).get("held_slot", {}).get("booking_id")
+            if booking_id:
+                confirm_result = await confirm_booking(
+                    ConfirmRequest(booking_id=uuid.UUID(str(booking_id))),
+                    session,
+                )
+                data = {"confirmed": confirm_result.model_dump()}
+                reply_override = "You're all set. Your booking is confirmed."
+    except HTTPException as exc:
+        return ChatResponse(reply=str(exc.detail), action=None, data=None)
+    except Exception:
+        return ChatResponse(reply="I had trouble completing that step. Please try again.", action=None, data=None)
+
+    return ChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
+
+
+@app.post("/owner/chat", response_model=OwnerChatResponse)
+async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession = Depends(get_session)):
+    ai_response = await owner_chat_with_ai(request.messages, session)
+    action = ai_response.action or {}
+    data: dict | None = None
+    reply_override: str | None = None
+
+    action_type = action.get("type")
+    params = action.get("params") or {}
+
+    shop = await get_default_shop(session)
+
+    def parse_price_cents(raw: object) -> int:
+        if raw is None:
+            return 0
+        if isinstance(raw, (int, float)):
+            return int(float(raw) * 100) if float(raw) < 1000 else int(raw)
+        if isinstance(raw, str):
+            digits = re.sub(r"[^\d.]", "", raw)
+            if not digits:
+                return 0
+            value = float(digits)
+            return int(value * 100) if value < 1000 else int(value)
+        return 0
+
+    def parse_duration_minutes(raw: object) -> int:
+        if raw is None:
+            return 0
+        if isinstance(raw, (int, float)):
+            return int(raw)
+        if isinstance(raw, str):
+            digits = re.sub(r"[^\d]", "", raw)
+            return int(digits) if digits else 0
+        return 0
+
+    async def resolve_service() -> Service | None:
+        service_id = params.get("service_id")
+        if service_id:
+            try:
+                return await fetch_service(session, int(service_id))
+            except HTTPException:
+                return None
+        service_name = str(params.get("service_name") or params.get("name") or "").strip()
+        if service_name:
+            return await fetch_service_by_name(session, service_name, shop.id)
+        return None
+
+    try:
+        if action_type == "list_services":
+            data = {"services": await list_services_with_rules(session, shop.id)}
+            reply_override = "Here are your current services."
+
+        elif action_type == "create_service":
+            name = str(params.get("name") or "").strip()
+            duration = parse_duration_minutes(params.get("duration_minutes"))
+            price_cents = parse_price_cents(params.get("price_cents"))
+            rule = str(params.get("availability_rule") or "none").strip().lower()
+
+            if not name:
+                return OwnerChatResponse(reply="What's the service name?", action=None)
+            if duration < 5 or duration > 240:
+                return OwnerChatResponse(reply="Duration should be between 5 and 240 minutes.", action=None)
+            if price_cents <= 0 or price_cents > 500000:
+                return OwnerChatResponse(reply="Price should be between $1 and $5,000.", action=None)
+            if rule not in SUPPORTED_RULES:
+                return OwnerChatResponse(
+                    reply="Rule must be weekends_only, weekdays_only, weekday_evenings, or none.",
+                    action=None,
+                )
+
+            existing = await fetch_service_by_name(session, name, shop.id)
+            if existing:
+                return OwnerChatResponse(reply="That service already exists.", action=None)
+
+            service = Service(
+                shop_id=shop.id,
+                name=name,
+                duration_minutes=duration,
+                price_cents=price_cents,
+            )
+            session.add(service)
+            await session.flush()
+
+            if rule != "none":
+                session.add(ServiceRule(service_id=service.id, rule=rule))
+
+            await session.commit()
+            await session.refresh(service)
+            data = {
+                "service": {
+                    "id": service.id,
+                    "name": service.name,
+                    "duration_minutes": service.duration_minutes,
+                    "price_cents": service.price_cents,
+                    "availability_rule": rule,
+                },
+                "services": await list_services_with_rules(session, shop.id),
+            }
+            reply_override = f"Done. {service.name} added."
+
+        elif action_type == "update_service_price":
+            service = await resolve_service()
+            if not service:
+                return OwnerChatResponse(reply="Which service should I update?", action=None)
+            price_cents = parse_price_cents(params.get("price_cents"))
+            if price_cents <= 0 or price_cents > 500000:
+                return OwnerChatResponse(reply="Price should be between $1 and $5,000.", action=None)
+            service.price_cents = price_cents
+            await session.commit()
+            data = {"services": await list_services_with_rules(session, shop.id)}
+            reply_override = f"Updated {service.name} to ${price_cents/100:.2f}."
+
+        elif action_type == "update_service_duration":
+            service = await resolve_service()
+            if not service:
+                return OwnerChatResponse(reply="Which service should I update?", action=None)
+            duration = parse_duration_minutes(params.get("duration_minutes"))
+            if duration < 5 or duration > 240:
+                return OwnerChatResponse(reply="Duration should be between 5 and 240 minutes.", action=None)
+            service.duration_minutes = duration
+            await session.commit()
+            data = {"services": await list_services_with_rules(session, shop.id)}
+            reply_override = f"Updated {service.name} to {duration} minutes."
+
+        elif action_type == "remove_service":
+            service = await resolve_service()
+            if not service:
+                return OwnerChatResponse(reply="Which service should I remove?", action=None)
+
+            result = await session.execute(select(Booking).where(Booking.service_id == service.id))
+            if result.scalar_one_or_none():
+                return OwnerChatResponse(
+                    reply="That service has bookings. Remove bookings first or keep it.",
+                    action=None,
+                )
+
+            rule_result = await session.execute(select(ServiceRule).where(ServiceRule.service_id == service.id))
+            rule = rule_result.scalar_one_or_none()
+            if rule:
+                await session.delete(rule)
+            await session.delete(service)
+            await session.commit()
+            data = {"services": await list_services_with_rules(session, shop.id)}
+            reply_override = "Service removed."
+
+        elif action_type == "set_service_rule":
+            service = await resolve_service()
+            if not service:
+                return OwnerChatResponse(reply="Which service should I update?", action=None)
+            rule = str(params.get("availability_rule") or "").strip().lower()
+            if rule not in SUPPORTED_RULES:
+                return OwnerChatResponse(
+                    reply="Rule must be weekends_only, weekdays_only, weekday_evenings, or none.",
+                    action=None,
+                )
+            result = await session.execute(select(ServiceRule).where(ServiceRule.service_id == service.id))
+            existing = result.scalar_one_or_none()
+            if rule == "none":
+                if existing:
+                    await session.delete(existing)
+            else:
+                if existing:
+                    existing.rule = rule
+                else:
+                    session.add(ServiceRule(service_id=service.id, rule=rule))
+            await session.commit()
+            data = {"services": await list_services_with_rules(session, shop.id)}
+            reply_override = f"Rule updated for {service.name}."
+
+    except HTTPException as exc:
+        return OwnerChatResponse(reply=str(exc.detail), action=None)
+    except Exception:
+        return OwnerChatResponse(reply="I couldn't complete that update. Please try again.", action=None)
+
+    return OwnerChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
 
 
 @app.get("/availability")
@@ -451,10 +775,3 @@ async def track_bookings(email: str, session: AsyncSession = Depends(get_session
         ))
     
     return response
-
-
-@app.post("/chat")
-async def chat(payload: ChatRequest, session: AsyncSession = Depends(get_session)):
-    """Chat endpoint that delegates to the AI booking assistant."""
-    chat_response = await chat_with_ai(payload.messages, session, context=payload.context)
-    return chat_response.model_dump()

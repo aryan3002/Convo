@@ -114,3 +114,14 @@ class Booking(Base):
     @staticmethod
     def now_utc() -> datetime:
         return datetime.now(timezone.utc)
+
+
+class ServiceRule(Base):
+    __tablename__ = "service_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id"), nullable=False, unique=True, index=True)
+    rule: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
