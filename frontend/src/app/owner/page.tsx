@@ -146,13 +146,14 @@ export default function OwnerPage() {
     if (data.stylists) {
       setStylists(data.stylists);
     }
-    if (data.updated_service) {
+    if (data?.updated_service) {
+      const updated = data.updated_service;
       setMessages((prev) => [
         ...prev,
         {
           id: uid(),
           role: "assistant",
-          text: `Updated ${data.updated_service.name} to ${formatMoney(data.updated_service.price_cents)}.`,
+          text: `Updated ${updated.name} to ${formatMoney(updated.price_cents)}.`,
         },
       ]);
     }
