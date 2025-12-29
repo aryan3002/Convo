@@ -115,12 +115,12 @@ export default function OwnerPage() {
 
   const quickActions = useMemo(
     () => [
-      "Add Keratin Treatment: 90 minutes, $200",
-      "Add stylist Taylor 10am-6pm",
-      "Increase Men's Haircut price to $40",
-      "Remove Beard Trim",
-      "Alex is off next Tuesday 2–6pm",
-      "Jamie specializes in color + balayage",
+      "Add a service",
+      "Change price of a service",
+      "Remove a service",
+      "Add a stylist",
+      "Set stylist off time",
+      "Add a specialization",
     ],
     []
   );
@@ -350,7 +350,7 @@ export default function OwnerPage() {
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 grid lg:grid-cols-[1.2fr_0.8fr] gap-6">
         <section className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-          <div className="space-y-4">
+          <div className="space-y-4 max-h-96 overflow-y-auto">
             {messages.map((msg) => (
               <div
                 key={msg.id}
