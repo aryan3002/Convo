@@ -79,6 +79,45 @@ class ConfirmResponse(BaseModel):
     status: BookingStatus
 
 
+class OwnerScheduleBooking(BaseModel):
+    id: uuid.UUID
+    stylist_id: int
+    stylist_name: str
+    service_name: str
+    customer_name: str | None
+    status: BookingStatus
+    start_time: str
+    end_time: str
+
+
+class OwnerScheduleTimeOff(BaseModel):
+    id: int
+    stylist_id: int
+    stylist_name: str
+    start_time: str
+    end_time: str
+    reason: str | None = None
+
+
+class OwnerScheduleResponse(BaseModel):
+    date: str
+    stylists: list[dict]
+    bookings: list[OwnerScheduleBooking]
+    time_off: list[OwnerScheduleTimeOff]
+
+
+class OwnerRescheduleRequest(BaseModel):
+    booking_id: uuid.UUID
+    stylist_id: int
+    date: str
+    start_time: str
+    tz_offset_minutes: int = 0
+
+
+class OwnerCancelRequest(BaseModel):
+    booking_id: uuid.UUID
+
+
 def parse_working_hours() -> tuple[time, time]:
     start_hour, start_minute = map(int, settings.working_hours_start.split(":"))
     end_hour, end_minute = map(int, settings.working_hours_end.split(":"))
@@ -115,6 +154,11 @@ def to_utc_from_local_zone(local_date: date, local_time: time) -> datetime:
     tz = ZoneInfo(settings.chat_timezone)
     local_dt = datetime.combine(local_date, local_time).replace(tzinfo=tz)
     return local_dt.astimezone(timezone.utc)
+
+
+def to_local_time_str(dt: datetime, tz_offset_minutes: int) -> str:
+    tz = timezone(timedelta(minutes=tz_offset_minutes))
+    return dt.astimezone(tz).strftime("%H:%M")
 
 
 async def fetch_service(session: AsyncSession, service_id: int) -> Service:
@@ -158,6 +202,7 @@ async def get_active_bookings_for_stylist(
     window_start: datetime,
     window_end: datetime,
     now: datetime,
+    exclude_booking_id: uuid.UUID | None = None,
 ) -> List[BlockedTime]:
     result = await session.execute(
         select(Booking)
@@ -174,6 +219,8 @@ async def get_active_bookings_for_stylist(
     # Filter out expired holds; keep others
     active: list[Booking] = []
     for booking in bookings:
+        if exclude_booking_id and booking.id == exclude_booking_id:
+            continue
         if booking.status == BookingStatus.HOLD:
             if booking.hold_expires_at_utc and booking.hold_expires_at_utc > now:
                 active.append(booking)
@@ -1262,6 +1309,146 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
         return OwnerChatResponse(reply="I couldn't complete that update. Please try again.", action=None)
 
     return OwnerChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
+
+
+@app.get("/owner/schedule", response_model=OwnerScheduleResponse)
+async def owner_schedule(
+    date: str,
+    tz_offset_minutes: int = 0,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        local_date = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format")
+
+    shop = await get_default_shop(session)
+    stylists = await list_stylists_with_details(session, shop.id)
+
+    day_start = to_utc_from_local(local_date, time(0, 0), tz_offset_minutes)
+    day_end = to_utc_from_local(local_date + timedelta(days=1), time(0, 0), tz_offset_minutes)
+
+    booking_result = await session.execute(
+        select(Booking, Service, Stylist)
+        .join(Service, Service.id == Booking.service_id)
+        .join(Stylist, Stylist.id == Booking.stylist_id)
+        .where(
+            Booking.start_at_utc < day_end,
+            Booking.end_at_utc > day_start,
+            Booking.status.in_([BookingStatus.HOLD, BookingStatus.CONFIRMED]),
+        )
+        .order_by(Booking.start_at_utc)
+    )
+    bookings = []
+    for booking, service, stylist in booking_result.all():
+        bookings.append(
+            OwnerScheduleBooking(
+                id=booking.id,
+                stylist_id=stylist.id,
+                stylist_name=stylist.name,
+                service_name=service.name,
+                customer_name=booking.customer_name,
+                status=booking.status,
+                start_time=to_local_time_str(booking.start_at_utc, tz_offset_minutes),
+                end_time=to_local_time_str(booking.end_at_utc, tz_offset_minutes),
+            )
+        )
+
+    time_off_result = await session.execute(
+        select(TimeOffBlock, Stylist)
+        .join(Stylist, Stylist.id == TimeOffBlock.stylist_id)
+        .where(
+            TimeOffBlock.start_at_utc < day_end,
+            TimeOffBlock.end_at_utc > day_start,
+        )
+        .order_by(TimeOffBlock.start_at_utc)
+    )
+    time_off = []
+    for block, stylist in time_off_result.all():
+        time_off.append(
+            OwnerScheduleTimeOff(
+                id=block.id,
+                stylist_id=stylist.id,
+                stylist_name=stylist.name,
+                start_time=to_local_time_str(block.start_at_utc, tz_offset_minutes),
+                end_time=to_local_time_str(block.end_at_utc, tz_offset_minutes),
+                reason=block.reason,
+            )
+        )
+
+    return OwnerScheduleResponse(
+        date=local_date.strftime("%Y-%m-%d"),
+        stylists=stylists,
+        bookings=bookings,
+        time_off=time_off,
+    )
+
+
+@app.post("/owner/bookings/reschedule")
+async def owner_reschedule_booking(
+    payload: OwnerRescheduleRequest, session: AsyncSession = Depends(get_session)
+):
+    result = await session.execute(select(Booking).where(Booking.id == payload.booking_id))
+    booking = result.scalar_one_or_none()
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+
+    service = await fetch_service(session, booking.service_id)
+    stylist = await fetch_stylist(session, payload.stylist_id)
+
+    try:
+        local_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format")
+
+    try:
+        hour, minute = map(int, payload.start_time.split(":"))
+        local_time = time(hour=hour, minute=minute)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid start_time")
+
+    if not is_working_day(local_date):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Outside working days")
+
+    working_start, working_end = get_stylist_hours(stylist)
+    duration = timedelta(minutes=service.duration_minutes)
+    local_end_time = (datetime.combine(local_date, local_time) + duration).time()
+    if not (working_start <= local_time < working_end) or local_end_time > working_end:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Outside working hours")
+
+    start_at_utc = to_utc_from_local(local_date, local_time, payload.tz_offset_minutes)
+    end_at_utc = start_at_utc + duration
+    now = datetime.now(timezone.utc)
+
+    blocked = await get_active_bookings_for_stylist(
+        session,
+        stylist.id,
+        start_at_utc,
+        end_at_utc,
+        now,
+        exclude_booking_id=booking.id,
+    )
+    if any(overlap(start_at_utc, end_at_utc, b.start_at_utc, b.end_at_utc) for b in blocked):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Slot not available")
+
+    booking.stylist_id = stylist.id
+    booking.start_at_utc = start_at_utc
+    booking.end_at_utc = end_at_utc
+    await session.commit()
+    return {"ok": True}
+
+
+@app.post("/owner/bookings/cancel")
+async def owner_cancel_booking(
+    payload: OwnerCancelRequest, session: AsyncSession = Depends(get_session)
+):
+    result = await session.execute(select(Booking).where(Booking.id == payload.booking_id))
+    booking = result.scalar_one_or_none()
+    if not booking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+    await session.delete(booking)
+    await session.commit()
+    return {"ok": True}
 
 
 @app.get("/availability")
