@@ -227,6 +227,13 @@ export default function OwnerPage() {
           { id: uid(), role: "assistant", text: data.reply },
         ]);
         applyOwnerData(data.data);
+        // Auto-refresh services or stylists if the message likely modified them
+        if (text.toLowerCase().includes('service') || text.toLowerCase().includes('add') || text.toLowerCase().includes('remove') || text.toLowerCase().includes('change') || text.toLowerCase().includes('price')) {
+          sendSilentMessage("List services");
+        }
+        if (text.toLowerCase().includes('stylist') || text.toLowerCase().includes('add') || text.toLowerCase().includes('set') || text.toLowerCase().includes('specialization')) {
+          sendSilentMessage("List stylists");
+        }
       } else {
         throw new Error("API error");
       }

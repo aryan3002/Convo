@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Role = "user" | "assistant" | "system";
 
@@ -117,6 +118,8 @@ export default function ChatPage() {
 
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+
+  const router = useRouter();
 
   const [services, setServices] = useState<Service[]>([]);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
@@ -1239,26 +1242,34 @@ export default function ChatPage() {
               <h1 className="text-xl font-semibold text-gray-900">Bishops Tempe</h1>
               <p className="text-sm text-gray-500">Premium Hair Studio</p>
             </div>
-            <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
+                <button
+                  onClick={() => setMode("chat")}
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                    mode === "chat"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  AI Assistant
+                </button>
+                <button
+                  onClick={() => setMode("track")}
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                    mode === "track"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  Bookings
+                </button>
+              </div>
               <button
-                onClick={() => setMode("chat")}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                  mode === "chat"
-                    ? "bg-white text-gray-900 shadow-sm"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
+                onClick={() => router.push('/owner')}
+                className="px-4 py-2 bg-gray-900 text-white rounded-full text-sm font-medium hover:bg-gray-800 transition-colors"
               >
-                AI Assistant
-              </button>
-              <button
-                onClick={() => setMode("track")}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                  mode === "track"
-                    ? "bg-white text-gray-900 shadow-sm"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                Bookings
+                Owner
               </button>
             </div>
           </div>
