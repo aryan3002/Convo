@@ -37,6 +37,7 @@ type Stage =
   | "SELECT_SERVICE"
   | "SELECT_DATE"
   | "SELECT_SLOT"
+  | "SELECT_STYLIST"
   | "HOLDING"
   | "CONFIRMING"
   | "DONE";
@@ -123,6 +124,7 @@ export default function ChatPage() {
   const [slots, setSlots] = useState<Slot[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
+  const [selectedTime, setSelectedTime] = useState<string | null>(null); // Time string like "10:00 AM"
 
   const [hold, setHold] = useState<HoldResponse | null>(null);
   const [holdLoading, setHoldLoading] = useState(false);
@@ -139,6 +141,7 @@ export default function ChatPage() {
   const [trackError, setTrackError] = useState("");
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const pendingSlotRef = useRef<Slot | null>(null); // Store slot while waiting for email
 
   const tzOffset = useMemo(() => -new Date().getTimezoneOffset(), []);
 
@@ -147,6 +150,7 @@ export default function ChatPage() {
     SELECT_SERVICE: "Please choose a service below.",
     SELECT_DATE: "Pick a date below to see times.",
     SELECT_SLOT: "Here are a few good options. Tap one to continue.",
+    SELECT_STYLIST: "Which stylist would you prefer?",
     HOLDING: "One moment while I reserve that.",
     CONFIRMING: "Tap Confirm booking to finalize.",
     DONE: "You are all set. Anything else I can help with?",
@@ -154,6 +158,10 @@ export default function ChatPage() {
 
   const appendAssistantMessage = (text: string) => {
     setMessages((prev) => [...prev, { id: uid(), role: "assistant", text }]);
+  };
+
+  const appendUserMessage = (text: string) => {
+    setMessages((prev) => [...prev, { id: uid(), role: "user", text }]);
   };
 
   const handleEmailFromChat = (text: string) => {
@@ -261,13 +269,16 @@ export default function ChatPage() {
   async function loadSlots(
     service: Service,
     date: string,
-    options?: { announce?: boolean }
+    options?: { announce?: boolean; setStageToSlot?: boolean }
   ): Promise<Slot[]> {
     setDateStr(date);
     setSlotsLoading(true);
     setSlots([]);
     setSelectedSlot(null);
-    setStage("SELECT_SLOT");
+    // Only set stage to SELECT_SLOT if not explicitly disabled
+    if (options?.setStageToSlot !== false) {
+      setStage("SELECT_SLOT");
+    }
     let fetchedSlots: Slot[] = [];
     try {
       const url = new URL(`${API_BASE}/availability`);
@@ -279,7 +290,7 @@ export default function ChatPage() {
         const data = await res.json();
         fetchedSlots = data;
         setSlots(data);
-        if (!data.length) {
+        if (!data.length && options?.setStageToSlot !== false) {
           setStage("SELECT_DATE");
         }
         if (options?.announce) {
@@ -288,7 +299,9 @@ export default function ChatPage() {
       }
     } catch (e) {
       console.error("Failed to load slots:", e);
-      setStage("SELECT_DATE");
+      if (options?.setStageToSlot !== false) {
+        setStage("SELECT_DATE");
+      }
     } finally {
       setSlotsLoading(false);
     }
@@ -335,12 +348,17 @@ export default function ChatPage() {
   }
 
   async function onSelectService(svc: Service) {
+    appendUserMessage(svc.name);
     setSelectedService(svc);
     setStage("SELECT_DATE");
     appendAssistantMessage(`Great choice. Pick a date below for your ${svc.name}.`);
   }
 
   async function onSelectDate(date: string) {
+    // Show user's selection in chat
+    const dateLabel = formatDateLabel(date);
+    appendUserMessage(dateLabel);
+    
     if (!selectedService) {
       appendAssistantMessage(stagePrompts.SELECT_SERVICE);
       return;
@@ -348,11 +366,50 @@ export default function ChatPage() {
     await loadSlots(selectedService, date, { announce: true });
   }
 
-  async function onSelectSlot(slot: Slot) {
+  // When user clicks a time slot button (time only, no stylist yet)
+  function onSelectTime(timeStr: string) {
+    appendUserMessage(timeStr);
+    setSelectedTime(timeStr);
+    // Find stylists available at this time
+    const stylistsAtTime = slots.filter((s) => formatTime(s.start_time) === timeStr);
+    if (stylistsAtTime.length === 1) {
+      // Only one stylist available, proceed directly
+      onSelectSlotWithStylist(stylistsAtTime[0]);
+    } else {
+      // Multiple stylists, ask user to choose
+      setStage("SELECT_STYLIST");
+      appendAssistantMessage(`Great! ${timeStr} works. Who would you like as your stylist?`);
+    }
+  }
+
+  // When user clicks a stylist button after selecting time
+  function onSelectStylist(stylistId: number, stylistName: string) {
+    appendUserMessage(stylistName);
+    if (!selectedTime) return;
+    const slot = slots.find(
+      (s) => formatTime(s.start_time) === selectedTime && s.stylist_id === stylistId
+    );
+    if (slot) {
+      onSelectSlotWithStylist(slot);
+    }
+  }
+
+  // Renamed from onSelectSlot to be clearer
+  async function onSelectSlotWithStylist(slot: Slot) {
     if (!selectedService) {
       appendAssistantMessage(stagePrompts.SELECT_SERVICE);
       return;
     }
+    
+    // Check if we have email - if not, ask for it
+    if (!customerEmail.trim()) {
+      setSelectedSlot(slot);
+      pendingSlotRef.current = slot; // Store in ref for immediate access
+      setStage("HOLDING");
+      appendAssistantMessage("I need your email address to hold the slot. What's your email?");
+      return;
+    }
+    
     setSelectedSlot(slot);
     setStage("HOLDING");
     const start = new Date(slot.start_time);
@@ -476,6 +533,13 @@ export default function ChatPage() {
 
   function parseStylistFromText(text: string): string | null {
     const normalized = text.toLowerCase();
+    // Check against actual stylist names from current slots
+    for (const slot of slots) {
+      if (normalized.includes(slot.stylist_name.toLowerCase())) {
+        return slot.stylist_name;
+      }
+    }
+    // Fallback common names
     if (normalized.includes("alex")) return "Alex";
     if (normalized.includes("jamie")) return "Jamie";
     return null;
@@ -496,9 +560,107 @@ export default function ChatPage() {
       const stylistMatch = timeMatches.find((slot) =>
         slot.stylist_name.toLowerCase().includes(normalized)
       );
-      return stylistMatch || timeMatches[0];
+      return stylistMatch || null; // Return null if stylist not found, don't default
     }
     return timeMatches[0];
+  }
+
+  // Get all slots matching a time (for stylist selection)
+  function getSlotsAtTime(
+    slotsToMatch: Slot[],
+    targetTime: { hours: number; minutes: number }
+  ): Slot[] {
+    return slotsToMatch.filter((slot) => {
+      const dt = new Date(slot.start_time);
+      return dt.getHours() === targetTime.hours && dt.getMinutes() === targetTime.minutes;
+    });
+  }
+
+  // Handle time selection from chat (not button click) - follows step-by-step flow
+  async function handleTimeFromChat(
+    slotsToCheck: Slot[],
+    parsedTime: { hours: number; minutes: number },
+    parsedStylist: string | null,
+    extractedEmail: string | null,
+    extractedName: string | null
+  ): Promise<boolean> {
+    const timeStr = formatTime(
+      new Date(2000, 0, 1, parsedTime.hours, parsedTime.minutes).toISOString()
+    );
+    setSelectedTime(timeStr);
+    
+    const slotsAtTime = getSlotsAtTime(slotsToCheck, parsedTime);
+    if (!slotsAtTime.length) {
+      appendAssistantMessage(`No availability at ${timeStr}. Please pick another time.`);
+      setStage("SELECT_SLOT");
+      return true;
+    }
+
+    // If user specified a stylist, try to match
+    if (parsedStylist) {
+      const matchedSlot = matchSlotByTime(slotsToCheck, parsedTime, parsedStylist);
+      if (matchedSlot) {
+        // Stylist matched, proceed to email
+        return await handleStylistSelected(matchedSlot, extractedEmail, extractedName);
+      } else {
+        // Stylist not available at this time
+        appendAssistantMessage(`${parsedStylist} isn't available at ${timeStr}. Who would you like instead?`);
+        setStage("SELECT_STYLIST");
+        return true;
+      }
+    }
+
+    // Multiple stylists at this time? Ask user to choose
+    if (slotsAtTime.length > 1) {
+      const stylistNames = slotsAtTime.map(s => s.stylist_name).join(" or ");
+      appendAssistantMessage(`${timeStr} works! Would you prefer ${stylistNames}?`);
+      setStage("SELECT_STYLIST");
+      return true;
+    }
+
+    // Only one stylist, proceed to email check
+    return await handleStylistSelected(slotsAtTime[0], extractedEmail, extractedName);
+  }
+
+  // Handle when stylist is determined (either by user or auto-selected)
+  async function handleStylistSelected(
+    slot: Slot,
+    extractedEmail: string | null,
+    extractedName: string | null
+  ): Promise<boolean> {
+    setSelectedSlot(slot);
+    pendingSlotRef.current = slot;
+
+    const email = extractedEmail || customerEmail.trim();
+    const name = extractedName || customerName.trim();
+
+    if (!email) {
+      setStage("HOLDING");
+      appendAssistantMessage(`Great, ${slot.stylist_name} at ${formatTime(slot.start_time)}. What's your email to hold this slot?`);
+      return true;
+    }
+
+    // Have email, proceed to hold
+    if (!selectedService) {
+      appendAssistantMessage("Please select a service first.");
+      return true;
+    }
+
+    const start = new Date(slot.start_time);
+    const hh = String(start.getHours()).padStart(2, "0");
+    const mm = String(start.getMinutes()).padStart(2, "0");
+    
+    setStage("HOLDING");
+    await createHoldRequest({
+      serviceId: selectedService.id,
+      stylistId: slot.stylist_id,
+      date: dateStr,
+      startTime: `${hh}:${mm}`,
+      slot,
+      customerEmail: email,
+      customerName: name || "Guest",
+    });
+    return true;
   }
 
   function isSimpleQuestion(text: string) {
@@ -531,6 +693,26 @@ export default function ChatPage() {
     setIsLoading(true);
 
     try {
+      // If we're waiting for email to hold a slot and user just provided email
+      const slotToHold = pendingSlotRef.current || selectedSlot;
+      if (stage === "HOLDING" && extractedEmail && slotToHold && selectedService) {
+        const start = new Date(slotToHold.start_time);
+        const hh = String(start.getHours()).padStart(2, "0");
+        const mm = String(start.getMinutes()).padStart(2, "0");
+        pendingSlotRef.current = null; // Clear the ref
+        await createHoldRequest({
+          serviceId: selectedService.id,
+          stylistId: slotToHold.stylist_id,
+          date: dateStr,
+          startTime: `${hh}:${mm}`,
+          slot: slotToHold,
+          customerEmail: extractedEmail,
+          customerName: extractedName || customerName,
+        });
+        setIsLoading(false);
+        return;
+      }
+
       const normalized = text.toLowerCase();
       const matchedService = findServiceMatch(text);
       const parsedDate = parseDateFromText(text);
@@ -550,63 +732,48 @@ export default function ChatPage() {
         const serviceForFlow = matchedService ?? selectedService;
         const dateForFlow = parsedDate ?? dateStr;
 
+        // User provided service + date + time (e.g., "haircut 2pm Jan 1")
         if (serviceForFlow && parsedDate && parsedTime) {
-          const fetchedSlots = await loadSlots(serviceForFlow, dateForFlow, { announce: false });
+          setSelectedService(serviceForFlow);
+          // Don't set stage to SELECT_SLOT since we're handling time directly
+          const fetchedSlots = await loadSlots(serviceForFlow, dateForFlow, { announce: false, setStageToSlot: false });
           if (!fetchedSlots.length) {
             appendAssistantMessage(describeSlots(fetchedSlots, dateForFlow));
+            setStage("SELECT_DATE");
             setIsLoading(false);
             return;
           }
 
-          const slotMatch = matchSlotByTime(fetchedSlots, parsedTime, parsedStylist);
-          if (slotMatch) {
-            const start = new Date(slotMatch.start_time);
-            const hh = String(start.getHours()).padStart(2, "0");
-            const mm = String(start.getMinutes()).padStart(2, "0");
-            await createHoldRequest({
-              serviceId: serviceForFlow.id,
-              stylistId: slotMatch.stylist_id,
-              date: dateForFlow,
-              startTime: `${hh}:${mm}`,
-              slot: slotMatch,
-              customerName: extractedName || customerName,
-              customerEmail: extractedEmail || customerEmail,
-              announce: !wantsConfirm,
-              autoConfirm: wantsConfirm,
-            });
+          // Use step-by-step flow: Time → Stylist → Email
+          const handled = await handleTimeFromChat(fetchedSlots, parsedTime, parsedStylist, extractedEmail, extractedName);
+          if (handled) {
             setIsLoading(false);
             return;
           }
-
-          appendAssistantMessage("I couldn't find that exact time. Tap a time option to continue.");
-          appendAssistantMessage(describeSlots(fetchedSlots, dateForFlow));
-          setStage("SELECT_SLOT");
-          setIsLoading(false);
-          return;
         }
 
+        // User in SELECT_SLOT stage and typed a time (e.g., "2 PM")
         if (stage === "SELECT_SLOT" && selectedService && parsedTime) {
-          const slotMatch = matchSlotByTime(slots, parsedTime, parsedStylist);
-          if (slotMatch) {
-            const start = new Date(slotMatch.start_time);
-            const hh = String(start.getHours()).padStart(2, "0");
-            const mm = String(start.getMinutes()).padStart(2, "0");
-            await createHoldRequest({
-              serviceId: selectedService.id,
-              stylistId: slotMatch.stylist_id,
-              date: dateStr,
-              startTime: `${hh}:${mm}`,
-              slot: slotMatch,
-              customerName: extractedName || customerName,
-              customerEmail: extractedEmail || customerEmail,
-              announce: !wantsConfirm,
-              autoConfirm: wantsConfirm,
-            });
-          } else {
-            appendAssistantMessage("Please tap one of the time options shown.");
+          const handled = await handleTimeFromChat(slots, parsedTime, parsedStylist, extractedEmail, extractedName);
+          if (handled) {
+            setIsLoading(false);
+            return;
           }
-          setIsLoading(false);
-          return;
+        }
+
+        // User in SELECT_STYLIST stage and typed a stylist name
+        if (stage === "SELECT_STYLIST" && selectedTime && parsedStylist) {
+          const parsedTimeObj = parseTimeFromText(selectedTime);
+          if (parsedTimeObj) {
+            const matchedSlot = matchSlotByTime(slots, parsedTimeObj, parsedStylist);
+            if (matchedSlot) {
+              const handled = await handleStylistSelected(matchedSlot, extractedEmail, extractedName);
+              if (handled) {
+                setIsLoading(false);
+                return;
+              }
+            }
+          }
         }
 
         if (stage === "CONFIRMING" && hold?.booking_id && /confirm|yes|yep|book|finalize/.test(normalized)) {
@@ -847,7 +1014,7 @@ export default function ChatPage() {
           const dateObj = new Date(`${args.date}T${args.startTime}`);
           setSelectedSlot({
             stylist_id: args.stylistId,
-            stylist_name: urlSlot?.stylist_name || "Selected stylist",
+            stylist_name: "Selected stylist",
             start_time: dateObj.toISOString(),
             end_time: new Date(dateObj.getTime() + (svc.duration_minutes || 30) * 60000).toISOString(),
           });
@@ -864,11 +1031,11 @@ export default function ChatPage() {
           await confirmBooking(data.booking_id);
         }
       } else {
-        alert("This slot is no longer available. Please select another.");
+        appendAssistantMessage("This slot is no longer available. Please pick another time.");
         setStage("SELECT_SLOT");
       }
     } catch {
-      alert("Failed to hold slot. Please try again.");
+      appendAssistantMessage("I had trouble reserving that slot. Please try again or pick another time.");
       setStage("SELECT_SLOT");
     } finally {
       setHoldLoading(false);
@@ -981,61 +1148,89 @@ export default function ChatPage() {
     return dates;
   }, []);
 
-  // Confirmation success screen
-  if (confirmed) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50 flex items-center justify-center p-4">
-        <div className="max-w-md w-full text-center animate-fadeIn">
-          <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
-            <svg className="w-10 h-10 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h1 className="text-3xl font-semibold text-gray-900 mb-2">Booking Confirmed!</h1>
-          <p className="text-gray-600 mb-8">
-            We have sent a confirmation to your email. See you soon!
-          </p>
-          <div className="bg-white rounded-2xl shadow-lg p-6 text-left mb-8">
-            <div className="space-y-4">
+  // Confirmation success popup (dismissible)
+  const [showConfirmationPopup, setShowConfirmationPopup] = useState(false);
+
+  // Show popup when confirmed
+  React.useEffect(() => {
+    if (confirmed) {
+      setShowConfirmationPopup(true);
+    }
+  }, [confirmed]);
+
+  const dismissConfirmation = () => {
+    setShowConfirmationPopup(false);
+  };
+
+  const bookAnotherAndDismiss = () => {
+    setShowConfirmationPopup(false);
+    resetBooking();
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
+      {/* Confirmation Popup */}
+      {showConfirmationPopup && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full animate-fadeIn relative">
+            {/* Close button */}
+            <button
+              onClick={dismissConfirmation}
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            
+            {/* Success icon */}
+            <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-7 h-7 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            
+            <h2 className="text-xl font-semibold text-gray-900 text-center mb-1">Booking Confirmed!</h2>
+            <p className="text-sm text-gray-500 text-center mb-4">Confirmation sent to your email.</p>
+            
+            {/* Booking details */}
+            <div className="bg-gray-50 rounded-xl p-4 text-sm space-y-2 mb-4">
               <div className="flex justify-between">
                 <span className="text-gray-500">Service</span>
-                <span className="font-medium">{selectedService?.name}</span>
+                <span className="font-medium text-gray-900">{selectedService?.name}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Date</span>
-                <span className="font-medium">{formatDateLabel(dateStr)}</span>
+                <span className="font-medium text-gray-900">{formatDateLabel(dateStr)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Time</span>
-                <span className="font-medium">
+                <span className="font-medium text-gray-900">
                   {selectedSlot && formatTime(selectedSlot.start_time)}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Stylist</span>
-                <span className="font-medium">{selectedSlot?.stylist_name}</span>
+                <span className="font-medium text-gray-900">{selectedSlot?.stylist_name}</span>
               </div>
-              <div className="border-t pt-4 flex justify-between">
+              <div className="border-t border-gray-200 pt-2 flex justify-between">
                 <span className="text-gray-500">Total</span>
-                <span className="font-semibold text-lg">
+                <span className="font-semibold text-gray-900">
                   {selectedService && formatMoney(selectedService.price_cents)}
                 </span>
               </div>
             </div>
+            
+            <button
+              onClick={bookAnotherAndDismiss}
+              className="w-full py-2.5 text-blue-600 hover:text-blue-700 font-medium text-sm hover:bg-blue-50 rounded-lg transition-colors"
+            >
+              Book another appointment
+            </button>
           </div>
-          <button
-            onClick={resetBooking}
-            className="text-blue-600 hover:text-blue-700 font-medium"
-          >
-            Book another appointment
-          </button>
         </div>
-      </div>
-    );
-  }
+      )}
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-100">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4">
@@ -1149,16 +1344,36 @@ export default function ChatPage() {
               {stage === "SELECT_SLOT" && slots.length > 0 && (
                 <div className="px-6 pb-4">
                   <p className="text-xs text-gray-500 mb-3">Pick a time:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {slots.slice(0, 8).map((slot) => (
+                  <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto">
+                    {/* Show unique times only */}
+                    {Array.from(new Set(slots.map((s) => formatTime(s.start_time)))).map((timeStr) => (
                       <button
-                        key={`${slot.stylist_id}_${slot.start_time}`}
-                        onClick={() => onSelectSlot(slot)}
+                        key={timeStr}
+                        onClick={() => onSelectTime(timeStr)}
                         className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
                       >
-                        {formatTime(slot.start_time)} · {slot.stylist_name}
+                        {timeStr}
                       </button>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {stage === "SELECT_STYLIST" && selectedTime && (
+                <div className="px-6 pb-4">
+                  <p className="text-xs text-gray-500 mb-3">Choose a stylist for {selectedTime}:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {slots
+                      .filter((s) => formatTime(s.start_time) === selectedTime)
+                      .map((slot) => (
+                        <button
+                          key={slot.stylist_id}
+                          onClick={() => onSelectStylist(slot.stylist_id, slot.stylist_name)}
+                          className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                        >
+                          {slot.stylist_name}
+                        </button>
+                      ))}
                   </div>
                 </div>
               )}
