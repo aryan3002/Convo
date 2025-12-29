@@ -67,6 +67,31 @@ class Stylist(Base):
     __table_args__ = (UniqueConstraint("shop_id", "name", name="uq_stylist_shop_name"),)
 
 
+class StylistSpecialty(Base):
+    __tablename__ = "stylist_specialties"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
+    tag: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (UniqueConstraint("stylist_id", "tag", name="uq_stylist_specialty"),)
+
+
+class TimeOffBlock(Base):
+    __tablename__ = "time_off_blocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
+    start_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    end_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
 class Booking(Base):
     __tablename__ = "bookings"
 

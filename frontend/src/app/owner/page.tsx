@@ -18,11 +18,22 @@ type OwnerService = {
   availability_rule?: string;
 };
 
+type OwnerStylist = {
+  id: number;
+  name: string;
+  work_start: string;
+  work_end: string;
+  active: boolean;
+  specialties: string[];
+  time_off_count: number;
+};
+
 type OwnerChatResponse = {
   reply: string;
   action?: { type: string; params?: Record<string, any> } | null;
   data?: {
     services?: OwnerService[];
+    stylists?: OwnerStylist[];
     service?: OwnerService;
     updated_service?: {
       id: number;
@@ -50,12 +61,13 @@ export default function OwnerPage() {
     {
       id: uid(),
       role: "assistant",
-      text: "Hi! I can help you manage services. What would you like to change?",
+      text: "Hi! I can help you manage services and stylists. What would you like to change?",
     },
   ]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [services, setServices] = useState<OwnerService[]>([]);
+  const [stylists, setStylists] = useState<OwnerStylist[]>([]);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -66,9 +78,13 @@ export default function OwnerPage() {
   const quickActions = useMemo(
     () => [
       "List services",
+      "List stylists",
       "Add Keratin Treatment: 90 minutes, $200",
+      "Add stylist Taylor 10am-6pm",
       "Increase Men's Haircut price to $40",
       "Remove Beard Trim",
+      "Alex is off next Tuesday 2–6pm",
+      "Jamie specializes in color + balayage",
     ],
     []
   );
@@ -85,6 +101,9 @@ export default function OwnerPage() {
         }
         return [...prev, data.service!];
       });
+    }
+    if (data.stylists) {
+      setStylists(data.stylists);
     }
     if (data.updated_service) {
       setMessages((prev) => [
@@ -210,28 +229,60 @@ export default function OwnerPage() {
           </div>
         </section>
 
-        <aside className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-          <h2 className="text-sm font-semibold text-gray-900 mb-2">Current services</h2>
-          <p className="text-xs text-gray-500 mb-4">Live view from the database.</p>
-          <div className="space-y-3">
-            {services.length === 0 && (
-              <div className="text-xs text-gray-400">No services loaded yet.</div>
-            )}
-            {services.map((svc) => (
-              <div key={svc.id} className="border border-gray-100 rounded-2xl p-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-sm font-medium text-gray-900">{svc.name}</p>
-                    <p className="text-xs text-gray-500">
-                      {svc.duration_minutes} min · {formatMoney(svc.price_cents)}
-                    </p>
+        <aside className="space-y-6">
+          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-2">Current services</h2>
+            <p className="text-xs text-gray-500 mb-4">Live view from the database.</p>
+            <div className="space-y-3">
+              {services.length === 0 && (
+                <div className="text-xs text-gray-400">No services loaded yet.</div>
+              )}
+              {services.map((svc) => (
+                <div key={svc.id} className="border border-gray-100 rounded-2xl p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">{svc.name}</p>
+                      <p className="text-xs text-gray-500">
+                        {svc.duration_minutes} min · {formatMoney(svc.price_cents)}
+                      </p>
+                    </div>
+                    <span className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-500">
+                      {svc.availability_rule || "none"}
+                    </span>
                   </div>
-                  <span className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-500">
-                    {svc.availability_rule || "none"}
-                  </span>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-2">Current stylists</h2>
+            <p className="text-xs text-gray-500 mb-4">Hours, specialties, and time off.</p>
+            <div className="space-y-3">
+              {stylists.length === 0 && (
+                <div className="text-xs text-gray-400">No stylists loaded yet.</div>
+              )}
+              {stylists.map((stylist) => (
+                <div key={stylist.id} className="border border-gray-100 rounded-2xl p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">{stylist.name}</p>
+                      <p className="text-xs text-gray-500">
+                        {stylist.work_start}–{stylist.work_end}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {stylist.specialties.length > 0
+                          ? stylist.specialties.join(", ")
+                          : "No specialties"}
+                      </p>
+                    </div>
+                    <span className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-500">
+                      {stylist.time_off_count} off
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </aside>
       </main>

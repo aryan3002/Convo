@@ -1,5 +1,6 @@
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import List
 from zoneinfo import ZoneInfo
@@ -14,7 +15,16 @@ from .core.config import get_settings
 from .core.db import AsyncSessionLocal, Base, engine, get_session
 from .chat import ChatRequest, ChatResponse, chat_with_ai
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
-from .models import Booking, BookingStatus, Service, ServiceRule, Shop, Stylist
+from .models import (
+    Booking,
+    BookingStatus,
+    Service,
+    ServiceRule,
+    Shop,
+    Stylist,
+    StylistSpecialty,
+    TimeOffBlock,
+)
 from .seed import seed_initial_data
 
 
@@ -85,6 +95,12 @@ def get_stylist_hours(stylist: Stylist) -> tuple[time, time]:
     return parse_working_hours()
 
 
+@dataclass
+class BlockedTime:
+    start_at_utc: datetime
+    end_at_utc: datetime
+
+
 def overlap(start_a: datetime, end_a: datetime, start_b: datetime, end_b: datetime) -> bool:
     return start_a < end_b and start_b < end_a
 
@@ -92,6 +108,12 @@ def overlap(start_a: datetime, end_a: datetime, start_b: datetime, end_b: dateti
 def to_utc_from_local(local_date: date, local_time: time, tz_offset_minutes: int) -> datetime:
     tz = timezone(timedelta(minutes=tz_offset_minutes))
     local_dt = datetime.combine(local_date, local_time, tzinfo=tz)
+    return local_dt.astimezone(timezone.utc)
+
+
+def to_utc_from_local_zone(local_date: date, local_time: time) -> datetime:
+    tz = ZoneInfo(settings.chat_timezone)
+    local_dt = datetime.combine(local_date, local_time).replace(tzinfo=tz)
     return local_dt.astimezone(timezone.utc)
 
 
@@ -136,7 +158,7 @@ async def get_active_bookings_for_stylist(
     window_start: datetime,
     window_end: datetime,
     now: datetime,
-) -> List[Booking]:
+) -> List[BlockedTime]:
     result = await session.execute(
         select(Booking)
         .where(
@@ -157,7 +179,25 @@ async def get_active_bookings_for_stylist(
                 active.append(booking)
         else:
             active.append(booking)
-    return active
+
+    blocked: list[BlockedTime] = [
+        BlockedTime(start_at_utc=b.start_at_utc, end_at_utc=b.end_at_utc) for b in active
+    ]
+
+    time_off_result = await session.execute(
+        select(TimeOffBlock).where(
+            TimeOffBlock.stylist_id == stylist_id,
+            TimeOffBlock.end_at_utc > window_start,
+            TimeOffBlock.start_at_utc < window_end,
+        )
+    )
+    time_off_blocks = time_off_result.scalars().all()
+    blocked.extend(
+        BlockedTime(start_at_utc=block.start_at_utc, end_at_utc=block.end_at_utc)
+        for block in time_off_blocks
+    )
+
+    return blocked
 
 
 def make_slots_for_stylist(
@@ -167,7 +207,7 @@ def make_slots_for_stylist(
     tz_offset_minutes: int,
     working_start: time,
     working_end: time,
-    blocked: List[Booking],
+    blocked: List[BlockedTime],
     now_utc: datetime,
 ) -> List[AvailabilitySlot]:
     day_start_utc = to_utc_from_local(local_date, working_start, tz_offset_minutes)
@@ -242,6 +282,46 @@ async def list_services_with_rules(session: AsyncSession, shop_id: int):
             "availability_rule": rules.get(svc.id, "none"),
         }
         for svc in services
+    ]
+
+
+async def list_stylists_with_details(session: AsyncSession, shop_id: int):
+    result = await session.execute(
+        select(Stylist).where(Stylist.shop_id == shop_id).order_by(Stylist.id)
+    )
+    stylists = result.scalars().all()
+    stylist_ids = [stylist.id for stylist in stylists]
+    specialties_map: dict[int, list[str]] = {stylist_id: [] for stylist_id in stylist_ids}
+    time_off_counts: dict[int, int] = {stylist_id: 0 for stylist_id in stylist_ids}
+
+    if stylist_ids:
+        spec_result = await session.execute(
+            select(StylistSpecialty).where(StylistSpecialty.stylist_id.in_(stylist_ids))
+        )
+        for spec in spec_result.scalars().all():
+            specialties_map.setdefault(spec.stylist_id, []).append(spec.tag)
+
+        now = datetime.now(timezone.utc)
+        time_off_result = await session.execute(
+            select(TimeOffBlock).where(
+                TimeOffBlock.stylist_id.in_(stylist_ids),
+                TimeOffBlock.end_at_utc > now,
+            )
+        )
+        for block in time_off_result.scalars().all():
+            time_off_counts[block.stylist_id] = time_off_counts.get(block.stylist_id, 0) + 1
+
+    return [
+        {
+            "id": stylist.id,
+            "name": stylist.name,
+            "work_start": stylist.work_start.strftime("%H:%M"),
+            "work_end": stylist.work_end.strftime("%H:%M"),
+            "active": stylist.active,
+            "specialties": specialties_map.get(stylist.id, []),
+            "time_off_count": time_off_counts.get(stylist.id, 0),
+        }
+        for stylist in stylists
     ]
 
 
@@ -377,6 +457,10 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     shop = await get_default_shop(session)
     result = await session.execute(select(Service).where(Service.shop_id == shop.id).order_by(Service.id))
     service_list = result.scalars().all()
+    stylist_result = await session.execute(
+        select(Stylist).where(Stylist.shop_id == shop.id).order_by(Stylist.id)
+    )
+    stylist_list = stylist_result.scalars().all()
 
     def normalize_text(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
@@ -389,11 +473,28 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                 return svc
         return None
 
+    def match_stylist_in_text(text: str) -> Stylist | None:
+        normalized = normalize_text(text)
+        for stylist in stylist_list:
+            stylist_name = normalize_text(stylist.name)
+            if stylist_name and stylist_name in normalized:
+                return stylist
+        return None
+
     def latest_service_from_messages() -> Service | None:
         for msg in reversed(request.messages):
             if msg.role != "user":
                 continue
             found = match_service_in_text(msg.content)
+            if found:
+                return found
+        return None
+
+    def latest_stylist_from_messages() -> Stylist | None:
+        for msg in reversed(request.messages):
+            if msg.role != "user":
+                continue
+            found = match_stylist_in_text(msg.content)
             if found:
                 return found
         return None
@@ -436,6 +537,24 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
         service_name = str(params.get("service_name") or params.get("name") or "").strip()
         if service_name:
             return await fetch_service_by_name(session, service_name, shop.id)
+        return None
+
+    async def resolve_stylist() -> Stylist | None:
+        stylist_id = params.get("stylist_id")
+        if stylist_id:
+            try:
+                return await fetch_stylist(session, int(stylist_id))
+            except HTTPException:
+                return None
+        stylist_name = str(params.get("stylist_name") or params.get("name") or "").strip()
+        if stylist_name:
+            result = await session.execute(
+                select(Stylist).where(
+                    Stylist.shop_id == shop.id,
+                    Stylist.name.ilike(f"%{stylist_name}%"),
+                )
+            )
+            return result.scalar_one_or_none()
         return None
 
     def contains_add_intent(text: str) -> bool:
@@ -518,6 +637,181 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             return ""
         return name
 
+    def parse_time_of_day(value: str) -> time | None:
+        if not value:
+            return None
+        raw = value.strip().lower()
+        match = re.match(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", raw)
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = match.group(3)
+        if meridiem:
+            if hour == 12:
+                hour = 0
+            if meridiem == "pm":
+                hour += 12
+        if hour > 23 or minute > 59:
+            return None
+        return time(hour, minute)
+
+    def extract_time_range_from_text(text: str) -> tuple[time | None, time | None]:
+        if not text:
+            return None, None
+        normalized = text.replace("–", "-").replace("—", "-")
+        match = re.search(
+            r"\bfrom\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:to|-)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+            normalized,
+            re.IGNORECASE,
+        )
+        if not match:
+            match = re.search(
+                r"(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*-\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+                normalized,
+                re.IGNORECASE,
+            )
+        if not match:
+            return None, None
+        start_time = parse_time_of_day(match.group(1))
+        end_time = parse_time_of_day(match.group(2))
+        return start_time, end_time
+
+    def parse_date_str(value: str) -> date | None:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def parse_weekday_date(text: str) -> date | None:
+        if not text:
+            return None
+        match = re.search(
+            r"\b(next|this)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        modifier = (match.group(1) or "").lower()
+        weekday_name = match.group(2).lower()
+        weekday_map = {
+            "monday": 0,
+            "tuesday": 1,
+            "wednesday": 2,
+            "thursday": 3,
+            "friday": 4,
+            "saturday": 5,
+            "sunday": 6,
+        }
+        target = weekday_map[weekday_name]
+        today = get_local_now().date()
+        delta = (target - today.weekday()) % 7
+        if modifier == "next" and delta == 0:
+            delta = 7
+        if modifier == "next" and delta > 0:
+            delta = delta
+        if modifier == "this" and delta == 0:
+            delta = 0
+        if delta == 0 and modifier != "this":
+            delta = 7
+        return today + timedelta(days=delta)
+
+    def parse_time_off_range(raw_params: dict) -> tuple[datetime | None, datetime | None, str | None]:
+        tz_offset = raw_params.get("tz_offset_minutes")
+        start_at = raw_params.get("start_at")
+        end_at = raw_params.get("end_at")
+        if isinstance(start_at, str) and isinstance(end_at, str):
+            try:
+                start_dt = datetime.fromisoformat(start_at)
+                end_dt = datetime.fromisoformat(end_at)
+                if start_dt.tzinfo and end_dt.tzinfo:
+                    return start_dt.astimezone(timezone.utc), end_dt.astimezone(timezone.utc), None
+            except ValueError:
+                return None, None, "Start/end time format should be ISO datetime."
+
+        start_local = raw_params.get("start_at_local")
+        end_local = raw_params.get("end_at_local")
+        if isinstance(start_local, str) and isinstance(end_local, str):
+            try:
+                start_date_str, start_time_str = re.split(r"[T\\s]+", start_local.strip(), maxsplit=1)
+                end_date_str, end_time_str = re.split(r"[T\\s]+", end_local.strip(), maxsplit=1)
+                start_date = parse_date_str(start_date_str)
+                end_date = parse_date_str(end_date_str)
+                start_time = parse_time_of_day(start_time_str)
+                end_time = parse_time_of_day(end_time_str)
+                if start_date and end_date and start_time and end_time:
+                    if tz_offset is not None:
+                        return (
+                            to_utc_from_local(start_date, start_time, int(tz_offset)),
+                            to_utc_from_local(end_date, end_time, int(tz_offset)),
+                            None,
+                        )
+                    return (
+                        to_utc_from_local_zone(start_date, start_time),
+                        to_utc_from_local_zone(end_date, end_time),
+                        None,
+                    )
+            except ValueError:
+                return None, None, "Start/end time format should be YYYY-MM-DD HH:MM."
+
+        date_str = raw_params.get("date") or raw_params.get("day")
+        start_time_str = raw_params.get("start_time") or raw_params.get("start")
+        end_time_str = raw_params.get("end_time") or raw_params.get("end")
+        local_date = parse_date_str(str(date_str)) if date_str else None
+        start_time = parse_time_of_day(str(start_time_str)) if start_time_str else None
+        end_time = parse_time_of_day(str(end_time_str)) if end_time_str else None
+        if local_date and start_time and end_time:
+            if tz_offset is not None:
+                return (
+                    to_utc_from_local(local_date, start_time, int(tz_offset)),
+                    to_utc_from_local(local_date, end_time, int(tz_offset)),
+                    None,
+                )
+            return (
+                to_utc_from_local_zone(local_date, start_time),
+                to_utc_from_local_zone(local_date, end_time),
+                None,
+            )
+
+        raw_text = str(raw_params.get("raw_text") or raw_params.get("text") or "")
+        date_match = re.search(r"\d{4}-\d{2}-\d{2}", raw_text)
+        inferred_date = (
+            parse_date_str(date_match.group(0)) if date_match else None
+        ) or parse_weekday_date(raw_text)
+        inferred_start, inferred_end = extract_time_range_from_text(raw_text)
+        if inferred_date and inferred_start and inferred_end:
+            return (
+                to_utc_from_local_zone(inferred_date, inferred_start),
+                to_utc_from_local_zone(inferred_date, inferred_end),
+                None,
+            )
+
+        return None, None, "Provide a date (YYYY-MM-DD) with start/end time."
+
+    def normalize_tag(value: str) -> str:
+        return re.sub(r"\s+", " ", value.strip().lower())
+
+    def parse_tags(raw: object) -> list[str]:
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            tags = [normalize_tag(str(tag)) for tag in raw]
+        else:
+            cleaned = str(raw)
+            cleaned = re.sub(
+                r".*special(?:ty|ties|ize|izes|ized|izing)?\\s+in\\s+",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            cleaned = re.sub(r"[+&]", ",", cleaned)
+            cleaned = re.sub(r"\band\b", ",", cleaned, flags=re.IGNORECASE)
+            tags = [normalize_tag(tag) for tag in cleaned.split(",")]
+        return [tag for tag in tags if tag]
+
     def collect_create_fields_from_messages() -> dict:
         fields = {
             "name": "",
@@ -594,6 +888,7 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
 
     last_user = next((msg for msg in reversed(request.messages) if msg.role == "user"), None)
     last_text = last_user.content if last_user else ""
+    normalized_last = normalize_text(last_text)
     create_fields = collect_create_fields_from_messages()
     add_intent = contains_add_intent(last_text)
     list_intent = contains_list_intent(last_text)
@@ -601,6 +896,16 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     price_in_text = extract_price_from_text(last_text)
     price_keyword_intent = contains_price_intent(last_text)
     price_intent = price_keyword_intent or bool(price_in_text)
+    stylist_list_intent = "stylist" in normalized_last and list_intent
+    stylist_add_intent = "stylist" in normalized_last and any(
+        word in normalized_last for word in ["add", "create", "new", "hire"]
+    )
+    stylist_specialty_intent = any(
+        word in normalized_last for word in ["specialty", "specialties", "specialize", "specializes"]
+    )
+    stylist_time_off_intent = any(
+        phrase in normalized_last for phrase in ["time off", "off", "vacation", "pto"]
+    )
     create_signal = bool(
         add_intent
         or extract_name_from_add(last_text)
@@ -609,6 +914,24 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     )
 
     try:
+        if stylist_add_intent and action_type in {
+            "list_services",
+            "list_stylists",
+            "create_service",
+            "update_service_price",
+            "update_service_duration",
+            "remove_service",
+            "set_service_rule",
+        }:
+            action_type = "create_stylist"
+            action = {"type": action_type, "params": {"name": last_text}}
+            params = action["params"]
+
+        if "stylist" in normalized_last and action_type == "list_services":
+            action_type = "list_stylists"
+            action = {"type": action_type, "params": {}}
+            params = action["params"]
+
         if create_fields and create_signal and action_type in {
             "update_service_price",
             "update_service_duration",
@@ -634,6 +957,14 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                 action_type = "create_service"
                 action = {"type": action_type, "params": create_fields}
                 params = action["params"]
+            elif stylist_list_intent:
+                action_type = "list_stylists"
+                action = {"type": action_type, "params": {}}
+                params = action["params"]
+            elif stylist_add_intent:
+                action_type = "create_stylist"
+                action = {"type": action_type, "params": {"name": last_text}}
+                params = action["params"]
             elif list_intent:
                 action_type = "list_services"
                 action = {"type": action_type, "params": {}}
@@ -656,10 +987,32 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                         },
                     }
                     params = action["params"]
+            elif stylist_specialty_intent:
+                stylist = match_stylist_in_text(last_text) or latest_stylist_from_messages()
+                if stylist:
+                    action_type = "update_stylist_specialties"
+                    action = {
+                        "type": action_type,
+                        "params": {"stylist_id": stylist.id, "tags": last_text},
+                    }
+                    params = action["params"]
+            elif stylist_time_off_intent:
+                stylist = match_stylist_in_text(last_text) or latest_stylist_from_messages()
+                if stylist:
+                    action_type = "add_time_off"
+                    action = {
+                        "type": action_type,
+                        "params": {"stylist_id": stylist.id, "raw_text": last_text},
+                    }
+                    params = action["params"]
 
         if action_type == "list_services":
             data = {"services": await list_services_with_rules(session, shop.id)}
             reply_override = "Here are your current services."
+
+        elif action_type == "list_stylists":
+            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            reply_override = "Here are your current stylists."
 
         elif action_type == "create_service":
             name = str(params.get("name") or "").strip()
@@ -713,6 +1066,58 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             }
             reply_override = f"Done. {service.name} added."
 
+        elif action_type == "create_stylist":
+            raw_name = str(params.get("name") or "").strip()
+            name = raw_name
+            match = re.search(
+                r"\\badd\\b\\s+(?:a\\s+)?(?:new\\s+)?stylist\\s+([a-z][a-z\\s'-]+)",
+                raw_name,
+                re.IGNORECASE,
+            )
+            if not match:
+                match = re.search(
+                    r"\\badd\\b\\s+([a-z][a-z\\s'-]+?)\\s+as\\s+(?:a\\s+)?stylist",
+                    raw_name,
+                    re.IGNORECASE,
+                )
+            if not match and "stylist" in normalize_text(raw_name):
+                match = re.search(r"stylist\\s+([a-z][a-z\\s'-]+)", raw_name, re.IGNORECASE)
+            if not match:
+                match = re.search(r"\\badd\\b\\s+([a-z][a-z\\s'-]+)", raw_name, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                name = re.split(r"\\b(from|to|with|at|as)\\b", name, 1, flags=re.IGNORECASE)[0].strip()
+            if not name:
+                return OwnerChatResponse(reply="What's the stylist's name?", action=None)
+
+            work_start = parse_time_of_day(str(params.get("work_start") or "")) if params.get("work_start") else None
+            work_end = parse_time_of_day(str(params.get("work_end") or "")) if params.get("work_end") else None
+            if not work_start or not work_end:
+                work_start, work_end = extract_time_range_from_text(raw_name)
+            if not work_start or not work_end:
+                work_start, work_end = parse_working_hours()
+            if work_end <= work_start:
+                return OwnerChatResponse(reply="End time should be after start time.", action=None)
+
+            existing_stylist = await session.execute(
+                select(Stylist).where(Stylist.shop_id == shop.id, Stylist.name.ilike(f"%{name}%"))
+            )
+            if existing_stylist.scalar_one_or_none():
+                return OwnerChatResponse(reply="That stylist already exists.", action=None)
+
+            stylist = Stylist(
+                shop_id=shop.id,
+                name=name,
+                work_start=work_start,
+                work_end=work_end,
+                active=True,
+            )
+            session.add(stylist)
+            await session.commit()
+            await session.refresh(stylist)
+            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            reply_override = f"Added stylist {stylist.name} ({work_start.strftime('%H:%M')}–{work_end.strftime('%H:%M')})."
+
         elif action_type == "update_service_price":
             service = await resolve_service()
             if not service:
@@ -733,6 +1138,62 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                 },
             }
             reply_override = f"Updated {service.name} to ${price_cents/100:.2f}."
+
+        elif action_type == "update_stylist_hours":
+            stylist = await resolve_stylist()
+            if not stylist:
+                return OwnerChatResponse(reply="Which stylist should I update?", action=None)
+            start_time = parse_time_of_day(str(params.get("work_start") or params.get("start_time") or ""))
+            end_time = parse_time_of_day(str(params.get("work_end") or params.get("end_time") or ""))
+            if not start_time or not end_time:
+                start_time, end_time = extract_time_range_from_text(last_text)
+            if not start_time or not end_time:
+                return OwnerChatResponse(reply="What hours should I set? (e.g., 10:00 to 18:00)", action=None)
+            if end_time <= start_time:
+                return OwnerChatResponse(reply="End time should be after start time.", action=None)
+            stylist.work_start = start_time
+            stylist.work_end = end_time
+            await session.commit()
+            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            reply_override = f"Updated {stylist.name}'s hours to {start_time.strftime('%H:%M')}–{end_time.strftime('%H:%M')}."
+
+        elif action_type == "update_stylist_specialties":
+            stylist = await resolve_stylist()
+            if not stylist:
+                return OwnerChatResponse(reply="Which stylist should I update?", action=None)
+            tags = parse_tags(params.get("tags") or params.get("specialties") or params.get("specialties_list"))
+            if not tags:
+                return OwnerChatResponse(reply="What specialties should I set?", action=None)
+            await session.execute(
+                StylistSpecialty.__table__.delete().where(StylistSpecialty.stylist_id == stylist.id)
+            )
+            for tag in tags:
+                session.add(StylistSpecialty(stylist_id=stylist.id, tag=tag))
+            await session.commit()
+            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            reply_override = f"Updated {stylist.name}'s specialties."
+
+        elif action_type == "add_time_off":
+            stylist = await resolve_stylist()
+            if not stylist:
+                return OwnerChatResponse(reply="Which stylist is this for?", action=None)
+            start_at_utc, end_at_utc, error = parse_time_off_range(params)
+            if error:
+                return OwnerChatResponse(reply=error, action=None)
+            if not start_at_utc or not end_at_utc or end_at_utc <= start_at_utc:
+                return OwnerChatResponse(reply="Please provide a valid start and end time.", action=None)
+            reason = str(params.get("reason") or "").strip() or None
+            session.add(
+                TimeOffBlock(
+                    stylist_id=stylist.id,
+                    start_at_utc=start_at_utc,
+                    end_at_utc=end_at_utc,
+                    reason=reason,
+                )
+            )
+            await session.commit()
+            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            reply_override = f"Time off saved for {stylist.name}."
 
         elif action_type == "update_service_duration":
             service = await resolve_service()
