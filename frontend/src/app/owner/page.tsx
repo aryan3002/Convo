@@ -24,6 +24,11 @@ type OwnerChatResponse = {
   data?: {
     services?: OwnerService[];
     service?: OwnerService;
+    updated_service?: {
+      id: number;
+      name: string;
+      price_cents: number;
+    };
   } | null;
 };
 
@@ -80,6 +85,16 @@ export default function OwnerPage() {
         }
         return [...prev, data.service!];
       });
+    }
+    if (data.updated_service) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid(),
+          role: "assistant",
+          text: `Updated ${data.updated_service.name} to ${formatMoney(data.updated_service.price_cents)}.`,
+        },
+      ]);
     }
   }
 

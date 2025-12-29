@@ -375,6 +375,28 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     params = action.get("params") or {}
 
     shop = await get_default_shop(session)
+    result = await session.execute(select(Service).where(Service.shop_id == shop.id).order_by(Service.id))
+    service_list = result.scalars().all()
+
+    def normalize_text(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    def match_service_in_text(text: str) -> Service | None:
+        normalized = normalize_text(text)
+        for svc in service_list:
+            svc_name = normalize_text(svc.name)
+            if svc_name and svc_name in normalized:
+                return svc
+        return None
+
+    def latest_service_from_messages() -> Service | None:
+        for msg in reversed(request.messages):
+            if msg.role != "user":
+                continue
+            found = match_service_in_text(msg.content)
+            if found:
+                return found
+        return None
 
     def parse_price_cents(raw: object) -> int:
         if raw is None:
@@ -395,8 +417,13 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
         if isinstance(raw, (int, float)):
             return int(raw)
         if isinstance(raw, str):
-            digits = re.sub(r"[^\d]", "", raw)
-            return int(digits) if digits else 0
+            match = re.search(r"(\d+(?:\.\d+)?)", raw)
+            if not match:
+                return 0
+            value = float(match.group(1))
+            if re.search(r"(hour|hr)", raw, re.IGNORECASE):
+                return int(round(value * 60))
+            return int(round(value))
         return 0
 
     async def resolve_service() -> Service | None:
@@ -411,7 +438,225 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             return await fetch_service_by_name(session, service_name, shop.id)
         return None
 
+    def contains_add_intent(text: str) -> bool:
+        normalized = normalize_text(text)
+        if not normalized:
+            return False
+        if re.search(r"\b(add|create|introduce)\b", normalized) or "new service" in normalized:
+            if "price" in normalized and "service" not in normalized and "treatment" not in normalized:
+                return False
+            return True
+        return False
+
+    def contains_remove_intent(text: str) -> bool:
+        normalized = normalize_text(text)
+        return any(word in normalized for word in ["remove", "delete", "drop", "retire"])
+
+    def contains_list_intent(text: str) -> bool:
+        normalized = normalize_text(text)
+        return "list" in normalized or "show" in normalized
+
+    def contains_price_intent(text: str) -> bool:
+        normalized = normalize_text(text)
+        return any(word in normalized for word in ["price", "cost", "increase", "decrease", "change", "set", "update"])
+
+    def extract_rule(text: str) -> str:
+        normalized = normalize_text(text)
+        if "weekend" in normalized:
+            return "weekends_only"
+        if "evening" in normalized:
+            return "weekday_evenings"
+        if "weekday" in normalized:
+            return "weekdays_only"
+        return "none"
+
+    def extract_price_from_text(text: str) -> int:
+        if not text:
+            return 0
+        price_match = re.search(r"\$\s*(\d+(?:\.\d{1,2})?)", text)
+        if price_match:
+            return parse_price_cents(price_match.group(1))
+        if re.search(r"\b(price|cost|usd|dollars?)\b", text, re.IGNORECASE):
+            number_match = re.search(r"(\d+(?:\.\d{1,2})?)", text)
+            if number_match:
+                return parse_price_cents(number_match.group(1))
+        return 0
+
+    def extract_duration_from_text(text: str) -> int:
+        if not text:
+            return 0
+        hour_match = re.search(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr)\b", text, re.IGNORECASE)
+        if hour_match:
+            return int(round(float(hour_match.group(1)) * 60))
+        minute_match = re.search(r"(\d+(?:\.\d+)?)\s*(minutes?|mins?|min)\b", text, re.IGNORECASE)
+        if minute_match:
+            return int(round(float(minute_match.group(1))))
+        return 0
+
+    def extract_name_from_add(text: str) -> str:
+        if not text:
+            return ""
+        match = re.search(
+            r"\badd\b(?:\s+a|\s+an)?(?:\s+service)?(?:\s+named|\s+called|\s+name)?\s+(.+)",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return ""
+        name = match.group(1).strip()
+        name = name.split(":", 1)[0].strip()
+        name = re.split(
+            r"\b(for|at|cost|costing|costs|price|duration|taking|with)\b",
+            name,
+            1,
+            flags=re.IGNORECASE,
+        )[0].strip()
+        name = name.strip(" ,.")
+        if not name or re.fullmatch(r"\d+(?:\.\d+)?", name):
+            return ""
+        if re.search(r"\b(minutes?|mins?|hours?|hrs?|hr)\b", name, re.IGNORECASE):
+            return ""
+        return name
+
+    def collect_create_fields_from_messages() -> dict:
+        fields = {
+            "name": "",
+            "duration_minutes": 0,
+            "price_cents": 0,
+            "availability_rule": "none",
+        }
+        seen_add = False
+        for msg in reversed(request.messages[-8:]):
+            if msg.role != "user":
+                continue
+            text = msg.content or ""
+            if contains_remove_intent(text) or contains_list_intent(text):
+                if seen_add:
+                    break
+                if not contains_add_intent(text):
+                    break
+                continue
+            if contains_price_intent(text) and not contains_add_intent(text) and not seen_add:
+                break
+            if contains_add_intent(text):
+                seen_add = True
+
+            extracted_name = extract_name_from_add(text)
+            extracted_duration = extract_duration_from_text(text)
+            extracted_price = extract_price_from_text(text)
+            extracted_rule = extract_rule(text)
+
+            if extracted_name and not fields["name"]:
+                fields["name"] = extracted_name
+            if extracted_duration and not fields["duration_minutes"]:
+                fields["duration_minutes"] = extracted_duration
+            if extracted_price and not fields["price_cents"]:
+                fields["price_cents"] = extracted_price
+            if fields["availability_rule"] == "none" and extracted_rule != "none":
+                fields["availability_rule"] = extracted_rule
+
+            if seen_add and fields["name"] and fields["duration_minutes"] and fields["price_cents"]:
+                break
+
+        if not seen_add:
+            return {}
+        return fields
+
+    def find_service_for_update(text: str) -> Service | None:
+        service = match_service_in_text(text)
+        if service:
+            return service
+        for msg in reversed(request.messages[-6:]):
+            if msg.role != "user":
+                continue
+            msg_text = msg.content or ""
+            if contains_add_intent(msg_text) or contains_remove_intent(msg_text) or contains_list_intent(msg_text):
+                break
+            service = match_service_in_text(msg_text)
+            if service:
+                return service
+        return None
+
+    def find_service_for_remove(text: str) -> Service | None:
+        service = match_service_in_text(text)
+        if service:
+            return service
+        for msg in reversed(request.messages[-6:]):
+            if msg.role != "user":
+                continue
+            msg_text = msg.content or ""
+            if contains_add_intent(msg_text) or contains_price_intent(msg_text) or contains_list_intent(msg_text):
+                break
+            service = match_service_in_text(msg_text)
+            if service:
+                return service
+        return None
+
+    last_user = next((msg for msg in reversed(request.messages) if msg.role == "user"), None)
+    last_text = last_user.content if last_user else ""
+    create_fields = collect_create_fields_from_messages()
+    add_intent = contains_add_intent(last_text)
+    list_intent = contains_list_intent(last_text)
+    remove_intent = contains_remove_intent(last_text)
+    price_in_text = extract_price_from_text(last_text)
+    price_keyword_intent = contains_price_intent(last_text)
+    price_intent = price_keyword_intent or bool(price_in_text)
+    create_signal = bool(
+        add_intent
+        or extract_name_from_add(last_text)
+        or extract_duration_from_text(last_text)
+        or (price_in_text and not price_keyword_intent)
+    )
+
     try:
+        if create_fields and create_signal and action_type in {
+            "update_service_price",
+            "update_service_duration",
+            "remove_service",
+            "set_service_rule",
+        }:
+            action_type = None
+            action = {}
+            params = {}
+
+        if action_type == "create_service" and create_fields:
+            if not params.get("name") and create_fields.get("name"):
+                params["name"] = create_fields["name"]
+            if not params.get("duration_minutes") and create_fields.get("duration_minutes"):
+                params["duration_minutes"] = create_fields["duration_minutes"]
+            if not params.get("price_cents") and create_fields.get("price_cents"):
+                params["price_cents"] = create_fields["price_cents"]
+            if params.get("availability_rule") in [None, "", "none"] and create_fields.get("availability_rule"):
+                params["availability_rule"] = create_fields["availability_rule"]
+
+        if not action_type:
+            if create_fields and create_signal:
+                action_type = "create_service"
+                action = {"type": action_type, "params": create_fields}
+                params = action["params"]
+            elif list_intent:
+                action_type = "list_services"
+                action = {"type": action_type, "params": {}}
+            elif remove_intent:
+                service = find_service_for_remove(last_text)
+                if service:
+                    action_type = "remove_service"
+                    action = {"type": action_type, "params": {"service_id": service.id}}
+                    params = action["params"]
+            elif price_intent:
+                price_cents = price_in_text
+                service = find_service_for_update(last_text)
+                if price_cents or service:
+                    action_type = "update_service_price"
+                    action = {
+                        "type": action_type,
+                        "params": {
+                            "service_id": service.id if service else None,
+                            "price_cents": price_cents,
+                        },
+                    }
+                    params = action["params"]
+
         if action_type == "list_services":
             data = {"services": await list_services_with_rules(session, shop.id)}
             reply_override = "Here are your current services."
@@ -424,8 +669,12 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
 
             if not name:
                 return OwnerChatResponse(reply="What's the service name?", action=None)
+            if duration == 0:
+                return OwnerChatResponse(reply="How many minutes is the service?", action=None)
             if duration < 5 or duration > 240:
                 return OwnerChatResponse(reply="Duration should be between 5 and 240 minutes.", action=None)
+            if price_cents == 0:
+                return OwnerChatResponse(reply="What price should I set?", action=None)
             if price_cents <= 0 or price_cents > 500000:
                 return OwnerChatResponse(reply="Price should be between $1 and $5,000.", action=None)
             if rule not in SUPPORTED_RULES:
@@ -469,11 +718,20 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             if not service:
                 return OwnerChatResponse(reply="Which service should I update?", action=None)
             price_cents = parse_price_cents(params.get("price_cents"))
-            if price_cents <= 0 or price_cents > 500000:
+            if price_cents == 0:
+                return OwnerChatResponse(reply="What price should I set?", action=None)
+            if price_cents > 500000:
                 return OwnerChatResponse(reply="Price should be between $1 and $5,000.", action=None)
             service.price_cents = price_cents
             await session.commit()
-            data = {"services": await list_services_with_rules(session, shop.id)}
+            data = {
+                "services": await list_services_with_rules(session, shop.id),
+                "updated_service": {
+                    "id": service.id,
+                    "name": service.name,
+                    "price_cents": service.price_cents,
+                },
+            }
             reply_override = f"Updated {service.name} to ${price_cents/100:.2f}."
 
         elif action_type == "update_service_duration":
@@ -481,6 +739,8 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             if not service:
                 return OwnerChatResponse(reply="Which service should I update?", action=None)
             duration = parse_duration_minutes(params.get("duration_minutes"))
+            if duration == 0:
+                return OwnerChatResponse(reply="What duration should I set?", action=None)
             if duration < 5 or duration > 240:
                 return OwnerChatResponse(reply="Duration should be between 5 and 240 minutes.", action=None)
             service.duration_minutes = duration
@@ -493,7 +753,9 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             if not service:
                 return OwnerChatResponse(reply="Which service should I remove?", action=None)
 
-            result = await session.execute(select(Booking).where(Booking.service_id == service.id))
+            result = await session.execute(
+                select(Booking.id).where(Booking.service_id == service.id).limit(1)
+            )
             if result.scalar_one_or_none():
                 return OwnerChatResponse(
                     reply="That service has bookings. Remove bookings first or keep it.",
