@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .customer_memory import get_customer_context
-from .models import Service, Stylist
+from .models import Service, Stylist, StylistSpecialty
 
 settings = get_settings()
 
@@ -66,6 +66,7 @@ CRITICAL RULES:
 - Be brief. One sentence only. Never list more than 3 items in text.
 - Do NOT list time slots in text. The UI shows them as buttons.
 - Never claim a booking is held or confirmed unless the backend tool succeeds.
+- If asked who is best for a service, use stylist specialties from STYLISTS. If none match, say you don’t have a specialist listed.
 - If user mentions a date, use fetch_availability and say: "Here are a few good options. Tap one to continue."
 - If user tries to type a time, ask them to tap a time option.
 - Before holding: collect BOTH name AND email from user.
@@ -226,15 +227,23 @@ async def get_services_context(session: AsyncSession) -> str:
 
 async def get_stylists_context(session: AsyncSession) -> str:
     """Get formatted stylists list for the system prompt."""
-    result = await session.execute(select(Stylist).where(Stylist.active.is_(True)).order_by(Stylist.id))
+    result = await session.execute(
+        select(Stylist).where(Stylist.active.is_(True)).order_by(Stylist.id)
+    )
     stylists = result.scalars().all()
     
     if not stylists:
         return "No stylists available"
     
+    specialties_result = await session.execute(select(StylistSpecialty))
+    specialties: dict[int, list[str]] = {}
+    for specialty in specialties_result.scalars().all():
+        specialties.setdefault(specialty.stylist_id, []).append(specialty.tag)
+
     lines = []
     for stylist in stylists:
-        lines.append(f"- ID {stylist.id}: {stylist.name}")
+        tags = ", ".join(sorted(specialties.get(stylist.id, []))) or "none"
+        lines.append(f"- ID {stylist.id}: {stylist.name} (specialties: {tags})")
     return "\n".join(lines)
 
 
