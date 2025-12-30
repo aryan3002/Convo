@@ -62,6 +62,7 @@ type OwnerChatResponse = {
     services?: OwnerService[];
     stylists?: OwnerStylist[];
     service?: OwnerService;
+    schedule?: OwnerSchedule;
     updated_service?: {
       id: number;
       name: string;
@@ -152,6 +153,10 @@ export default function OwnerPage() {
     }
     if (data.stylists) {
       setStylists(data.stylists);
+    }
+    if (data.schedule) {
+      setSchedule(data.schedule);
+      setScheduleDate(data.schedule.date);
     }
     if (data?.updated_service) {
       const updated = data.updated_service;
@@ -274,7 +279,17 @@ export default function OwnerPage() {
   }, []);
 
   function parseTimeToMinutes(value: string) {
-    const [hour, minute] = value.split(":").map(Number);
+    if (!value) return 0;
+    const raw = value.trim().toLowerCase();
+    const match = raw.match(/^(\d{1,2}):(\d{2})(?:\s*(am|pm))?$/);
+    if (!match) return 0;
+    let hour = Number(match[1]);
+    const minute = Number(match[2]);
+    const meridiem = match[3];
+    if (meridiem) {
+      if (hour === 12) hour = 0;
+      if (meridiem === "pm") hour += 12;
+    }
     return hour * 60 + minute;
   }
 
@@ -318,18 +333,27 @@ export default function OwnerPage() {
     stylistId: number,
     startMinutes: number
   ) {
-    await fetch(`${API_BASE}/owner/bookings/reschedule`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        booking_id: bookingId,
-        stylist_id: stylistId,
-        date: scheduleDate,
-        start_time: minutesToTimeValue(startMinutes),
-        tz_offset_minutes: TZ_OFFSET,
-      }),
-    });
-    fetchSchedule(scheduleDate);
+    try {
+      const res = await fetch(`${API_BASE}/owner/bookings/reschedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          booking_id: bookingId,
+          stylist_id: stylistId,
+          date: scheduleDate,
+          start_time: minutesToTimeValue(startMinutes),
+          tz_offset_minutes: TZ_OFFSET,
+        }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.detail || "Failed to reschedule");
+      }
+      fetchSchedule(scheduleDate);
+    } catch (error) {
+      console.error("Failed to reschedule booking:", error);
+      alert(`Failed to reschedule booking: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   }
 
   async function cancelBooking(bookingId: string) {
@@ -536,6 +560,7 @@ export default function OwnerPage() {
           </div>
 
           <div className="mt-6 overflow-auto">
+
             {scheduleLoading && (
               <div className="text-xs text-gray-400 mb-4">Loading schedule...</div>
             )}
@@ -580,54 +605,70 @@ export default function OwnerPage() {
                   <div className="border-t border-gray-100 text-[11px] text-gray-600 pr-2 flex items-start justify-end pt-2 bg-white font-semibold sticky left-0 z-20" style={{ gridColumn: 1 }}>
                     {minutesToTimeLabel(slot)}
                   </div>
-                  {scheduleStylists.map((stylist, index) => (
-                    <div
-                      key={`${stylist.id}-${slot}`}
-                      className="border-t border-gray-100 bg-white hover:bg-blue-50/30 transition-colors"
-                      style={{ gridColumn: index + 2 }}
-                      onDragOver={(event) => event.preventDefault()}
-                      onDragEnter={(event) => {
-                        event.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
-                      }}
-                      onDragLeave={(event) => {
-                        event.currentTarget.style.backgroundColor = '';
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        event.currentTarget.style.backgroundColor = '';
-                        const bookingId = event.dataTransfer.getData("text/plain");
-                        if (bookingId && stylist.active) {
-                          rescheduleBooking(bookingId, stylist.id, slot);
-                        }
-                      }}
-                    />
-                  ))}
+                  {scheduleStylists.map((stylist, index) => {
+                    // Check if this stylist has time off for this slot
+                    const timeOff = scheduleTimeOff.find(
+                      (block) =>
+                        block.stylist_id === stylist.id &&
+                        parseTimeToMinutes(block.start_time) <= slot &&
+                        parseTimeToMinutes(block.end_time) > slot
+                    );
+                    const bookingAtSlot = scheduleBookings.some((booking) => {
+                      if (booking.stylist_id !== stylist.id) return false;
+                      const start = parseTimeToMinutes(booking.start_time);
+                      const end = parseTimeToMinutes(booking.end_time);
+                      return start <= slot && end > slot;
+                    });
+                    if (timeOff) {
+                      return (
+                        <div
+                          key={`${stylist.id}-${slot}-timeoff`}
+                          className="border-t border-gray-100 bg-red-50 text-red-700 text-[11px] flex items-center justify-center"
+                          style={{ gridColumn: index + 2 }}
+                        >
+                          Time off
+                        </div>
+                      );
+                    }
+                    if (bookingAtSlot) {
+                      return null;
+                    }
+                    return (
+                      <div
+                        key={`${stylist.id}-${slot}`}
+                        className="border-t border-gray-100 bg-white hover:bg-blue-50/30 transition-colors"
+                        style={{ gridColumn: index + 2 }}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDragEnter={(event) => {
+                          event.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
+                        }}
+                        onDragLeave={(event) => {
+                          event.currentTarget.style.backgroundColor = '';
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          event.currentTarget.style.backgroundColor = '';
+                          const bookingId = event.dataTransfer.getData("text/plain");
+                          if (bookingId) {
+                            const booking = scheduleBookings.find(b => b.id === bookingId);
+                            if (!booking) return;
+                            const service = services.find(s => s.name === booking.service_name);
+                            if (!service) return;
+                            const duration = service.duration_minutes;
+                            const stylistStart = parseTimeToMinutes(stylist.work_start);
+                            const stylistEnd = parseTimeToMinutes(stylist.work_end);
+                            if (slot < stylistStart || slot + duration > stylistEnd) {
+                              alert("Cannot drop: the booking would extend outside the stylist's working hours.");
+                              return;
+                            }
+                            rescheduleBooking(bookingId, stylist.id, slot);
+                          }
+                        }}
+                      />
+                    );
+                  })}
                 </React.Fragment>
               ))}
-
-              {scheduleTimeOff.map((block) => {
-                const startMinutes = parseTimeToMinutes(block.start_time);
-                const endMinutes = parseTimeToMinutes(block.end_time);
-                const rowStart = Math.floor((startMinutes - timeRange.start) / SLOT_MINUTES) + 2;
-                const rowSpan = Math.max(1, Math.ceil((endMinutes - startMinutes) / SLOT_MINUTES));
-                const stylistIndex = scheduleStylists.findIndex(
-                  (stylist) => stylist.id === block.stylist_id
-                );
-                if (stylistIndex === -1) return null;
-                return (
-                  <div
-                    key={`timeoff-${block.id}`}
-                    className="bg-red-50 text-red-700 border border-red-100 text-[11px] px-2 py-1 rounded-xl z-10"
-                    style={{
-                      gridColumn: stylistIndex + 2,
-                      gridRow: `${rowStart} / span ${rowSpan}`,
-                      margin: 4,
-                    }}
-                  >
-                    Time off
-                  </div>
-                );
-              })}
 
               {scheduleBookings.map((booking) => {
                 const startMinutes = parseTimeToMinutes(booking.start_time);
@@ -658,7 +699,6 @@ export default function OwnerPage() {
                     style={{
                       gridColumn: stylistIndex + 2,
                       gridRow: `${rowStart} / span ${rowSpan}`,
-                      margin: 4,
                       minWidth: 0,
                     }}
                   >

@@ -36,9 +36,12 @@ class OwnerChatResponse(BaseModel):
 
 
 SYSTEM_PROMPT = """You are Owner GPT for a salon. You manage services and stylists using structured actions.
+Assume the timezone is America/Phoenix (Tempe). Do not ask for timezone; use this by default.
 
 RULES:
 - Output ONE action at the end of the message using [ACTION: {{...}}] for any create, update, remove, or list request.
+- For booking/schedule questions, always use list_schedule instead of guessing.
+- For moving bookings, use reschedule_booking with from_time and to_time.
 - If required fields are missing, ask ONE short clarifying question.
 - Never invent data or confirm DB changes without an action.
 - Supported availability_rule values: weekends_only, weekdays_only, weekday_evenings, none.
@@ -55,6 +58,8 @@ STYLISTS:
 
 Actions:
 - list_services: {{}}
+- list_schedule: {{"date": "YYYY-MM-DD", "tz_offset_minutes": <int>}}
+- reschedule_booking: {{"date": "YYYY-MM-DD", "from_stylist_name": "<name>", "to_stylist_name": "<name>", "from_time": "HH:MM", "to_time": "HH:MM", "tz_offset_minutes": <int>}}
 - create_service: {{"name": "<name>", "duration_minutes": <int>, "price_cents": <int>, "availability_rule": "<rule>"}}
 - update_service_price: {{"service_id": <id>, "service_name": "<name>", "price_cents": <int>}}
 - update_service_duration: {{"service_id": <id>, "service_name": "<name>", "duration_minutes": <int>}}
@@ -146,6 +151,8 @@ async def get_stylists_context(session: AsyncSession) -> str:
 
 ALLOWED_ACTIONS = {
     "list_services",
+    "list_schedule",
+    "reschedule_booking",
     "create_service",
     "update_service_price",
     "update_service_duration",
