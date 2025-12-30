@@ -43,6 +43,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     action: dict | None = None  # Actions for frontend to execute
+    data: dict | None = None  # Tool results (services, slots, hold, confirm)
 
 
 SYSTEM_PROMPT = """You are a friendly booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
@@ -64,17 +65,22 @@ DATE RULES:
 CRITICAL RULES:
 - Be brief. One sentence only. Never list more than 3 items in text.
 - Do NOT list time slots in text. The UI shows them as buttons.
-- Do NOT confirm or hold bookings. The UI handles hold/confirm actions.
+- Never claim a booking is held or confirmed unless the backend tool succeeds.
 - If user mentions a date, use fetch_availability and say: "Here are a few good options. Tap one to continue."
 - If user tries to type a time, ask them to tap a time option.
 - Before holding: collect BOTH name AND email from user.
 - Follow the CURRENT STAGE and do not skip steps.
-- Only use show_services, select_service, or fetch_availability actions unless explicitly asked for help with a non-booking question.
+- Prefer tool calls; do not invent availability or confirmation.
+- UI SELECTIONS:
+  - "Service selected: <name>" → always use select_service with that service.
+  - "Date selected: YYYY-MM-DD" → use fetch_availability for that date.
+  - "Time selected: HH:MM with <stylist>" → ask for missing name/email, then hold_slot.
 
 ACTIONS (add at END of message):
 [ACTION: {{"type": "action_type", "params": {{...}}}}]
 
 Actions:
+- show_services: {{}}
 - select_service: {{"service_id": <id>, "service_name": "<name>"}}
 - fetch_availability: {{"service_id": <id>, "date": "YYYY-MM-DD"}}
 - hold_slot: {{"service_id": <id>, "stylist_id": <id>, "date": "YYYY-MM-DD", "start_time": "HH:MM", "customer_name": "<name>", "customer_email": "<email>"}}
@@ -85,7 +91,7 @@ BOOKING FLOW:
 2. User picks date → IMMEDIATELY use fetch_availability action and say "Here are the available times for [date]:" (slots appear automatically)
 3. User picks time from displayed slots → ask which stylist (Alex=ID 1, Jamie=ID 2) + their name + their email
 4. Once you have ALL of: time + stylist + name + email → immediately use hold_slot action with ALL params
-5. After hold succeeds → use confirm_booking action to finalize
+5. After a hold exists, ask the user to confirm; only use confirm_booking when they confirm
 
 RESPONSE STYLE:
 - Be professional and brief (one sentence)
@@ -356,16 +362,17 @@ async def chat_with_ai(
             reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
 
         # Guardrail: never list slots or long text
-        if stage == "SELECT_SLOT":
-            reply = STAGE_PROMPTS["SELECT_SLOT"]
-        if not action and stage in {"SELECT_SERVICE", "SELECT_DATE", "SELECT_SLOT", "HOLDING", "CONFIRMING"}:
-            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
-        if not action and stage not in {"DONE"}:
-            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
         if action and action.get("type") == "fetch_availability":
             reply = "Here are a few good options. Tap one to continue."
-        if action and action.get("type") == "select_service":
+        elif action and action.get("type") == "select_service":
             reply = "Great choice. Pick a date below to see times."
+        elif not reply:
+            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+
+        time_pattern = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b", re.IGNORECASE)
+        count_pattern = re.compile(r"\b\d+\s+(slots|times|options)\b", re.IGNORECASE)
+        if stage == "SELECT_SLOT" and (time_pattern.search(reply) or count_pattern.search(reply)):
+            reply = STAGE_PROMPTS["SELECT_SLOT"]
 
         return ChatResponse(reply=reply, action=action)
         

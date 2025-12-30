@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 
 type Role = "user" | "assistant" | "system";
 
@@ -119,8 +118,6 @@ export default function ChatPage() {
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
-  const router = useRouter();
-
   const [services, setServices] = useState<Service[]>([]);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [dateStr, setDateStr] = useState<string>(toLocalDateInputValue());
@@ -133,7 +130,6 @@ export default function ChatPage() {
   const [holdLoading, setHoldLoading] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [confirmLoading, setConfirmLoading] = useState(false);
-  const [confirmedBookingId, setConfirmedBookingId] = useState<string | null>(null);
 
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
@@ -1076,7 +1072,6 @@ export default function ChatPage() {
 
       if (res.ok) {
         setConfirmed(true);
-        setConfirmedBookingId(targetBookingId);
         setStage("DONE");
         appendAssistantMessage("You're all set. Your booking is confirmed.");
         if (customerEmail.trim()) {
@@ -1090,11 +1085,6 @@ export default function ChatPage() {
     } finally {
       setConfirmLoading(false);
     }
-  }
-
-  function openCalendarInvite(bookingId: string | null) {
-    if (!bookingId) return;
-    window.open(`${API_BASE}/bookings/${bookingId}/invite`, "_blank");
   }
 
   async function trackBookings(overrideEmail?: string) {
@@ -1134,7 +1124,6 @@ export default function ChatPage() {
     setSlots([]);
     setHold(null);
     setConfirmed(false);
-    setConfirmedBookingId(null);
     setCustomerName("");
     setCustomerEmail("");
     setStage("SELECT_SERVICE");
@@ -1231,24 +1220,6 @@ export default function ChatPage() {
                 </span>
               </div>
             </div>
-
-            <div className="space-y-2 mb-4">
-              <p className="text-xs text-gray-500 text-center">Add to your calendar</p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => openCalendarInvite(confirmedBookingId)}
-                  className="flex-1 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors"
-                >
-                  Apple Calendar
-                </button>
-                <button
-                  onClick={() => openCalendarInvite(confirmedBookingId)}
-                  className="flex-1 py-2 text-sm font-medium rounded-lg bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 transition-colors"
-                >
-                  Google Calendar
-                </button>
-              </div>
-            </div>
             
             <button
               onClick={bookAnotherAndDismiss}
@@ -1268,34 +1239,26 @@ export default function ChatPage() {
               <h1 className="text-xl font-semibold text-gray-900">Bishops Tempe</h1>
               <p className="text-sm text-gray-500">Premium Hair Studio</p>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
-                <button
-                  onClick={() => setMode("chat")}
-                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                    mode === "chat"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  AI Assistant
-                </button>
-                <button
-                  onClick={() => setMode("track")}
-                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                    mode === "track"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
-                  }`}
-                >
-                  Bookings
-                </button>
-              </div>
+            <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
               <button
-                onClick={() => router.push('/owner')}
-                className="px-4 py-2 bg-gray-900 text-white rounded-full text-sm font-medium hover:bg-gray-800 transition-colors"
+                onClick={() => setMode("chat")}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  mode === "chat"
+                    ? "bg-white text-gray-900 shadow-sm"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
               >
-                Owner
+                AI Assistant
+              </button>
+              <button
+                onClick={() => setMode("track")}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  mode === "track"
+                    ? "bg-white text-gray-900 shadow-sm"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                Bookings
               </button>
             </div>
           </div>
