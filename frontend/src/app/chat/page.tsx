@@ -133,6 +133,7 @@ export default function ChatPage() {
   const [holdLoading, setHoldLoading] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [confirmLoading, setConfirmLoading] = useState(false);
+  const [confirmedBookingId, setConfirmedBookingId] = useState<string | null>(null);
 
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
@@ -1075,6 +1076,7 @@ export default function ChatPage() {
 
       if (res.ok) {
         setConfirmed(true);
+        setConfirmedBookingId(targetBookingId);
         setStage("DONE");
         appendAssistantMessage("You're all set. Your booking is confirmed.");
         if (customerEmail.trim()) {
@@ -1088,6 +1090,11 @@ export default function ChatPage() {
     } finally {
       setConfirmLoading(false);
     }
+  }
+
+  function openCalendarInvite(bookingId: string | null) {
+    if (!bookingId) return;
+    window.open(`${API_BASE}/bookings/${bookingId}/invite`, "_blank");
   }
 
   async function trackBookings(overrideEmail?: string) {
@@ -1127,6 +1134,7 @@ export default function ChatPage() {
     setSlots([]);
     setHold(null);
     setConfirmed(false);
+    setConfirmedBookingId(null);
     setCustomerName("");
     setCustomerEmail("");
     setStage("SELECT_SERVICE");
@@ -1221,6 +1229,24 @@ export default function ChatPage() {
                 <span className="font-semibold text-gray-900">
                   {selectedService && formatMoney(selectedService.price_cents)}
                 </span>
+              </div>
+            </div>
+
+            <div className="space-y-2 mb-4">
+              <p className="text-xs text-gray-500 text-center">Add to your calendar</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => openCalendarInvite(confirmedBookingId)}
+                  className="flex-1 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors"
+                >
+                  Apple Calendar
+                </button>
+                <button
+                  onClick={() => openCalendarInvite(confirmedBookingId)}
+                  className="flex-1 py-2 text-sm font-medium rounded-lg bg-white text-blue-600 border border-blue-200 hover:bg-blue-50 transition-colors"
+                >
+                  Google Calendar
+                </button>
               </div>
             </div>
             

@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import List
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
@@ -45,6 +45,52 @@ def get_local_tz_offset_minutes() -> int:
         return 0
     return int(offset.total_seconds() / 60)
 
+
+def format_utc_timestamp(value: datetime) -> str:
+    """Format datetime as UTC timestamp for iCalendar (RFC 5545)."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y%m%dT%H%M%SZ")
+
+
+def escape_ical_text(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+    )
+
+
+def build_ics_event(
+    uid: str,
+    start_at: datetime,
+    end_at: datetime,
+    summary: str,
+    description: str,
+    location: str,
+) -> str:
+    dtstamp = format_utc_timestamp(datetime.now(timezone.utc))
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Convo Salon//Booking//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART:{format_utc_timestamp(start_at)}",
+        f"DTEND:{format_utc_timestamp(end_at)}",
+        f"SUMMARY:{escape_ical_text(summary)}",
+        f"DESCRIPTION:{escape_ical_text(description)}",
+        f"LOCATION:{escape_ical_text(location)}",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines) + "\r\n"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list or ["*"],
@@ -1841,6 +1887,48 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
     await session.commit()
     await session.refresh(booking)
     return ConfirmResponse(ok=True, booking_id=booking.id, status=booking.status)
+
+
+@app.get("/bookings/{booking_id}/invite")
+async def booking_invite(
+    booking_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+):
+    """Return a .ics invite file compatible with Google, Apple, and Outlook."""
+    result = await session.execute(
+        select(Booking, Service, Stylist)
+        .join(Service, Service.id == Booking.service_id)
+        .join(Stylist, Stylist.id == Booking.stylist_id)
+        .where(Booking.id == booking_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+
+    booking, service, stylist = row
+    if not booking.is_confirmed():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Booking is not confirmed"
+        )
+
+    customer_name = booking.customer_name or "Guest"
+    summary = f"{service.name} with {stylist.name}"
+    description = f"Booking for {customer_name}"
+    location = settings.default_shop_name
+
+    ics = build_ics_event(
+        uid=str(booking.id),
+        start_at=booking.start_at_utc,
+        end_at=booking.end_at_utc,
+        summary=summary,
+        description=description,
+        location=location,
+    )
+    filename = f"convo-booking-{booking.id}.ics"
+    return Response(
+        content=ics,
+        media_type="text/calendar",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 class BookingTrackResponse(BaseModel):
