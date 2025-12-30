@@ -601,7 +601,7 @@ export default function OwnerPage() {
                       }}
                       className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
                     >
-                      {stylist.time_off_count} off
+                      {stylist.time_off_count} hours off
                     </button>
                   </div>
                   {timeOffOpenStylistId === stylist.id && (

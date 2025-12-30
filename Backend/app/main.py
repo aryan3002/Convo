@@ -425,7 +425,8 @@ async def list_stylists_with_details(session: AsyncSession, shop_id: int):
             )
         )
         for block in time_off_result.scalars().all():
-            time_off_counts[block.stylist_id] = time_off_counts.get(block.stylist_id, 0) + 1
+            duration_hours = (block.end_at_utc - block.start_at_utc).total_seconds() / 3600
+            time_off_counts[block.stylist_id] = time_off_counts.get(block.stylist_id, 0) + duration_hours
 
     return [
         {
