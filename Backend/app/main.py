@@ -1,3 +1,4 @@
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from .core.config import get_settings
 from .core.db import AsyncSessionLocal, Base, engine, get_session
 from .chat import ChatRequest, ChatResponse, chat_with_ai
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
+from .emailer import send_booking_email_with_ics
 from .models import (
     Booking,
     BookingStatus,
@@ -30,6 +32,7 @@ from .seed import seed_initial_data
 
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
+logger = logging.getLogger(__name__)
 
 
 def get_local_now() -> datetime:
@@ -2114,6 +2117,51 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
     booking.status = BookingStatus.CONFIRMED
     await session.commit()
     await session.refresh(booking)
+
+    if booking.customer_email:
+        try:
+            result = await session.execute(
+                select(Service, Stylist).where(
+                    Service.id == booking.service_id,
+                    Stylist.id == booking.stylist_id,
+                )
+            )
+            service, stylist = result.one()
+            customer_name = booking.customer_name or "Guest"
+            summary = f"{service.name} with {stylist.name}"
+            description = f"Booking for {customer_name}"
+            location = settings.default_shop_name
+            ics_text = build_ics_event(
+                uid=str(booking.id),
+                start_at=booking.start_at_utc,
+                end_at=booking.end_at_utc,
+                summary=summary,
+                description=description,
+                location=location,
+            )
+            invite_url = f"{settings.public_api_base}/bookings/{booking.id}/invite"
+            html = f"""
+                <p>Hi {customer_name},</p>
+                <p>Your booking is confirmed.</p>
+                <ul>
+                  <li><strong>Service:</strong> {service.name}</li>
+                  <li><strong>Stylist:</strong> {stylist.name}</li>
+                  <li><strong>Start:</strong> {booking.start_at_utc} UTC</li>
+                  <li><strong>End:</strong> {booking.end_at_utc} UTC</li>
+                  <li><strong>Location:</strong> {location}</li>
+                </ul>
+                <p><a href="{invite_url}">Download calendar invite</a></p>
+            """
+            await send_booking_email_with_ics(
+                to_email=booking.customer_email,
+                subject=f"Booking confirmed: {service.name}",
+                html=html,
+                ics_filename=f"convo-booking-{booking.id}.ics",
+                ics_text=ics_text,
+            )
+        except Exception as exc:
+            logger.exception("Failed to send booking confirmation email: %s", exc)
+
     return ConfirmResponse(ok=True, booking_id=booking.id, status=booking.status)
 
 

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     working_days: str = Field(default="0,1,2,3,4,5", alias="WORKING_DAYS")
     default_shop_name: str = Field(default="Bishops Tempe", alias="DEFAULT_SHOP_NAME")
     chat_timezone: str = Field(default="America/Phoenix", alias="CHAT_TIMEZONE")
+    resend_api_key: str | None = Field(default=None, alias="RESEND_API_KEY")
+    resend_from: str | None = Field(default=None, alias="RESEND_FROM")
+    public_api_base: str = Field(default="http://localhost:8000", alias="PUBLIC_API_BASE")
 
     model_config = SettingsConfigDict(env_file=(".env", "Backend/.env", "backend/.env"), extra="ignore")
 
