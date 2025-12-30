@@ -160,6 +160,13 @@ class OwnerScheduleResponse(BaseModel):
     time_off: list[OwnerScheduleTimeOff]
 
 
+class OwnerTimeOffEntry(BaseModel):
+    start_time: str
+    end_time: str
+    date: str
+    reason: str | None = None
+
+
 class OwnerRescheduleRequest(BaseModel):
     booking_id: uuid.UUID
     stylist_id: int
@@ -213,6 +220,11 @@ def to_utc_from_local_zone(local_date: date, local_time: time) -> datetime:
 def to_local_time_str(dt: datetime, tz_offset_minutes: int) -> str:
     tz = timezone(timedelta(minutes=tz_offset_minutes))
     return dt.astimezone(tz).strftime("%H:%M")
+
+
+def to_local_date_str(dt: datetime, tz_offset_minutes: int) -> str:
+    tz = timezone(timedelta(minutes=tz_offset_minutes))
+    return dt.astimezone(tz).strftime("%Y-%m-%d")
 
 
 async def fetch_service(session: AsyncSession, service_id: int) -> Service:
@@ -899,6 +911,28 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
 
     def parse_time_off_range(raw_params: dict) -> tuple[datetime | None, datetime | None, str | None]:
         tz_offset = raw_params.get("tz_offset_minutes")
+        date_str = raw_params.get("date")
+        start_time_str = raw_params.get("start_time")
+        end_time_str = raw_params.get("end_time")
+        if date_str and start_time_str and end_time_str:
+            try:
+                date = parse_date_str(date_str)
+                start_time = parse_time_of_day(start_time_str)
+                end_time = parse_time_of_day(end_time_str)
+                if date and start_time and end_time:
+                    if tz_offset is not None:
+                        return (
+                            to_utc_from_local(date, start_time, int(tz_offset)),
+                            to_utc_from_local(date, end_time, int(tz_offset)),
+                            None,
+                        )
+                    return (
+                        to_utc_from_local_zone(date, start_time),
+                        to_utc_from_local_zone(date, end_time),
+                        None,
+                    )
+            except ValueError:
+                return None, None, "Invalid date or time format."
         start_at = raw_params.get("start_at")
         end_at = raw_params.get("end_at")
         if isinstance(start_at, str) and isinstance(end_at, str):
@@ -1078,11 +1112,17 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     stylist_add_intent = "stylist" in normalized_last and any(
         word in normalized_last for word in ["add", "create", "new", "hire"]
     )
+    stylist_remove_intent = "stylist" in normalized_last and remove_intent
     stylist_specialty_intent = any(
         word in normalized_last for word in ["specialty", "specialties", "specialize", "specializes"]
     )
     stylist_time_off_intent = any(
         phrase in normalized_last for phrase in ["time off", "off", "vacation", "pto"]
+    )
+    time_off_query_intent = any(
+        phrase in normalized_last for phrase in ["time off", "vacation", "pto"]
+    ) and any(
+        word in normalized_last for word in ["who", "when", "any", "show", "list", "have"]
     )
     schedule_intent = any(word in normalized_last for word in ["schedule", "appointment", "appointments", "booking", "bookings"])
     reschedule_intent = any(word in normalized_last for word in ["reschedule", "move", "change", "shift"])
@@ -1111,6 +1151,18 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                 },
             }
             params = action["params"]
+        elif time_off_query_intent and action_type in {None, "list_services", "list_stylists"}:
+            action_type = "list_schedule"
+            action = {
+                "type": action_type,
+                "params": {
+                    "date": inferred_date.isoformat() if inferred_date else None,
+                    "stylist_name": stylist_for_schedule.name if stylist_for_schedule else None,
+                    "time_off_only": True,
+                    "tz_offset_minutes": tz_offset_default,
+                },
+            }
+            params = action["params"]
         elif schedule_intent and action_type in {None, "list_services", "list_stylists"}:
             action_type = "list_schedule"
             action = {
@@ -1135,6 +1187,21 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             action_type = "create_stylist"
             action = {"type": action_type, "params": {"name": last_text}}
             params = action["params"]
+
+        if stylist_remove_intent and action_type in {
+            "list_services",
+            "list_stylists",
+            "create_service",
+            "update_service_price",
+            "update_service_duration",
+            "remove_service",
+            "set_service_rule",
+        }:
+            stylist = match_stylist_in_text(last_text) or latest_stylist_from_messages()
+            if stylist:
+                action_type = "remove_stylist"
+                action = {"type": action_type, "params": {"stylist_id": stylist.id}}
+                params = action["params"]
 
         if "stylist" in normalized_last and action_type == "list_services":
             action_type = "list_stylists"
@@ -1174,6 +1241,12 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                 action_type = "create_stylist"
                 action = {"type": action_type, "params": {"name": last_text}}
                 params = action["params"]
+            elif stylist_remove_intent:
+                stylist = match_stylist_in_text(last_text) or latest_stylist_from_messages()
+                if stylist:
+                    action_type = "remove_stylist"
+                    action = {"type": action_type, "params": {"stylist_id": stylist.id}}
+                    params = action["params"]
             elif list_intent:
                 action_type = "list_services"
                 action = {"type": action_type, "params": {}}
@@ -1207,8 +1280,11 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                     params = action["params"]
             elif stylist_time_off_intent:
                 stylist = match_stylist_in_text(last_text) or latest_stylist_from_messages()
-                if stylist:
-                    action_type = "add_time_off"
+                if stylist and not time_off_query_intent:
+                    if remove_intent:
+                        action_type = "remove_time_off"
+                    else:
+                        action_type = "add_time_off"
                     action = {
                         "type": action_type,
                         "params": {"stylist_id": stylist.id, "raw_text": last_text},
@@ -1229,35 +1305,49 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             schedule = await owner_schedule(date=date_str, tz_offset_minutes=tz_offset, session=session)  # type: ignore[arg-type]
             data = {"schedule": schedule.model_dump()}
             stylist = await resolve_stylist()
+            time_off_only = bool(params.get("time_off_only"))
             if stylist:
-                stylist_bookings = [
-                    b for b in schedule.bookings if b.stylist_id == stylist.id
-                ]
-                if stylist_bookings:
-                    def to_ampm(value: str) -> str:
-                        try:
-                            hh, mm = value.split(":")
-                            hour = int(hh)
-                            minute = int(mm)
-                        except Exception:
-                            return value
-                        meridiem = "AM"
-                        if hour >= 12:
-                            meridiem = "PM"
-                        hour = hour % 12 or 12
-                        return f"{hour}:{minute:02d} {meridiem}"
-
-                    slots = [
-                        f"{to_ampm(b.start_time)}–{to_ampm(b.end_time)} ({b.service_name})"
-                        for b in stylist_bookings
-                    ]
-                    reply_override = (
-                        f"{stylist.name} has {len(stylist_bookings)} booking(s) on {date_str}: "
-                        + "; ".join(slots)
-                        + "."
-                    )
+                stylist_time_off = [b for b in schedule.time_off if b.stylist_id == stylist.id]
+                if time_off_only:
+                    if stylist_time_off:
+                        slots = [
+                            f"{b.start_time}–{b.end_time}" + (f" ({b.reason})" if b.reason else "")
+                            for b in stylist_time_off
+                        ]
+                        reply_override = (
+                            f"{stylist.name} has time off on {date_str}: " + "; ".join(slots) + "."
+                        )
+                    else:
+                        reply_override = f"{stylist.name} has no time off on {date_str}."
                 else:
-                    reply_override = f"{stylist.name} has no bookings on {date_str}."
+                    stylist_bookings = [
+                        b for b in schedule.bookings if b.stylist_id == stylist.id
+                    ]
+                    if stylist_bookings:
+                        def to_ampm(value: str) -> str:
+                            try:
+                                hh, mm = value.split(":")
+                                hour = int(hh)
+                                minute = int(mm)
+                            except Exception:
+                                return value
+                            meridiem = "AM"
+                            if hour >= 12:
+                                meridiem = "PM"
+                            hour = hour % 12 or 12
+                            return f"{hour}:{minute:02d} {meridiem}"
+
+                        slots = [
+                            f"{to_ampm(b.start_time)}–{to_ampm(b.end_time)} ({b.service_name})"
+                            for b in stylist_bookings
+                        ]
+                        reply_override = (
+                            f"{stylist.name} has {len(stylist_bookings)} booking(s) on {date_str}: "
+                            + "; ".join(slots)
+                            + "."
+                        )
+                    else:
+                        reply_override = f"{stylist.name} has no bookings on {date_str}."
             else:
                 total_bookings = len(schedule.bookings)
                 if total_bookings > 0:
@@ -1269,6 +1359,17 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                     reply_override = f"Schedule for {date_str}: {total_bookings} booking(s) total. Breakdown: {summary}."
                 else:
                     reply_override = f"No bookings on {date_str}."
+                # Add time off summary
+                time_off_blocks = schedule.time_off
+                if time_off_blocks:
+                    time_off_list = []
+                    for block in time_off_blocks:
+                        stylist_name = next((s['name'] for s in schedule.stylists if s['id'] == block.stylist_id), 'Unknown')
+                        time_off_list.append(f"{stylist_name}: {block.start_time}-{block.end_time}" + (f" ({block.reason})" if block.reason else ""))
+                    time_off_summary = "; ".join(time_off_list)
+                    reply_override += f" Time off: {time_off_summary}."
+                else:
+                    reply_override += " No time off."
 
         elif action_type == "reschedule_booking":
             date_str = params.get("date") or datetime.now().date().isoformat()
@@ -1495,8 +1596,61 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
                 )
             )
             await session.commit()
-            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            date_str = params.get("date") or (infer_date_from_messages().isoformat() if infer_date_from_messages() else None)
+            tz_offset = (
+                int(params.get("tz_offset_minutes"))
+                if params.get("tz_offset_minutes") is not None
+                else get_local_tz_offset_minutes()
+            )
+            schedule = await owner_schedule(
+                date=date_str or datetime.now().date().isoformat(),
+                tz_offset_minutes=tz_offset,
+                session=session,
+            )  # type: ignore[arg-type]
+            data = {
+                "stylists": await list_stylists_with_details(session, shop.id),
+                "schedule": schedule.model_dump(),
+            }
             reply_override = f"Time off saved for {stylist.name}."
+
+        elif action_type == "remove_time_off":
+            stylist = await resolve_stylist()
+            if not stylist:
+                return OwnerChatResponse(reply="Which stylist is this for?", action=None)
+            start_at_utc, end_at_utc, error = parse_time_off_range(params)
+            if error:
+                return OwnerChatResponse(reply=error, action=None)
+            if not start_at_utc or not end_at_utc:
+                return OwnerChatResponse(reply="Please provide a valid start and end time.", action=None)
+            # Find and delete the time off block
+            result = await session.execute(
+                select(TimeOffBlock).where(
+                    TimeOffBlock.stylist_id == stylist.id,
+                    TimeOffBlock.start_at_utc == start_at_utc,
+                    TimeOffBlock.end_at_utc == end_at_utc,
+                )
+            )
+            block = result.scalar_one_or_none()
+            if not block:
+                return OwnerChatResponse(reply=f"No time off found for {stylist.name} at that time.", action=None)
+            await session.delete(block)
+            await session.commit()
+            date_str = params.get("date") or (infer_date_from_messages().isoformat() if infer_date_from_messages() else None)
+            tz_offset = (
+                int(params.get("tz_offset_minutes"))
+                if params.get("tz_offset_minutes") is not None
+                else get_local_tz_offset_minutes()
+            )
+            schedule = await owner_schedule(
+                date=date_str or datetime.now().date().isoformat(),
+                tz_offset_minutes=tz_offset,
+                session=session,
+            )  # type: ignore[arg-type]
+            data = {
+                "stylists": await list_stylists_with_details(session, shop.id),
+                "schedule": schedule.model_dump(),
+            }
+            reply_override = f"Time off removed for {stylist.name}."
 
         elif action_type == "update_service_duration":
             service = await resolve_service()
@@ -1535,6 +1689,33 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             data = {"services": await list_services_with_rules(session, shop.id)}
             reply_override = "Service removed."
 
+        elif action_type == "remove_stylist":
+            stylist = await resolve_stylist()
+            if not stylist:
+                return OwnerChatResponse(reply="Which stylist should I remove?", action=None)
+
+            result = await session.execute(
+                select(Booking.id).where(Booking.stylist_id == stylist.id).limit(1)
+            )
+            if result.scalar_one_or_none():
+                return OwnerChatResponse(
+                    reply="That stylist has bookings. Remove bookings first or keep them.",
+                    action=None,
+                )
+
+            # Remove specialties
+            await session.execute(
+                StylistSpecialty.__table__.delete().where(StylistSpecialty.stylist_id == stylist.id)
+            )
+            # Remove time off
+            await session.execute(
+                TimeOffBlock.__table__.delete().where(TimeOffBlock.stylist_id == stylist.id)
+            )
+            await session.delete(stylist)
+            await session.commit()
+            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            reply_override = f"Stylist {stylist.name} removed."
+
         elif action_type == "set_service_rule":
             service = await resolve_service()
             if not service:
@@ -1567,7 +1748,26 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     return OwnerChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
 
 
-@app.get("/owner/schedule", response_model=OwnerScheduleResponse)
+@app.get("/owner/stylists/{stylist_id}/time_off")
+async def get_stylist_time_off(stylist_id: int, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(
+        select(TimeOffBlock).where(TimeOffBlock.stylist_id == stylist_id).order_by(TimeOffBlock.start_at_utc)
+    )
+    blocks = result.scalars().all()
+    tz_offset = 0  # or get from request, but for simplicity
+    return [
+        {
+            "id": b.id,
+            "start_time": to_local_time_str(b.start_at_utc, tz_offset),
+            "end_time": to_local_time_str(b.end_at_utc, tz_offset),
+            "reason": b.reason,
+            "date": b.start_at_utc.date().isoformat(),
+        }
+        for b in blocks
+    ]
+
+
+@app.get("/owner/schedule")
 async def owner_schedule(
     date: str,
     tz_offset_minutes: int = 0,
@@ -1638,6 +1838,34 @@ async def owner_schedule(
         bookings=bookings,
         time_off=time_off,
     )
+
+
+@app.get("/owner/stylists/{stylist_id}/time_off", response_model=list[OwnerTimeOffEntry])
+async def owner_time_off_for_stylist(
+    stylist_id: int,
+    tz_offset_minutes: int = 0,
+    session: AsyncSession = Depends(get_session),
+):
+    stylist = await fetch_stylist(session, stylist_id)
+    result = await session.execute(
+        select(TimeOffBlock)
+        .where(TimeOffBlock.stylist_id == stylist.id)
+        .order_by(TimeOffBlock.start_at_utc)
+    )
+    entries = []
+    for block in result.scalars().all():
+        local_start = to_local_time_str(block.start_at_utc, tz_offset_minutes)
+        local_end = to_local_time_str(block.end_at_utc, tz_offset_minutes)
+        local_date = to_local_date_str(block.start_at_utc, tz_offset_minutes)
+        entries.append(
+            OwnerTimeOffEntry(
+                start_time=local_start,
+                end_time=local_end,
+                date=local_date,
+                reason=block.reason,
+            )
+        )
+    return entries
 
 
 @app.post("/owner/bookings/reschedule")

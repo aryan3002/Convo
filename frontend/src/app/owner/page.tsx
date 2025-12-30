@@ -71,6 +71,13 @@ type OwnerChatResponse = {
   } | null;
 };
 
+type OwnerTimeOffEntry = {
+  start_time: string;
+  end_time: string;
+  date: string;
+  reason?: string | null;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
 const TZ_OFFSET =
   Number(process.env.NEXT_PUBLIC_TZ_OFFSET_MINUTES) || -new Date().getTimezoneOffset();
@@ -107,6 +114,9 @@ export default function OwnerPage() {
     return today.toISOString().split("T")[0];
   });
   const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [timeOffOpenStylistId, setTimeOffOpenStylistId] = useState<number | null>(null);
+  const [timeOffLoading, setTimeOffLoading] = useState(false);
+  const [timeOffEntries, setTimeOffEntries] = useState<Record<number, OwnerTimeOffEntry[]>>({});
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -153,6 +163,9 @@ export default function OwnerPage() {
     }
     if (data.stylists) {
       setStylists(data.stylists);
+      if (schedule) {
+        setSchedule({...schedule, stylists: data.stylists});
+      }
     }
     if (data.schedule) {
       setSchedule(data.schedule);
@@ -180,6 +193,22 @@ export default function OwnerPage() {
       }
     } catch {
       // ignore; UI will show empty state
+    }
+  }
+
+  async function fetchTimeOffForStylist(stylistId: number) {
+    if (timeOffEntries[stylistId]) return;
+    setTimeOffLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/owner/stylists/${stylistId}/time_off?tz_offset_minutes=${TZ_OFFSET}`
+      );
+      if (res.ok) {
+        const data: OwnerTimeOffEntry[] = await res.json();
+        setTimeOffEntries((prev) => ({ ...prev, [stylistId]: data }));
+      }
+    } finally {
+      setTimeOffLoading(false);
     }
   }
 
@@ -291,6 +320,60 @@ export default function OwnerPage() {
       if (meridiem === "pm") hour += 12;
     }
     return hour * 60 + minute;
+  }
+
+  function formatTimeLabel(value: string) {
+    if (!value) return "";
+    const [hourStr, minuteStr] = value.split(":");
+    const hour = Number(hourStr);
+    const minute = Number(minuteStr);
+    const meridiem = hour >= 12 ? "PM" : "AM";
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}:${minute.toString().padStart(2, "0")} ${meridiem}`;
+  }
+
+  function formatDateLabel(value: string) {
+    if (!value) return "";
+    const [yyyy, mm, dd] = value.split("-").map(Number);
+    const dt = new Date(yyyy, mm - 1, dd);
+    return dt.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+  }
+
+  function formatDuration(minutes: number) {
+    const hrs = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    if (hrs && mins) return `${hrs}h ${mins}m`;
+    if (hrs) return `${hrs}h`;
+    return `${mins}m`;
+  }
+
+  function summarizeTimeOff(entries: OwnerTimeOffEntry[]) {
+    const byDate: Record<string, { start: number; end: number }[]> = {};
+    entries.forEach((entry) => {
+      const start = parseTimeToMinutes(entry.start_time);
+      const end = parseTimeToMinutes(entry.end_time);
+      if (!byDate[entry.date]) byDate[entry.date] = [];
+      byDate[entry.date].push({ start, end });
+    });
+
+    return Object.entries(byDate).map(([date, blocks]) => {
+      blocks.sort((a, b) => a.start - b.start);
+      const merged: { start: number; end: number }[] = [];
+      for (const block of blocks) {
+        const last = merged[merged.length - 1];
+        if (last && block.start <= last.end) {
+          last.end = Math.max(last.end, block.end);
+        } else {
+          merged.push({ ...block });
+        }
+      }
+      const totalMinutes = merged.reduce((sum, block) => sum + (block.end - block.start), 0);
+      return {
+        date,
+        blocks: merged,
+        totalMinutes,
+      };
+    });
   }
 
   function minutesToTimeLabel(minutes: number) {
@@ -493,28 +576,74 @@ export default function OwnerPage() {
                 {stylists.length === 0 && (
                   <div className="text-xs text-gray-400">No stylists loaded yet.</div>
                 )}
-                {stylists.map((stylist) => (
-                  <div key={stylist.id} className="border border-gray-100 rounded-2xl p-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{stylist.name}</p>
-                        <p className="text-xs text-gray-500">
-                          {stylist.work_start}–{stylist.work_end}
-                        </p>
-                        <p className="text-xs text-gray-500">
-                          {stylist.specialties.length > 0
-                            ? stylist.specialties.join(", ")
-                            : "No specialties"}
-                        </p>
-                      </div>
-                      <span className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-500">
-                        {stylist.time_off_count} off
-                      </span>
+              {stylists.map((stylist) => (
+                <div key={stylist.id} className="border border-gray-100 rounded-2xl p-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">{stylist.name}</p>
+                      <p className="text-xs text-gray-500">
+                        {stylist.work_start}–{stylist.work_end}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {stylist.specialties.length > 0
+                          ? stylist.specialties.join(", ")
+                          : "No specialties"}
+                      </p>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = timeOffOpenStylistId === stylist.id ? null : stylist.id;
+                        setTimeOffOpenStylistId(next);
+                        if (next) {
+                          fetchTimeOffForStylist(stylist.id);
+                        }
+                      }}
+                      className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
+                    >
+                      {stylist.time_off_count} off
+                    </button>
                   </div>
-                ))}
-              </div>
+                  {timeOffOpenStylistId === stylist.id && (
+                    <div className="mt-3 border border-gray-100 rounded-xl bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                      {timeOffLoading && !timeOffEntries[stylist.id] && (
+                        <div className="text-gray-400">Loading time off...</div>
+                      )}
+                      {!timeOffLoading && (timeOffEntries[stylist.id]?.length ?? 0) === 0 && (
+                        <div className="text-gray-400">No time off logged.</div>
+                      )}
+                      {timeOffEntries[stylist.id]?.length ? (
+                        <div className="space-y-2">
+                          {summarizeTimeOff(timeOffEntries[stylist.id]).map((entry) => (
+                            <div key={`${stylist.id}-${entry.date}`} className="flex items-start justify-between gap-3">
+                              <div>
+                                <div className="text-[11px] font-semibold text-gray-700">
+                                  {formatDateLabel(entry.date)}
+                                </div>
+                                <div className="text-[11px] text-gray-500">
+                                  {entry.blocks
+                                    .map(
+                                      (block) =>
+                                        `${formatTimeLabel(minutesToTimeValue(block.start))}–${formatTimeLabel(
+                                          minutesToTimeValue(block.end)
+                                        )}`
+                                    )
+                                    .join(", ")}
+                                </div>
+                              </div>
+                              <div className="text-[11px] font-semibold text-gray-700">
+                                {formatDuration(entry.totalMinutes)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
+          </div>
           )}
         </aside>
       </main>
@@ -619,6 +748,9 @@ export default function OwnerPage() {
                       const end = parseTimeToMinutes(booking.end_time);
                       return start <= slot && end > slot;
                     });
+                    const stylistStart = parseTimeToMinutes(stylist.work_start);
+                    const stylistEnd = parseTimeToMinutes(stylist.work_end);
+                    const isWithinHours = slot >= stylistStart && slot < stylistEnd;
                     if (timeOff) {
                       return (
                         <div
@@ -636,16 +768,16 @@ export default function OwnerPage() {
                     return (
                       <div
                         key={`${stylist.id}-${slot}`}
-                        className="border-t border-gray-100 bg-white hover:bg-blue-50/30 transition-colors"
+                        className={`border-t border-gray-100 ${isWithinHours ? 'bg-white hover:bg-blue-50/30 transition-colors' : 'bg-gray-200'}`}
                         style={{ gridColumn: index + 2 }}
-                        onDragOver={(event) => event.preventDefault()}
-                        onDragEnter={(event) => {
+                        onDragOver={isWithinHours ? (event) => event.preventDefault() : undefined}
+                        onDragEnter={isWithinHours ? (event) => {
                           event.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
-                        }}
-                        onDragLeave={(event) => {
+                        } : undefined}
+                        onDragLeave={isWithinHours ? (event) => {
                           event.currentTarget.style.backgroundColor = '';
-                        }}
-                        onDrop={(event) => {
+                        } : undefined}
+                        onDrop={isWithinHours ? (event) => {
                           event.preventDefault();
                           event.currentTarget.style.backgroundColor = '';
                           const bookingId = event.dataTransfer.getData("text/plain");
@@ -655,15 +787,13 @@ export default function OwnerPage() {
                             const service = services.find(s => s.name === booking.service_name);
                             if (!service) return;
                             const duration = service.duration_minutes;
-                            const stylistStart = parseTimeToMinutes(stylist.work_start);
-                            const stylistEnd = parseTimeToMinutes(stylist.work_end);
                             if (slot < stylistStart || slot + duration > stylistEnd) {
                               alert("Cannot drop: the booking would extend outside the stylist's working hours.");
                               return;
                             }
                             rescheduleBooking(bookingId, stylist.id, slot);
                           }
-                        }}
+                        } : undefined}
                       />
                     );
                   })}

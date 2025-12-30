@@ -67,17 +67,25 @@ Actions:
 - set_service_rule: {{"service_id": <id>, "service_name": "<name>", "availability_rule": "<rule>"}}
 - list_stylists: {{}}
 - create_stylist: {{"name": "<name>", "work_start": "HH:MM", "work_end": "HH:MM"}}
+- remove_stylist: {{"stylist_id": <id>, "stylist_name": "<name>"}}
 - update_stylist_hours: {{"stylist_id": <id>, "stylist_name": "<name>", "work_start": "HH:MM", "work_end": "HH:MM"}}
 - update_stylist_specialties: {{"stylist_id": <id>, "stylist_name": "<name>", "tags": ["color","balayage"]}}
 - add_time_off: {{"stylist_id": <id>, "stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
+- remove_time_off: {{"stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
 
 Examples:
-User: "Add Keratin Treatment: 90 minutes, $200"
-Reply: "Got it. I'll add Keratin Treatment." [ACTION: {{"type":"create_service","params":{{"name":"Keratin Treatment","duration_minutes":90,"price_cents":20000,"availability_rule":"none"}}}}]
+User: "Create Keratin Treatment: 90 minutes, $200"
+Reply: "Got it. I'll create Keratin Treatment." [ACTION: {{"type":"create_service","params":{{"name":"Keratin Treatment","duration_minutes":90,"price_cents":20000,"availability_rule":"none"}}}}]
 User: "Alex is off next Tuesday 2–6pm"
 Reply: "Got it. I'll add that time off." [ACTION: {{"type":"add_time_off","params":{{"stylist_name":"Alex","date":"YYYY-MM-DD","start_time":"14:00","end_time":"18:00"}}}}]
-User: "Jamie specializes in color + balayage"
-Reply: "Got it. Updating specialties." [ACTION: {{"type":"update_stylist_specialties","params":{{"stylist_name":"Jamie","tags":["color","balayage"]}}}}]
+User: "Add time off for Alex on December 30 from 11am to 2pm"
+Reply: "Got it. I'll add that time off." [ACTION: {{"type":"add_time_off","params":{{"stylist_name":"Alex","date":"2025-12-30","start_time":"11:00","end_time":"14:00"}}}}]
+User: "Remove time off for Alex on Tuesday from 2–6pm"
+Reply: "Got it. I'll remove that time off." [ACTION: {{"type":"remove_time_off","params":{{"stylist_name":"Alex","date":"YYYY-MM-DD","start_time":"14:00","end_time":"18:00"}}}}]
+User: "Add a new stylist named John"
+Reply: "Got it. I'll add John as a new stylist." [ACTION: {{"type":"create_stylist","params":{{"name":"John","work_start":"09:00","work_end":"17:00"}}}}]
+User: "Remove John as a stylist"
+Reply: "Got it. I'll remove John." [ACTION: {{"type":"remove_stylist","params":{{"stylist_name":"John"}}}}]
 """
 
 
@@ -160,9 +168,11 @@ ALLOWED_ACTIONS = {
     "set_service_rule",
     "list_stylists",
     "create_stylist",
+    "remove_stylist",
     "update_stylist_hours",
     "update_stylist_specialties",
     "add_time_off",
+    "remove_time_off",
 }
 
 
