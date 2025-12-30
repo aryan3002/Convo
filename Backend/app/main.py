@@ -15,11 +15,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .core.config import get_settings
 from .core.db import AsyncSessionLocal, Base, engine, get_session
 from .chat import ChatRequest, ChatResponse, chat_with_ai
+from .customer_memory import (
+    get_customer_by_email,
+    get_customer_context,
+    get_customers_by_preferred_stylist,
+    update_customer_stats,
+)
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
 from .emailer import send_booking_email_with_ics
 from .models import (
     Booking,
     BookingStatus,
+    Customer,
+    CustomerBookingStats,
+    CustomerStylistPreference,
     Service,
     ServiceRule,
     Shop,
@@ -695,6 +704,21 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     def contains_price_intent(text: str) -> bool:
         normalized = normalize_text(text)
         return any(word in normalized for word in ["price", "cost", "increase", "decrease", "change", "set", "update"])
+
+    def extract_email_from_text(text: str) -> str:
+        if not text:
+            return ""
+        match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", text, re.IGNORECASE)
+        return match.group(0).strip().lower() if match else ""
+
+    def latest_email_from_messages() -> str:
+        for msg in reversed(request.messages):
+            if msg.role != "user":
+                continue
+            email = extract_email_from_text(msg.content)
+            if email:
+                return email
+        return ""
 
     def extract_rule(text: str) -> str:
         normalized = normalize_text(text)
@@ -1422,6 +1446,36 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             data = {"stylists": await list_stylists_with_details(session, shop.id)}
             reply_override = "Here are your current stylists."
 
+        elif action_type == "get_customer_profile":
+            email = str(params.get("email") or "").strip().lower()
+            if not email:
+                email = latest_email_from_messages()
+            if not email:
+                return OwnerChatResponse(reply="Which customer email should I look up?", action=None)
+            context = await get_customer_context(session, email)
+            if not context:
+                return OwnerChatResponse(reply="No customer found for that email.", action=None)
+            reply_override = (
+                f"{context.get('name') or context['email']}: "
+                f"{context.get('total_bookings', 0)} booking(s), "
+                f"average spend ${context.get('average_spend_cents', 0) / 100:.2f}. "
+                f"Last service: {context.get('last_service') or 'Unknown'}."
+            )
+            data = {"customer": context}
+
+        elif action_type == "list_customers_by_stylist":
+            stylist = await resolve_stylist()
+            if not stylist:
+                return OwnerChatResponse(reply="Which stylist is this for?", action=None)
+            customers = await get_customers_by_preferred_stylist(session, stylist.id)
+            if not customers:
+                reply_override = f"No customers currently prefer {stylist.name}."
+            else:
+                sample = customers[:10]
+                names = [c.name or c.email for c in sample]
+                reply_override = f"Customers who prefer {stylist.name}: {', '.join(names)}."
+            data = {"customers": [{"email": c.email, "name": c.name} for c in customers]}
+
         elif action_type == "create_service":
             name = str(params.get("name") or "").strip()
             duration = parse_duration_minutes(params.get("duration_minutes"))
@@ -2115,19 +2169,21 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
         if existing.is_hold_active(now):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Slot held by another user")
 
+    result = await session.execute(
+        select(Service, Stylist).where(
+            Service.id == booking.service_id,
+            Stylist.id == booking.stylist_id,
+        )
+    )
+    service, stylist = result.one()
+
     booking.status = BookingStatus.CONFIRMED
+    await update_customer_stats(session, booking, service, stylist)
     await session.commit()
     await session.refresh(booking)
 
     if booking.customer_email:
         try:
-            result = await session.execute(
-                select(Service, Stylist).where(
-                    Service.id == booking.service_id,
-                    Stylist.id == booking.stylist_id,
-                )
-            )
-            service, stylist = result.one()
             customer_name = booking.customer_name or "Guest"
             summary = f"{service.name} with {stylist.name}"
             description = f"Booking for {customer_name}"
@@ -2220,6 +2276,18 @@ class BookingTrackResponse(BaseModel):
     created_at: datetime
 
 
+class CustomerProfileResponse(BaseModel):
+    email: str
+    name: str | None
+    preferred_stylist: str | None
+    last_service: str | None
+    last_stylist: str | None
+    average_spend_cents: int
+    total_bookings: int
+    total_spend_cents: int
+    last_booking_at: datetime | None
+
+
 @app.get("/bookings/track")
 async def track_bookings(email: str, session: AsyncSession = Depends(get_session)):
     """Track bookings by customer email."""
@@ -2260,3 +2328,21 @@ async def track_bookings(email: str, session: AsyncSession = Depends(get_session
         ))
     
     return response
+
+
+@app.get("/customers/{email}", response_model=CustomerProfileResponse)
+async def get_customer_profile(email: str, session: AsyncSession = Depends(get_session)):
+    context = await get_customer_context(session, email)
+    if not context:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+    return CustomerProfileResponse(
+        email=context.get("email"),
+        name=context.get("name"),
+        preferred_stylist=context.get("preferred_stylist"),
+        last_service=context.get("last_service"),
+        last_stylist=context.get("last_stylist"),
+        average_spend_cents=int(context.get("average_spend_cents") or 0),
+        total_bookings=int(context.get("total_bookings") or 0),
+        total_spend_cents=int(context.get("total_spend_cents") or 0),
+        last_booking_at=context.get("last_booking_at"),
+    )

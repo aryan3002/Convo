@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
+from .customer_memory import get_customer_context
 from .models import Service, Stylist
 
 settings = get_settings()
@@ -179,6 +180,10 @@ def shorten_reply(text: str) -> str:
     return sentence
 
 
+def format_cents(value: int) -> str:
+    return f"${value / 100:.2f}"
+
+
 async def get_services_context(session: AsyncSession) -> str:
     """Get formatted services list for the system prompt."""
     result = await session.execute(select(Service).order_by(Service.id))
@@ -289,6 +294,38 @@ async def chat_with_ai(
         
         if context_parts:
             system_prompt += f"\n\nCURRENT BOOKING CONTEXT:\n" + "\n".join(context_parts)
+
+    customer_email = None
+    if context and context.get("customer_email"):
+        customer_email = str(context.get("customer_email") or "").strip().lower()
+    if not customer_email:
+        for msg in reversed(messages):
+            if msg.role != "user":
+                continue
+            match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", msg.content, re.IGNORECASE)
+            if match:
+                customer_email = match.group(0).strip().lower()
+                break
+
+    if customer_email:
+        customer_context = await get_customer_context(session, customer_email)
+        if customer_context:
+            profile_lines = ["Customer Profile:"]
+            if customer_context.get("last_service"):
+                profile_lines.append(f"- Last service: {customer_context['last_service']}")
+            if customer_context.get("preferred_stylist"):
+                profile_lines.append(f"- Preferred stylist: {customer_context['preferred_stylist']}")
+            if customer_context.get("average_spend_cents") is not None:
+                profile_lines.append(
+                    f"- Average spend: {format_cents(int(customer_context['average_spend_cents']))}"
+                )
+            if customer_context.get("total_bookings") is not None:
+                profile_lines.append(
+                    f"- Total bookings: {int(customer_context['total_bookings'])}"
+                )
+            if customer_context.get("last_stylist"):
+                profile_lines.append(f"- Last stylist: {customer_context['last_stylist']}")
+            system_prompt += "\n\n" + "\n".join(profile_lines)
     
     # Build messages for OpenAI
     openai_messages = [{"role": "system", "content": system_prompt}]

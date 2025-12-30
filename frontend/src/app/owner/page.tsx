@@ -71,6 +71,18 @@ type OwnerChatResponse = {
   } | null;
 };
 
+type CustomerProfile = {
+  email: string;
+  name: string | null;
+  preferred_stylist: string | null;
+  last_service: string | null;
+  last_stylist: string | null;
+  average_spend_cents: number;
+  total_bookings: number;
+  total_spend_cents: number;
+  last_booking_at: string | null;
+};
+
 type OwnerTimeOffEntry = {
   start_time: string;
   end_time: string;
@@ -117,6 +129,10 @@ export default function OwnerPage() {
   const [timeOffOpenStylistId, setTimeOffOpenStylistId] = useState<number | null>(null);
   const [timeOffLoading, setTimeOffLoading] = useState(false);
   const [timeOffEntries, setTimeOffEntries] = useState<Record<number, OwnerTimeOffEntry[]>>({});
+  const [customerLookupEmail, setCustomerLookupEmail] = useState("");
+  const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
+  const [customerLookupError, setCustomerLookupError] = useState("");
+  const [customerProfile, setCustomerProfile] = useState<CustomerProfile | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -448,6 +464,27 @@ export default function OwnerPage() {
     fetchSchedule(scheduleDate);
   }
 
+  async function lookupCustomer() {
+    const email = customerLookupEmail.trim().toLowerCase();
+    if (!email || customerLookupLoading) return;
+    setCustomerLookupLoading(true);
+    setCustomerLookupError("");
+    setCustomerProfile(null);
+    try {
+      const res = await fetch(`${API_BASE}/customers/${encodeURIComponent(email)}`);
+      if (!res.ok) {
+        setCustomerLookupError("No customer found for that email.");
+        return;
+      }
+      const data: CustomerProfile = await res.json();
+      setCustomerProfile(data);
+    } catch {
+      setCustomerLookupError("Could not load customer profile.");
+    } finally {
+      setCustomerLookupLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-100">
@@ -645,6 +682,64 @@ export default function OwnerPage() {
             </div>
           </div>
           )}
+
+          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+            <h2 className="text-sm font-semibold text-gray-900 mb-2">Customer lookup</h2>
+            <p className="text-xs text-gray-500 mb-4">Quick profile by email.</p>
+            <div className="flex gap-2">
+              <input
+                type="email"
+                value={customerLookupEmail}
+                onChange={(e) => setCustomerLookupEmail(e.target.value)}
+                placeholder="name@email.com"
+                className="flex-1 px-4 py-2 rounded-full border border-gray-200 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              />
+              <button
+                onClick={lookupCustomer}
+                disabled={!customerLookupEmail.trim() || customerLookupLoading}
+                className="px-4 py-2 rounded-full bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-60"
+              >
+                {customerLookupLoading ? "Searching..." : "Search"}
+              </button>
+            </div>
+            {customerLookupError && (
+              <p className="mt-3 text-xs text-red-600">{customerLookupError}</p>
+            )}
+            {customerProfile && (
+              <div className="mt-4 rounded-2xl border border-gray-100 bg-gray-50/70 p-4 text-xs text-gray-700 space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Customer</span>
+                  <span className="font-medium">
+                    {customerProfile.name || customerProfile.email}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Preferred stylist</span>
+                  <span className="font-medium">
+                    {customerProfile.preferred_stylist || "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Last service</span>
+                  <span className="font-medium">
+                    {customerProfile.last_service || "—"}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Average spend</span>
+                  <span className="font-medium">
+                    {(customerProfile.average_spend_cents / 100).toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Total bookings</span>
+                  <span className="font-medium">
+                    {customerProfile.total_bookings}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
         </aside>
       </main>
 

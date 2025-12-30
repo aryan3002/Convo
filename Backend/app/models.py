@@ -141,6 +141,72 @@ class Booking(Base):
         return datetime.now(timezone.utc)
 
 
+class Customer(Base):
+    __tablename__ = "customers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    preferred_stylist_id: Mapped[int | None] = mapped_column(ForeignKey("stylists.id"), nullable=True)
+    average_spend_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    no_show_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class CustomerBookingStats(Base):
+    __tablename__ = "customer_booking_stats"
+
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customers.id"), primary_key=True, nullable=False
+    )
+    total_bookings: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_spend_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_booking_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class CustomerStylistPreference(Base):
+    __tablename__ = "customer_stylist_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False, index=True)
+    stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
+    booking_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id",
+            "stylist_id",
+            name="uq_customer_stylist_preference",
+        ),
+    )
+
+
 class ServiceRule(Base):
     __tablename__ = "service_rules"
 

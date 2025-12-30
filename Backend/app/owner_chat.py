@@ -49,6 +49,7 @@ RULES:
 - Use 24h time (HH:MM) and ISO dates (YYYY-MM-DD).
 - Today is {today} in {timezone}.
 - If the user gives a time range like "from 12pm-9pm", map it to work_start/work_end or time off.
+- For customer history or preferences, use get_customer_profile or list_customers_by_stylist.
 
 SERVICES:
 {services}
@@ -72,6 +73,8 @@ Actions:
 - update_stylist_specialties: {{"stylist_id": <id>, "stylist_name": "<name>", "tags": ["color","balayage"]}}
 - add_time_off: {{"stylist_id": <id>, "stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
 - remove_time_off: {{"stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
+- get_customer_profile: {{"email": "name@example.com"}}
+- list_customers_by_stylist: {{"stylist_name": "<name>"}}
 
 Examples:
 User: "Create Keratin Treatment: 90 minutes, $200"
@@ -86,6 +89,10 @@ User: "Add a new stylist named John"
 Reply: "Got it. I'll add John as a new stylist." [ACTION: {{"type":"create_stylist","params":{{"name":"John","work_start":"09:00","work_end":"17:00"}}}}]
 User: "Remove John as a stylist"
 Reply: "Got it. I'll remove John." [ACTION: {{"type":"remove_stylist","params":{{"stylist_name":"John"}}}}]
+User: "Show me Aryan's booking history (aryan@email.com)"
+Reply: "Here is Aryan's booking history." [ACTION: {{"type":"get_customer_profile","params":{{"email":"aryan@email.com"}}}}]
+User: "Which customers prefer Alex?"
+Reply: "Here are customers who prefer Alex." [ACTION: {{"type":"list_customers_by_stylist","params":{{"stylist_name":"Alex"}}}}]
 """
 
 
@@ -173,6 +180,8 @@ ALLOWED_ACTIONS = {
     "update_stylist_specialties",
     "add_time_off",
     "remove_time_off",
+    "get_customer_profile",
+    "list_customers_by_stylist",
 }
 
 
