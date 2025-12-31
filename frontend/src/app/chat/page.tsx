@@ -1048,7 +1048,11 @@ export default function ChatPage() {
         const serviceId = params.service_id ?? selectedService?.id;
         const date = (params.date as string) ?? dateStr;
         if (serviceId && date) {
-          await loadSlotsByIds(serviceId as number, date, { announce: true });
+          const nextSlots = await loadSlotsByIds(serviceId as number, date, { announce: false });
+          if (!nextSlots.length) {
+            appendAssistantMessage(`No openings on ${formatDateLabel(date)}. Try another date?`);
+            setStage("SELECT_DATE");
+          }
         } else {
           appendAssistantMessage("Tell me which service and date you'd like, and I'll pull up times.");
         }

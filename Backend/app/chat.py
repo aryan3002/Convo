@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .customer_memory import get_customer_context
-from .models import Service, Stylist
+from .models import Service, Stylist, StylistSpecialty
 
 settings = get_settings()
 
@@ -66,6 +66,7 @@ CRITICAL RULES:
 - Be brief. One sentence only. Never list more than 3 items in text.
 - Do NOT list time slots in text. The UI shows them as buttons.
 - Never claim a booking is held or confirmed unless the backend tool succeeds.
+- If asked who is best for a service, use stylist specialties from STYLISTS. If none match, say you don’t have a specialist listed.
 - If user mentions a date, use fetch_availability and say: "Here are a few good options. Tap one to continue."
 - If user tries to type a time, ask them to tap a time option.
 - Before holding: collect BOTH name AND email from user.
@@ -190,6 +191,25 @@ def format_cents(value: int) -> str:
     return f"${value / 100:.2f}"
 
 
+def extract_email_from_messages(messages: list[ChatMessage]) -> str:
+    for msg in reversed(messages):
+        if msg.role != "user":
+            continue
+        match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", msg.content, re.IGNORECASE)
+        if match:
+            return match.group(0).strip().lower()
+    return ""
+
+
+async def find_service_by_name(session: AsyncSession, name: str) -> Service | None:
+    if not name:
+        return None
+    result = await session.execute(
+        select(Service).where(Service.name.ilike(f"%{name.strip()}%")).order_by(Service.id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_services_context(session: AsyncSession) -> str:
     """Get formatted services list for the system prompt."""
     result = await session.execute(select(Service).order_by(Service.id))
@@ -207,15 +227,23 @@ async def get_services_context(session: AsyncSession) -> str:
 
 async def get_stylists_context(session: AsyncSession) -> str:
     """Get formatted stylists list for the system prompt."""
-    result = await session.execute(select(Stylist).where(Stylist.active.is_(True)).order_by(Stylist.id))
+    result = await session.execute(
+        select(Stylist).where(Stylist.active.is_(True)).order_by(Stylist.id)
+    )
     stylists = result.scalars().all()
     
     if not stylists:
         return "No stylists available"
     
+    specialties_result = await session.execute(select(StylistSpecialty))
+    specialties: dict[int, list[str]] = {}
+    for specialty in specialties_result.scalars().all():
+        specialties.setdefault(specialty.stylist_id, []).append(specialty.tag)
+
     lines = []
     for stylist in stylists:
-        lines.append(f"- ID {stylist.id}: {stylist.name}")
+        tags = ", ".join(sorted(specialties.get(stylist.id, []))) or "none"
+        lines.append(f"- ID {stylist.id}: {stylist.name} (specialties: {tags})")
     return "\n".join(lines)
 
 
@@ -233,7 +261,43 @@ async def chat_with_ai(
         )
     
     client = AsyncOpenAI(api_key=settings.openai_api_key)
-    
+
+    stage = normalize_stage(context.get("stage") if context else None)
+    selected_service = context.get("selected_service") if context else None
+
+    customer_email = None
+    if context and context.get("customer_email"):
+        customer_email = str(context.get("customer_email") or "").strip().lower()
+    if not customer_email:
+        customer_email = extract_email_from_messages(messages)
+
+    last_user_text = messages[-1].content if messages else ""
+    repeat_intent = bool(
+        re.search(
+            r"\b(same as last time|same as last|as last time|same as before|same again|again|book me as last time|book me same as last time|same as previous|last time)\b",
+            last_user_text,
+            re.IGNORECASE,
+        )
+    )
+    if repeat_intent and stage in {"WELCOME", "SELECT_SERVICE"} and not selected_service:
+        if not customer_email:
+            return ChatResponse(
+                reply="Sure — what's the email on your last booking?",
+                action=None,
+            )
+        customer_context = await get_customer_context(session, customer_email)
+        last_service = customer_context.get("last_service") if customer_context else None
+        if last_service:
+            service = await find_service_by_name(session, last_service)
+            if service:
+                return ChatResponse(
+                    reply=f"Got it. Booking {service.name} again. Pick a date below to see times.",
+                    action={
+                        "type": "select_service",
+                        "params": {"service_id": service.id, "service_name": service.name},
+                    },
+                )
+
     # Build system prompt with current context
     services_text = await get_services_context(session)
     stylists_text = await get_stylists_context(session)
@@ -261,8 +325,6 @@ async def chat_with_ai(
     
     working_hours_text = f'{settings.working_hours_start} to {settings.working_hours_end}'
     
-    stage = normalize_stage(context.get("stage") if context else None)
-    selected_service = context.get("selected_service") if context else None
     selected_date = context.get("selected_date") if context else None
 
     system_prompt = SYSTEM_PROMPT.format(
@@ -300,18 +362,6 @@ async def chat_with_ai(
         
         if context_parts:
             system_prompt += f"\n\nCURRENT BOOKING CONTEXT:\n" + "\n".join(context_parts)
-
-    customer_email = None
-    if context and context.get("customer_email"):
-        customer_email = str(context.get("customer_email") or "").strip().lower()
-    if not customer_email:
-        for msg in reversed(messages):
-            if msg.role != "user":
-                continue
-            match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", msg.content, re.IGNORECASE)
-            if match:
-                customer_email = match.group(0).strip().lower()
-                break
 
     if customer_email:
         customer_context = await get_customer_context(session, customer_email)
