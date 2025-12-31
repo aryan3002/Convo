@@ -13,6 +13,8 @@ from sqlalchemy import (
     Time,
     UniqueConstraint,
     func,
+    JSON,
+    Text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -215,4 +217,78 @@ class ServiceRule(Base):
     rule: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PromoType(str, Enum):
+    FIRST_USER_PROMO = "FIRST_USER_PROMO"
+    DAILY_PROMO = "DAILY_PROMO"
+    SEASONAL_PROMO = "SEASONAL_PROMO"
+    SERVICE_COMBO_PROMO = "SERVICE_COMBO_PROMO"
+
+
+class PromoTriggerPoint(str, Enum):
+    AT_CHAT_START = "AT_CHAT_START"
+    AFTER_EMAIL_CAPTURE = "AFTER_EMAIL_CAPTURE"
+    AFTER_SERVICE_SELECTED = "AFTER_SERVICE_SELECTED"
+    AFTER_SLOT_SHOWN = "AFTER_SLOT_SHOWN"
+    AFTER_HOLD_CREATED = "AFTER_HOLD_CREATED"
+
+
+class PromoDiscountType(str, Enum):
+    PERCENT = "PERCENT"
+    FIXED = "FIXED"
+    FREE_ADDON = "FREE_ADDON"
+    BUNDLE = "BUNDLE"
+
+
+class Promo(Base):
+    __tablename__ = "promos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id"), nullable=False, index=True)
+    type: Mapped[PromoType] = mapped_column(PgEnum(PromoType), nullable=False)
+    trigger_point: Mapped[PromoTriggerPoint] = mapped_column(PgEnum(PromoTriggerPoint), nullable=False)
+    service_id: Mapped[int | None] = mapped_column(
+        ForeignKey("services.id"), nullable=True, index=True
+    )
+    discount_type: Mapped[PromoDiscountType] = mapped_column(PgEnum(PromoDiscountType), nullable=False)
+    discount_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    constraints_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    custom_copy: Mapped[str | None] = mapped_column(Text, nullable=True)
+    start_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PromoImpression(Base):
+    __tablename__ = "promo_impressions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    promo_id: Mapped[int] = mapped_column(ForeignKey("promos.id"), nullable=False, index=True)
+    shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id"), nullable=False, index=True)
+    identity_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    day_bucket: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "promo_id",
+            "shop_id",
+            "identity_key",
+            "day_bucket",
+            name="uq_promo_impression_daily",
+        ),
     )

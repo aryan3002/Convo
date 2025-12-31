@@ -66,7 +66,29 @@ type BookingTrack = {
   created_at: string;
 };
 
+type Promo = {
+  id: number;
+  shop_id: number;
+  type: string;
+  trigger_point: string;
+  service_id?: number | null;
+  discount_type: string;
+  discount_value?: number | null;
+  constraints_json?: Record<string, any> | null;
+  custom_copy?: string | null;
+  start_at_utc?: string | null;
+  end_at_utc?: string | null;
+  active: boolean;
+  priority: number;
+};
+
+type PromoEligibilityResponse = {
+  promo: Promo | null;
+  reason_codes: string[];
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+const SHOP_ID = 1;
 
 function uid(prefix = "m") {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
@@ -104,6 +126,46 @@ function formatDateLabel(dateStr: string) {
   });
 }
 
+function formatPromoDiscount(promo: Promo) {
+  if (promo.discount_type === "PERCENT") {
+    return `${promo.discount_value ?? 0}% off`;
+  }
+  if (promo.discount_type === "FIXED") {
+    const cents = promo.discount_value ?? 0;
+    return (cents / 100).toLocaleString("en-US", {
+      style: "currency",
+      currency: "USD",
+    }) + " off";
+  }
+  if (promo.discount_type === "FREE_ADDON") {
+    return "Complimentary add-on";
+  }
+  if (promo.discount_type === "BUNDLE") {
+    return "Bundle perk";
+  }
+  return "Special offer";
+}
+
+function getPromoDiscountCents(promo: Promo, baseCents: number) {
+  if (promo.discount_type === "PERCENT") {
+    const percent = promo.discount_value ?? 0;
+    return Math.round((baseCents * percent) / 100);
+  }
+  if (promo.discount_type === "FIXED") {
+    return promo.discount_value ?? 0;
+  }
+  return 0;
+}
+
+function applyPromoTotal(baseCents: number, promo: Promo | null) {
+  if (!promo) {
+    return { totalCents: baseCents, discountCents: 0 };
+  }
+  const discount = getPromoDiscountCents(promo, baseCents);
+  const total = Math.max(baseCents - discount, 0);
+  return { totalCents: total, discountCents: discount };
+}
+
 export default function ChatPage() {
   const [mode, setMode] = useState<BookingMode>("chat");
   const [stage, setStage] = useState<Stage>("WELCOME");
@@ -139,9 +201,23 @@ export default function ChatPage() {
   const [trackResults, setTrackResults] = useState<BookingTrack[]>([]);
   const [trackLoading, setTrackLoading] = useState(false);
   const [trackError, setTrackError] = useState("");
+  const [appliedPromo, setAppliedPromo] = useState<Promo | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const pendingSlotRef = useRef<Slot | null>(null); // Store slot while waiting for email
+  const shownPromosRef = useRef<Set<number>>(new Set());
+
+  const promoSessionId = useMemo(() => {
+    if (typeof window === "undefined") return "";
+    const key = "promo_session_id";
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+    const newId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : uid("promo");
+    window.sessionStorage.setItem(key, newId);
+    return newId;
+  }, []);
 
   const tzOffset = useMemo(() => -new Date().getTimezoneOffset(), []);
 
@@ -196,6 +272,81 @@ export default function ChatPage() {
     }
   };
 
+  const renderPromoCopy = (promo: Promo) => {
+    const serviceName =
+      selectedService?.name ||
+      (promo.service_id ? services.find((svc) => svc.id === promo.service_id)?.name : "") ||
+      "";
+    const discountLabel = formatPromoDiscount(promo);
+    const perkDescription =
+      promo.constraints_json && typeof promo.constraints_json.perk_description === "string"
+        ? promo.constraints_json.perk_description
+        : "";
+    const endDate = promo.end_at_utc
+      ? new Date(promo.end_at_utc).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+      : "";
+
+    if (promo.custom_copy) {
+      const fallbackService = serviceName || "your service";
+      return promo.custom_copy
+        .replace(/\{service_name\}/gi, fallbackService)
+        .replace(/\{discount\}/gi, discountLabel)
+        .replace(/\{end_date\}/gi, endDate)
+        .replace(/\{start_date\}/gi, promo.start_at_utc
+          ? new Date(promo.start_at_utc).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+          : ""
+        )
+        .trim();
+    }
+
+    const serviceSuffix = serviceName ? ` on ${serviceName}` : "";
+    const seasonalSuffix = promo.type === "SEASONAL_PROMO" && endDate ? ` Ends ${endDate}.` : "";
+    const minSpend = promo.constraints_json?.min_spend_cents
+      ? ` (min ${formatMoney(promo.constraints_json.min_spend_cents)})`
+      : "";
+    const perkSuffix = perkDescription ? ` (${perkDescription})` : "";
+    return `${discountLabel}${perkSuffix}${serviceSuffix}${minSpend}.${seasonalSuffix}`
+      .replace("..", ".")
+      .trim();
+  };
+
+  const maybeShowPromo = async (
+    triggerPoint: string,
+    overrides?: { email?: string; serviceId?: number | null; bookingDate?: string }
+  ) => {
+    if (!promoSessionId) return;
+    const resolvedEmail = overrides?.email ?? customerEmail.trim();
+    const resolvedServiceId =
+      overrides?.serviceId ?? selectedService?.id ?? null;
+    const resolvedBookingDate = overrides?.bookingDate ?? dateStr;
+    const url = new URL(`${API_BASE}/promos/eligible`);
+    url.searchParams.set("trigger_point", triggerPoint);
+    url.searchParams.set("shop_id", String(SHOP_ID));
+    url.searchParams.set("session_id", promoSessionId);
+    if (resolvedEmail) {
+      url.searchParams.set("email", resolvedEmail);
+    }
+    if (resolvedServiceId) {
+      url.searchParams.set("service_id", String(resolvedServiceId));
+    }
+    if (resolvedBookingDate) {
+      url.searchParams.set("booking_date", resolvedBookingDate);
+    }
+
+    try {
+      const res = await fetch(url.toString());
+      if (!res.ok) return;
+      const data: PromoEligibilityResponse = await res.json();
+      if (!data.promo) return;
+      if (shownPromosRef.current.has(data.promo.id)) return;
+      shownPromosRef.current.add(data.promo.id);
+      setAppliedPromo(data.promo);
+      appendAssistantMessage(renderPromoCopy(data.promo));
+    } catch (error) {
+      console.error("Failed to load promo:", error);
+    }
+  };
+
   const extractName = (text: string) => {
     const namePatterns = [
       /(?:my name is|name is|i'm|i am)\s+([A-Za-z][a-z]+)/i,
@@ -247,6 +398,24 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
+  useEffect(() => {
+    if (dateStr) {
+      maybeShowPromo("AT_CHAT_START", { bookingDate: dateStr });
+    }
+  }, [dateStr]);
+
+  useEffect(() => {
+    if (customerEmail.trim()) {
+      maybeShowPromo("AFTER_EMAIL_CAPTURE", { email: customerEmail.trim(), bookingDate: dateStr });
+    }
+  }, [customerEmail]);
+
+  useEffect(() => {
+    if (selectedService) {
+      maybeShowPromo("AFTER_SERVICE_SELECTED", { bookingDate: dateStr });
+    }
+  }, [selectedService?.id]);
+
   // Load services on mount
   useEffect(() => {
     async function loadServices() {
@@ -290,6 +459,7 @@ export default function ChatPage() {
         const data = await res.json();
         fetchedSlots = data;
         setSlots(data);
+        maybeShowPromo("AFTER_SLOT_SHOWN", { serviceId: service.id, bookingDate: date });
         if (!data.length && options?.setStageToSlot !== false) {
           setStage("SELECT_DATE");
         }
@@ -332,6 +502,7 @@ export default function ChatPage() {
           setSlots(data);
           setDateStr(date);
           setStage(data.length ? "SELECT_SLOT" : "SELECT_DATE");
+          maybeShowPromo("AFTER_SLOT_SHOWN", { serviceId: numericId, bookingDate: date });
           if (options?.announce) {
             appendAssistantMessage(describeSlots(data, date));
           }
@@ -1023,6 +1194,11 @@ export default function ChatPage() {
         if (announceHold) {
           appendAssistantMessage("Slot reserved. Tap Confirm booking to finalize.");
         }
+        maybeShowPromo("AFTER_HOLD_CREATED", {
+          email,
+          serviceId: svc.id,
+          bookingDate: args.date,
+        });
         // Immediately refresh booking list for this email
         if (email) {
           await trackBookings(email);
@@ -1127,6 +1303,7 @@ export default function ChatPage() {
     setCustomerName("");
     setCustomerEmail("");
     setStage("SELECT_SERVICE");
+    setAppliedPromo(null);
   }
 
   // Generate next 7 days for date selection
@@ -1166,6 +1343,12 @@ export default function ChatPage() {
     setShowConfirmationPopup(false);
     resetBooking();
   };
+
+  const basePriceCents = selectedService?.price_cents ?? 0;
+  const promoTotals = useMemo(
+    () => applyPromoTotal(basePriceCents, appliedPromo),
+    [basePriceCents, appliedPromo]
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
@@ -1214,9 +1397,25 @@ export default function ChatPage() {
                 <span className="font-medium text-gray-900">{selectedSlot?.stylist_name}</span>
               </div>
               <div className="border-t border-gray-200 pt-2 flex justify-between">
+                <span className="text-gray-500">Subtotal</span>
+                <span className="font-medium text-gray-900">
+                  {selectedService && formatMoney(selectedService.price_cents)}
+                </span>
+              </div>
+              {appliedPromo && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-500">Promotion</span>
+                  <span className="font-medium text-green-700">
+                    {promoTotals.discountCents > 0
+                      ? `- ${formatMoney(promoTotals.discountCents)}`
+                      : "Applied"}
+                  </span>
+                </div>
+              )}
+              <div className="border-t border-gray-200 pt-2 flex justify-between">
                 <span className="text-gray-500">Total</span>
                 <span className="font-semibold text-gray-900">
-                  {selectedService && formatMoney(selectedService.price_cents)}
+                  {selectedService && formatMoney(promoTotals.totalCents)}
                 </span>
               </div>
             </div>
@@ -1460,9 +1659,27 @@ export default function ChatPage() {
                   </div>
                   {selectedService && (
                     <div className="flex justify-between">
+                      <span className="text-gray-500">Subtotal</span>
+                      <span className="font-medium text-gray-800">
+                        {formatMoney(selectedService.price_cents)}
+                      </span>
+                    </div>
+                  )}
+                  {selectedService && appliedPromo && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Promotion</span>
+                      <span className="font-medium text-green-700">
+                        {promoTotals.discountCents > 0
+                          ? `- ${formatMoney(promoTotals.discountCents)}`
+                          : "Applied"}
+                      </span>
+                    </div>
+                  )}
+                  {selectedService && (
+                    <div className="flex justify-between">
                       <span className="text-gray-500">Total</span>
                       <span className="font-semibold text-gray-800">
-                        {formatMoney(selectedService.price_cents)}
+                        {formatMoney(promoTotals.totalCents)}
                       </span>
                     </div>
                   )}

@@ -36,3 +36,30 @@ Visit docs: http://localhost:8000/docs
 - Working days default to Tuesday–Sunday (`WORKING_DAYS=1,2,3,4,5,6`).
 - Times are stored in UTC; holds and confirmed bookings block overlapping slots. Confirm will fail if a hold expired.
 - Chat uses `CHAT_TIMEZONE` (default `America/Phoenix`) and logs to `CHAT_LOG_PATH` when set.
+
+## Promotions
+Owners can configure promotions via Owner GPT or the `/owner/promos` endpoints. Consumers receive eligible promotions through `/promos/eligible` at defined trigger points.
+
+Endpoints:
+- `POST /owner/promos` create a promotion
+- `GET /owner/promos` list promotions
+- `PATCH /owner/promos/{id}` update a promotion
+- `DELETE /owner/promos/{id}` disable a promotion
+- `GET /promos/eligible` returns the single eligible promotion for a trigger point
+
+Example payload:
+```json
+{
+  "type": "DAILY_PROMO",
+  "trigger_point": "AFTER_EMAIL_CAPTURE",
+  "discount_type": "PERCENT",
+  "discount_value": 10,
+  "constraints_json": {
+    "min_spend_cents": 3000,
+    "valid_days_of_week": [0,1,2,3,4]
+  },
+  "custom_copy": "Save {discount} on your first visit!",
+  "active": true,
+  "priority": 1
+}
+```
