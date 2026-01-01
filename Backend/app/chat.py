@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
-from .customer_memory import get_customer_context
+from .customer_memory import get_customer_context, normalize_email, normalize_phone
 from .models import Service, Stylist, StylistSpecialty
 
 settings = get_settings()
@@ -46,7 +46,7 @@ class ChatResponse(BaseModel):
     data: dict | None = None  # Tool results (services, slots, hold, confirm)
 
 
-SYSTEM_PROMPT = """You are a friendly booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
+CHAT_PROMPT = """You are a friendly booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
 
 SERVICES: {services}
 STYLISTS: {stylists}
@@ -56,6 +56,7 @@ WORKING HOURS: {working_hours} ({working_days})
 CURRENT STAGE: {stage}
 SELECTED SERVICE: {selected_service}
 SELECTED DATE: {selected_date}
+CHANNEL: {channel}
 
 DATE RULES:
 - Today: {today_date}, Tomorrow: {tomorrow_date}, Current year: {current_year}
@@ -68,15 +69,17 @@ CRITICAL RULES:
 - Never claim a booking is held or confirmed unless the backend tool succeeds.
 - If asked who is best for a service, use stylist specialties from STYLISTS. If none match, say you don’t have a specialist listed.
 - If user mentions a date, use fetch_availability and say: "Here are a few good options. Tap one to continue."
-- If user tries to type a time, ask them to tap a time option.
-- Before holding: collect BOTH name AND email from user.
+ - If user tries to type a time, ask them to tap a time option.
+- IDENTITY COLLECTION (only if missing):
+  - If name is missing, ask for it
+  - If phone AND email are missing, ask for phone/email (prefer phone on voice channel)
+  - If you already have name + (phone OR email) → DO NOT ask again, proceed with booking
 - Follow the CURRENT STAGE and do not skip steps.
-- After a service is selected, ask about preferred style before asking for a date.
 - Prefer tool calls; do not invent availability or confirmation.
 - UI SELECTIONS:
   - "Service selected: <name>" → always use select_service with that service.
   - "Date selected: YYYY-MM-DD" → use fetch_availability for that date.
-  - "Time selected: HH:MM with <stylist>" → ask for missing name/email, then hold_slot.
+  - "Time selected: HH:MM with <stylist>" → ask for missing name/phone/email, then hold_slot.
 
 ACTIONS (add at END of message):
 [ACTION: {{"type": "action_type", "params": {{...}}}}]
@@ -85,46 +88,63 @@ Actions:
 - show_services: {{}}
 - select_service: {{"service_id": <id>, "service_name": "<name>"}}
 - fetch_availability: {{"service_id": <id>, "date": "YYYY-MM-DD"}}
-- hold_slot: {{"service_id": <id>, "stylist_id": <id>, "date": "YYYY-MM-DD", "start_time": "HH:MM", "customer_name": "<name>", "customer_email": "<email>"}}
+- hold_slot: {{"service_id": <id>, "stylist_id": <id>, "date": "YYYY-MM-DD", "start_time": "HH:MM", "customer_name": "<name>", "customer_email": "<email>", "customer_phone": "<phone>"}}
 - confirm_booking: {{}}
-- get_last_preferred_style: {{"service_id": <id>, "customer_email": "<email>"}}
-- set_preferred_style: {{"service_id": <id>, "customer_email": "<email>", "preferred_style_text": "<text>", "preferred_style_image_url": "<url>"}}
-- apply_same_as_last_time: {{"service_id": <id>, "customer_email": "<email>"}}
-- skip_preferred_style: {{}}
-- check_promos: {{"trigger_point": "<TRIGGER_POINT>", "email": "<email>", "service_id": <id>, "date": "YYYY-MM-DD"}}
-
-PREFERRED STYLE RULES:
-- If user wants to add or update preferred style, use set_preferred_style with service_id + customer_email.
-- If user asks for "same as last time", use apply_same_as_last_time.
-- If user asks to see the last style, use get_last_preferred_style.
-- If customer_email is missing, ask for it and do not call the action yet.
 
 BOOKING FLOW:
-1. Ask for email at start (CAPTURE_EMAIL stage)
-2. User provides email → check_promos with AT_CHAT_START and AFTER_EMAIL_CAPTURE, display any eligible promos
-3. User picks service → select_service action, check_promos with AFTER_SERVICE_SELECTED, display any eligible promos, ask about preferred style
-4. Preferred style handled (set_preferred_style / apply_same_as_last_time / skip_preferred_style) → ask for date
-5. User picks date → IMMEDIATELY use fetch_availability action and check_promos with AFTER_SLOT_SHOWN, display any eligible promos, say "Here are the available times for [date]:" (slots appear automatically)
-6. User picks time from displayed slots → ask which stylist (Alex=ID 1, Jamie=ID 2) + their name + their email
-7. Once you have ALL of: time + stylist + name + email → immediately use hold_slot action with ALL params and check_promos with AFTER_HOLD_CREATED, display any eligible promos
-8. After a hold exists, ask the user to confirm; only use confirm_booking when they confirm
-
-PROMOTION RULES:
-- Check for promotions using check_promos action at the trigger points listed above
-- When check_promos returns a promo, display it to the user with the custom_copy text if available, otherwise generate a brief description
-- Promos should be applied automatically to the booking total when eligible
+1. User picks service → select_service action, ask for date
+2. User picks date → IMMEDIATELY use fetch_availability action and say "Here are a few good options. Tap one to continue."
+3. User picks time from displayed slots → ask for missing name/phone/email, then hold_slot
+4. Once you have ALL of: time + stylist + name + phone/email → immediately use hold_slot action with customer info
+5. After a hold exists, ask the user to confirm; only use confirm_booking when they confirm
 
 RESPONSE STYLE:
 - Be professional and brief (one sentence)
+- Voice: speak naturally, no UI references, no extra questions
+- Chat: can reference buttons and UI elements
 - When fetching availability, say "Here are a few good options. Tap one to continue."
 - Never list times, names, or multiple options in plain text
 """
 
+VOICE_PROMPT = """You are a friendly voice booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
+
+SERVICES: {services}
+STYLISTS: {stylists}
+
+NOW: {today} at {current_time} (Arizona/MST)
+WORKING HOURS: {working_hours} ({working_days})
+CURRENT STAGE: {stage}
+SELECTED SERVICE: {selected_service}
+SELECTED DATE: {selected_date}
+CHANNEL: {channel}
+
+DATE RULES:
+- Today: {today_date}, Tomorrow: {tomorrow_date}, Current year: {current_year}
+- If user says a month BEFORE current month (e.g. "January" in December), use NEXT YEAR ({next_year})
+- Always format dates as YYYY-MM-DD
+
+CRITICAL RULES:
+- Voice only: NEVER mention UI elements like "tap", "click", "buttons", "chips", or "list below".
+- Keep responses short and natural (one sentence).
+- Do NOT list more than 3 options in a single response.
+- Identity for voice: must collect name + phone before holding. Do NOT ask for email.
+- Prefer tool calls; do not invent availability or confirmation.
+
+VOICE FLOW:
+1. Get name + phone first.
+2. Ask for service and date.
+3. Ask for time preference; offer 2–3 options max.
+4. Hold booking only after service + date + time + stylist + name + phone.
+5. After hold, ask for confirmation. Only confirm after explicit "yes/confirm".
+
+RESPONSE STYLE:
+- Speak naturally: "I can do 10 AM with Alex or 11:30 with Jamie. Which works?"
+- Never say "select from the list" or "tap".
+"""
+
 ALLOWED_STAGES = {
-    "CAPTURE_EMAIL",
     "WELCOME",
     "SELECT_SERVICE",
-    "PREFERRED_STYLE",
     "SELECT_DATE",
     "SELECT_SLOT",
     "HOLDING",
@@ -133,26 +153,32 @@ ALLOWED_STAGES = {
 }
 
 ALLOWED_ACTIONS = {
-    "CAPTURE_EMAIL": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "WELCOME": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "SELECT_SERVICE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "PREFERRED_STYLE": {"show_services", "select_service", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "SELECT_DATE": {"fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "SELECT_SLOT": {"hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "HOLDING": {"confirm_booking", "hold_slot", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "CONFIRMING": {"confirm_booking", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
-    "DONE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "WELCOME": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "SELECT_SERVICE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "SELECT_DATE": {"fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "SELECT_SLOT": {"hold_slot", "confirm_booking", "show_slots"},
+    "HOLDING": {"confirm_booking", "hold_slot"},
+    "CONFIRMING": {"confirm_booking"},
+    "DONE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
 }
 
-STAGE_PROMPTS = {
-    "CAPTURE_EMAIL": "Hi! What's the best email to get started?",
+CHAT_STAGE_PROMPTS = {
     "WELCOME": "Welcome! What service would you like to book?",
     "SELECT_SERVICE": "Which service would you like? Please tap a service.",
-    "PREFERRED_STYLE": "Do you have a preferred style for this service?",
     "SELECT_DATE": "Pick a date below to see times.",
     "SELECT_SLOT": "Here are a few good options. Tap one to continue.",
     "HOLDING": "One moment while I reserve that.",
     "CONFIRMING": "Tap confirm to finalize your booking.",
+    "DONE": "You are all set. Anything else I can help with?",
+}
+
+VOICE_STAGE_PROMPTS = {
+    "WELCOME": "Thanks for calling. What service would you like to book?",
+    "SELECT_SERVICE": "Which service would you like?",
+    "SELECT_DATE": "What day works for you?",
+    "SELECT_SLOT": "I have a few options. Which time works best?",
+    "HOLDING": "One moment while I reserve that.",
+    "CONFIRMING": "Should I confirm the booking?",
     "DONE": "You are all set. Anything else I can help with?",
 }
 
@@ -197,9 +223,9 @@ def parse_action_from_response(response: str) -> tuple[str, dict | None]:
 
 def normalize_stage(value: Any) -> str:
     if not value:
-        return "CAPTURE_EMAIL"
+        return "WELCOME"
     text = str(value).strip().upper()
-    return text if text in ALLOWED_STAGES else "CAPTURE_EMAIL"
+    return text if text in ALLOWED_STAGES else "WELCOME"
 
 
 def shorten_reply(text: str) -> str:
@@ -223,7 +249,19 @@ def extract_email_from_messages(messages: list[ChatMessage]) -> str:
             continue
         match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", msg.content, re.IGNORECASE)
         if match:
-            return match.group(0).strip().lower()
+            return normalize_email(match.group(0))
+    return ""
+
+
+def extract_phone_from_messages(messages: list[ChatMessage]) -> str:
+    for msg in reversed(messages):
+        if msg.role != "user":
+            continue
+        match = re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", msg.content)
+        if match:
+            normalized = normalize_phone(match.group(0))
+            if normalized:
+                return normalized
     return ""
 
 
@@ -293,9 +331,15 @@ async def chat_with_ai(
 
     customer_email = None
     if context and context.get("customer_email"):
-        customer_email = str(context.get("customer_email") or "").strip().lower()
+        customer_email = normalize_email(str(context.get("customer_email") or ""))
     if not customer_email:
         customer_email = extract_email_from_messages(messages)
+
+    customer_phone = None
+    if context and context.get("customer_phone"):
+        customer_phone = normalize_phone(str(context.get("customer_phone") or ""))
+    if not customer_phone:
+        customer_phone = extract_phone_from_messages(messages)
 
     last_user_text = messages[-1].content if messages else ""
     repeat_intent = bool(
@@ -305,13 +349,17 @@ async def chat_with_ai(
             re.IGNORECASE,
         )
     )
-    if repeat_intent and stage in {"CAPTURE_EMAIL", "WELCOME", "SELECT_SERVICE"} and not selected_service:
-        if not customer_email:
+    if repeat_intent and stage in {"WELCOME", "SELECT_SERVICE"} and not selected_service:
+        if not customer_email and not customer_phone:
             return ChatResponse(
-                reply="Sure — what's the email on your last booking?",
+                reply="Sure — what's the phone number or email on your last booking?",
                 action=None,
             )
-        customer_context = await get_customer_context(session, customer_email)
+        customer_context = await get_customer_context(
+            session,
+            email=customer_email or None,
+            phone=customer_phone or None,
+        )
         last_service = customer_context.get("last_service") if customer_context else None
         if last_service:
             service = await find_service_by_name(session, last_service)
@@ -352,8 +400,10 @@ async def chat_with_ai(
     working_hours_text = f'{settings.working_hours_start} to {settings.working_hours_end}'
     
     selected_date = context.get("selected_date") if context else None
+    channel = context.get("channel") if context else None
 
-    system_prompt = SYSTEM_PROMPT.format(
+    prompt_template = VOICE_PROMPT if channel == "voice" else CHAT_PROMPT
+    system_prompt = prompt_template.format(
         services=services_text,
         stylists=stylists_text,
         today=today_formatted,
@@ -367,6 +417,7 @@ async def chat_with_ai(
         stage=stage,
         selected_service=selected_service or "None",
         selected_date=selected_date or "None",
+        channel=channel or "chat",
     )
     
     # Add context information if available
@@ -380,25 +431,27 @@ async def chat_with_ai(
             context_parts.append(f"Customer name: {context['customer_name']}")
         if context.get("customer_email"):
             context_parts.append(f"Customer email: {context['customer_email']}")
+        if context.get("customer_phone"):
+            context_parts.append(f"Customer phone: {context['customer_phone']}")
         if context.get("held_slot"):
             context_parts.append(f"Held slot: {context['held_slot']}")
         if context.get("available_slots"):
             slots_summary = context['available_slots'][:5]  # First 5 slots
             context_parts.append(f"Available slots shown: {slots_summary}")
-        if context.get("preferred_style_text") or context.get("preferred_style_image_url"):
-            context_parts.append("Preferred style saved for this service.")
-        if "has_last_preferred_style" in context:
-            context_parts.append(
-                f"Has saved style for this service: {bool(context.get('has_last_preferred_style'))}"
-            )
         
         if context_parts:
             system_prompt += f"\n\nCURRENT BOOKING CONTEXT:\n" + "\n".join(context_parts)
 
-    if customer_email:
-        customer_context = await get_customer_context(session, customer_email)
+    if customer_email or customer_phone:
+        customer_context = await get_customer_context(
+            session,
+            email=customer_email or None,
+            phone=customer_phone or None,
+        )
         if customer_context:
             profile_lines = ["Customer Profile:"]
+            if customer_context.get("phone"):
+                profile_lines.append(f"- Phone: {customer_context['phone']}")
             if customer_context.get("last_service"):
                 profile_lines.append(f"- Last service: {customer_context['last_service']}")
             if customer_context.get("preferred_stylist"):
@@ -440,21 +493,28 @@ async def chat_with_ai(
                 action = None
 
         reply = shorten_reply(clean_response)
+        stage_prompts = VOICE_STAGE_PROMPTS if channel == "voice" else CHAT_STAGE_PROMPTS
         if not reply:
-            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+            reply = stage_prompts.get(stage, stage_prompts["WELCOME"])
 
         # Guardrail: never list slots or long text
         if action and action.get("type") == "fetch_availability":
-            reply = "Here are a few good options. Tap one to continue."
+            if channel == "voice":
+                reply = "I have a few times available. What time works best?"
+            else:
+                reply = "Here are a few good options. Tap one to continue."
         elif action and action.get("type") == "select_service":
-            reply = "Great choice. Pick a date below to see times."
+            if channel == "voice":
+                reply = "Great choice. What day would you like?"
+            else:
+                reply = "Great choice. Pick a date below to see times."
         elif not reply:
-            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+            reply = stage_prompts.get(stage, stage_prompts["WELCOME"])
 
         time_pattern = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b", re.IGNORECASE)
         count_pattern = re.compile(r"\b\d+\s+(slots|times|options)\b", re.IGNORECASE)
-        if stage == "SELECT_SLOT" and (time_pattern.search(reply) or count_pattern.search(reply)):
-            reply = STAGE_PROMPTS["SELECT_SLOT"]
+        if channel != "voice" and stage == "SELECT_SLOT" and (time_pattern.search(reply) or count_pattern.search(reply)):
+            reply = CHAT_STAGE_PROMPTS["SELECT_SLOT"]
 
         return ChatResponse(reply=reply, action=action)
         

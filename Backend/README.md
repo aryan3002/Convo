@@ -36,6 +36,7 @@ Visit docs: http://localhost:8000/docs
 - Working days default to Tuesday–Sunday (`WORKING_DAYS=1,2,3,4,5,6`).
 - Times are stored in UTC; holds and confirmed bookings block overlapping slots. Confirm will fail if a hold expired.
 - Chat uses `CHAT_TIMEZONE` (default `America/Phoenix`) and logs to `CHAT_LOG_PATH` when set.
+- Bookings can be identified by phone or email; phone numbers are normalized to E.164 when possible.
 
 ## Promotions
 Owners can configure promotions via Owner GPT or the `/owner/promos` endpoints. Consumers receive eligible promotions through `/promos/eligible` at defined trigger points.
@@ -76,3 +77,21 @@ Env vars:
 - `CLOUDINARY_CLOUD_NAME`
 - `CLOUDINARY_UPLOAD_PRESET`
 - `CLOUDINARY_API_KEY` (optional for unsigned uploads)
+
+## Twilio Voice (Local)
+1) Run the backend:
+```bash
+uvicorn Backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+2) Start ngrok:
+```bash
+ngrok http 8000
+```
+
+3) In Twilio Console, set the Voice webhook to:
+```
+https://<YOUR_NGROK_SUBDOMAIN>.ngrok-free.dev/twilio/voice
+```
+
+The gather webhook is handled automatically by the backend at `/twilio/gather`.

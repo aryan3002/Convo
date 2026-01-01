@@ -23,10 +23,14 @@ from .customer_memory import (
     get_customer_context,
     get_customers_by_preferred_stylist,
     get_or_create_customer,
+    get_or_create_customer_by_identity,
+    normalize_email,
+    normalize_phone,
     update_customer_stats,
 )
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
 from .emailer import send_booking_email_with_ics
+from .voice import router as voice_router
 from .models import (
     Booking,
     BookingStatus,
@@ -51,6 +55,7 @@ from .seed import seed_initial_data
 
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
+app.include_router(voice_router, prefix="/twilio", tags=["voice"])
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +142,7 @@ class HoldRequest(BaseModel):
     stylist_id: int
     customer_name: str | None = None
     customer_email: str | None = None
+    customer_phone: str | None = None
     tz_offset_minutes: int = Field(default=0, description="Minutes ahead of UTC. Browser offset is negative for Phoenix.")
     promo_id: int | None = Field(default=None, description="Optional promo ID from earlier trigger point")
 
@@ -863,10 +869,27 @@ def make_slots_for_stylist(
     return slots
 
 
+async def ensure_identity_schema(conn) -> None:
+    """Add phone support columns if they don't exist."""
+    statements = [
+        "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32)",
+        "CREATE INDEX IF NOT EXISTS ix_bookings_customer_phone ON bookings (customer_phone)",
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone VARCHAR(32)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_customers_phone ON customers (phone)",
+        "ALTER TABLE customers ALTER COLUMN email DROP NOT NULL",
+    ]
+    for stmt in statements:
+        try:
+            await conn.execute(text(stmt))
+        except Exception as exc:
+            logger.warning("Schema update skipped for statement: %s (%s)", stmt, exc)
+
+
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_identity_schema(conn)
         await conn.execute(
             text(
                 """
@@ -3326,8 +3349,11 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
     if stylist.shop_id != service.shop_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Stylist does not belong to this shop")
 
-    if not payload.customer_email or not payload.customer_email.strip():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer email is required to hold a slot")
+    # Require either email or phone
+    customer_email = payload.customer_email.strip().lower() if payload.customer_email else None
+    customer_phone = normalize_phone(payload.customer_phone) if payload.customer_phone else None
+    if not customer_email and not customer_phone:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Customer email or phone is required to hold a slot")
 
     try:
         local_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
@@ -3382,7 +3408,6 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
             )
 
     hold_expires_at = now + timedelta(minutes=settings.hold_ttl_minutes)
-    customer_email = payload.customer_email.strip().lower()
 
     # Check for eligible promos
     shop = await get_default_shop(session)
@@ -3483,6 +3508,7 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
         stylist_id=stylist.id,
         customer_name=payload.customer_name,
         customer_email=customer_email,
+        customer_phone=customer_phone,
         promo_id=selected_promo.id if selected_promo else None,
         discount_cents=discount_cents,
         start_at_utc=start_at_utc,
@@ -3669,6 +3695,7 @@ class BookingTrackResponse(BaseModel):
     stylist_name: str
     customer_name: str | None
     customer_email: str | None
+    customer_phone: str | None = None
     preferred_style_text: str | None = None
     preferred_style_image_url: str | None = None
     start_time: datetime
@@ -3736,6 +3763,68 @@ async def track_bookings(email: str, session: AsyncSession = Depends(get_session
             stylist_name=stylist.name if stylist else "Unknown Stylist",
             customer_name=booking.customer_name,
             customer_email=booking.customer_email,
+            customer_phone=booking.customer_phone,
+            preferred_style_text=booking.preferred_style_text,
+            preferred_style_image_url=booking.preferred_style_image_url,
+            start_time=booking.start_at_utc,
+            end_time=booking.end_at_utc,
+            status=booking.status.value,
+            created_at=booking.created_at,
+            service_price_cents=service_price,
+            secondary_service_price_cents=secondary_price if secondary_service else None,
+            discount_cents=discount_cents,
+            total_price_cents=total_price,
+        ))
+    
+    return response
+
+
+@app.get("/bookings/lookup")
+async def lookup_bookings(phone: str, session: AsyncSession = Depends(get_session)):
+    """Look up bookings by customer phone number."""
+    if not phone or not phone.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Phone is required")
+
+    normalized_phone = normalize_phone(phone)
+    if not normalized_phone:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid phone number")
+
+    # Get all bookings for this phone
+    result = await session.execute(
+        select(Booking)
+        .where(Booking.customer_phone == normalized_phone)
+        .order_by(Booking.start_at_utc.desc())
+    )
+    bookings = result.scalars().all()
+    
+    # Fetch service and stylist names for each booking
+    response = []
+    for booking in bookings:
+        svc_result = await session.execute(select(Service).where(Service.id == booking.service_id))
+        service = svc_result.scalar_one_or_none()
+        secondary_service = None
+        if booking.secondary_service_id:
+            secondary_result = await session.execute(
+                select(Service).where(Service.id == booking.secondary_service_id)
+            )
+            secondary_service = secondary_result.scalar_one_or_none()
+
+        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
+        stylist = stylist_result.scalar_one_or_none()
+        
+        service_price = service.price_cents if service else 0
+        secondary_price = secondary_service.price_cents if secondary_service else 0
+        discount_cents = booking.discount_cents or 0
+        total_price = max(service_price + secondary_price - discount_cents, 0)
+        
+        response.append(BookingTrackResponse(
+            booking_id=booking.id,
+            service_name=service.name if service else "Unknown Service",
+            secondary_service_name=secondary_service.name if secondary_service else None,
+            stylist_name=stylist.name if stylist else "Unknown Stylist",
+            customer_name=booking.customer_name,
+            customer_email=booking.customer_email,
+            customer_phone=booking.customer_phone,
             preferred_style_text=booking.preferred_style_text,
             preferred_style_image_url=booking.preferred_style_image_url,
             start_time=booking.start_at_utc,

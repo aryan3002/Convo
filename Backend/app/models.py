@@ -108,6 +108,7 @@ class Booking(Base):
     stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
     customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    customer_phone: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     preferred_style_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     preferred_style_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     promo_id: Mapped[int | None] = mapped_column(ForeignKey("promos.id"), nullable=True, index=True)
