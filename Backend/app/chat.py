@@ -46,7 +46,7 @@ class ChatResponse(BaseModel):
     data: dict | None = None  # Tool results (services, slots, hold, confirm)
 
 
-SYSTEM_PROMPT = """You are a friendly booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
+CHAT_PROMPT = """You are a friendly booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
 
 SERVICES: {services}
 STYLISTS: {stylists}
@@ -56,6 +56,7 @@ WORKING HOURS: {working_hours} ({working_days})
 CURRENT STAGE: {stage}
 SELECTED SERVICE: {selected_service}
 SELECTED DATE: {selected_date}
+CHANNEL: {channel}
 
 DATE RULES:
 - Today: {today_date}, Tomorrow: {tomorrow_date}, Current year: {current_year}
@@ -155,6 +156,9 @@ RESPONSE STYLE:
 - Speak naturally: "I can do 10 AM with Alex or 11:30 with Jamie. Which works?"
 - Never say "select from the list" or "tap".
 """
+
+# Backward compatibility alias
+SYSTEM_PROMPT = CHAT_PROMPT
 
 ALLOWED_STAGES = {
     "CAPTURE_EMAIL",
@@ -397,8 +401,14 @@ async def chat_with_ai(
     working_hours_text = f'{settings.working_hours_start} to {settings.working_hours_end}'
     
     selected_date = context.get("selected_date") if context else None
+    
+    # Determine channel (chat or voice)
+    channel = context.get("channel", "chat") if context else "chat"
+    
+    # Select appropriate prompt based on channel
+    base_prompt = VOICE_PROMPT if channel == "voice" else CHAT_PROMPT
 
-    system_prompt = SYSTEM_PROMPT.format(
+    system_prompt = base_prompt.format(
         services=services_text,
         stylists=stylists_text,
         today=today_formatted,
@@ -412,6 +422,7 @@ async def chat_with_ai(
         stage=stage,
         selected_service=selected_service or "None",
         selected_date=selected_date or "None",
+        channel=channel,
     )
     
     # Add context information if available
@@ -485,21 +496,25 @@ async def chat_with_ai(
                 action = None
 
         reply = shorten_reply(clean_response)
+        
+        # Use channel-aware stage prompts
+        stage_prompts_to_use = VOICE_STAGE_PROMPTS if channel == "voice" else STAGE_PROMPTS
+        
         if not reply:
-            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+            reply = stage_prompts_to_use.get(stage, stage_prompts_to_use.get("WELCOME", "Welcome!"))
 
         # Guardrail: never list slots or long text
         if action and action.get("type") == "fetch_availability":
-            reply = "Here are a few good options. Tap one to continue."
+            reply = "Here are a few good options" if channel == "voice" else "Here are a few good options. Tap one to continue."
         elif action and action.get("type") == "select_service":
-            reply = "Great choice. Pick a date below to see times."
+            reply = "Great choice. What day works for you?" if channel == "voice" else "Great choice. Pick a date below to see times."
         elif not reply:
-            reply = STAGE_PROMPTS.get(stage, STAGE_PROMPTS["WELCOME"])
+            reply = stage_prompts_to_use.get(stage, stage_prompts_to_use.get("WELCOME", "Welcome!"))
 
         time_pattern = re.compile(r"\b\d{1,2}(:\d{2})?\s*(am|pm)\b", re.IGNORECASE)
         count_pattern = re.compile(r"\b\d+\s+(slots|times|options)\b", re.IGNORECASE)
         if stage == "SELECT_SLOT" and (time_pattern.search(reply) or count_pattern.search(reply)):
-            reply = STAGE_PROMPTS["SELECT_SLOT"]
+            reply = stage_prompts_to_use.get("SELECT_SLOT", "Here are a few good options.")
 
         return ChatResponse(reply=reply, action=action)
         

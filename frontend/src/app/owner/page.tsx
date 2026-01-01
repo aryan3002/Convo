@@ -92,7 +92,8 @@ type OwnerChatResponse = {
 };
 
 type CustomerProfile = {
-  email: string;
+  email: string | null;
+  phone?: string | null;
   name: string | null;
   preferred_stylist: string | null;
   last_service: string | null;
@@ -202,6 +203,7 @@ export default function OwnerPage() {
   const [timeOffLoading, setTimeOffLoading] = useState(false);
   const [timeOffEntries, setTimeOffEntries] = useState<Record<number, OwnerTimeOffEntry[]>>({});
   const [customerLookupEmail, setCustomerLookupEmail] = useState("");
+  const [customerLookupIdentity, setCustomerLookupIdentity] = useState(""); // Can be email or phone
   const [customerLookupLoading, setCustomerLookupLoading] = useState(false);
   const [customerLookupError, setCustomerLookupError] = useState("");
   const [customerProfile, setCustomerProfile] = useState<CustomerProfile | null>(null);
@@ -642,15 +644,20 @@ export default function OwnerPage() {
   }
 
   async function lookupCustomer() {
-    const email = customerLookupEmail.trim().toLowerCase();
-    if (!email || customerLookupLoading) return;
+    const identity = (customerLookupIdentity || customerLookupEmail).trim();
+    if (!identity || customerLookupLoading) return;
     setCustomerLookupLoading(true);
     setCustomerLookupError("");
     setCustomerProfile(null);
     try {
-      const res = await fetch(`${API_BASE}/customers/${encodeURIComponent(email)}`);
+      // Use the new identity lookup endpoint
+      const url = new URL(`${API_BASE}/customers/lookup/identity`);
+      url.searchParams.set("identity", identity);
+      const res = await fetch(url.toString());
+      
       if (!res.ok) {
-        setCustomerLookupError("No customer found for that email.");
+        const isPhone = /^[\d\s\-\+\(\)]+$/.test(identity);
+        setCustomerLookupError(`No customer found for that ${isPhone ? 'phone number' : 'email'}.`);
         return;
       }
       const data: CustomerProfile = await res.json();
@@ -1592,18 +1599,19 @@ export default function OwnerPage() {
 
           <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
             <h2 className="text-sm font-semibold text-gray-900 mb-2">Customer lookup</h2>
-            <p className="text-xs text-gray-500 mb-4">Quick profile by email.</p>
+            <p className="text-xs text-gray-500 mb-4">Quick profile by email or phone.</p>
             <div className="flex gap-2">
               <input
-                type="email"
-                value={customerLookupEmail}
-                onChange={(e) => setCustomerLookupEmail(e.target.value)}
-                placeholder="name@email.com"
+                type="text"
+                value={customerLookupIdentity}
+                onChange={(e) => setCustomerLookupIdentity(e.target.value)}
+                placeholder="Email or phone number"
                 className="flex-1 px-4 py-2 rounded-full border border-gray-200 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                onKeyDown={(e) => e.key === "Enter" && lookupCustomer()}
               />
               <button
                 onClick={lookupCustomer}
-                disabled={!customerLookupEmail.trim() || customerLookupLoading}
+                disabled={!customerLookupIdentity.trim() || customerLookupLoading}
                 className="px-4 py-2 rounded-full bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-60"
               >
                 {customerLookupLoading ? "Searching..." : "Search"}
@@ -1617,7 +1625,7 @@ export default function OwnerPage() {
                 <div className="flex justify-between">
                   <span className="text-gray-500">Customer</span>
                   <span className="font-medium">
-                    {customerProfile.name || customerProfile.email}
+                    {customerProfile.name || customerProfile.email || customerProfile.phone || "Guest"}
                   </span>
                 </div>
                 <div className="flex justify-between">

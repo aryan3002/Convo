@@ -932,6 +932,13 @@ async def on_startup():
         )
     async with AsyncSessionLocal() as session:
         await seed_initial_data(session)
+    
+    # Register chat processor for voice module
+    async def process_chat_turn(request: ChatRequest, session: AsyncSession) -> ChatResponse:
+        """Process a single chat turn for both web and voice channels."""
+        return await chat_with_ai(request.messages, session, request.context)
+    
+    app.state.process_chat_turn = process_chat_turn
 
 
 @app.get("/services")
@@ -1192,6 +1199,7 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
                 tz_offset = (request.context or {}).get("tz_offset_minutes", 0)
             customer_name = params.get("customer_name") or (request.context or {}).get("customer_name")
             customer_email = params.get("customer_email") or (request.context or {}).get("customer_email")
+            customer_phone = params.get("customer_phone") or (request.context or {}).get("customer_phone")
             payload = HoldRequest(
                 service_id=service_id,
                 date=date_str,
@@ -1199,6 +1207,7 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
                 stylist_id=stylist_id,
                 customer_name=customer_name,
                 customer_email=customer_email,
+                customer_phone=customer_phone,
                 tz_offset_minutes=int(tz_offset),
             )
             hold_result = await create_hold(payload, session)
@@ -1256,6 +1265,38 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
                 if promo_response.promo:
                     data = {"promo": promo_response.promo}
                     # The frontend will handle displaying the promo
+        elif action_type == "get_last_preferred_style":
+            email = params.get("customer_email") or (request.context or {}).get("customer_email")
+            service_id = params.get("service_id") or (request.context or {}).get("selected_service_id")
+            if email and service_id:
+                customer = await get_customer_by_email(session, email)
+                if customer:
+                    preference = await get_service_preference(session, customer.id, int(service_id))
+                    if preference and (preference.preferred_style_text or preference.preferred_style_image_url):
+                        data = {
+                            "preferred_style": {
+                                "text": preference.preferred_style_text,
+                                "image_url": preference.preferred_style_image_url,
+                            }
+                        }
+        elif action_type == "set_preferred_style":
+            email = params.get("customer_email") or (request.context or {}).get("customer_email")
+            service_id = params.get("service_id") or (request.context or {}).get("selected_service_id")
+            style_text = params.get("preferred_style_text")
+            style_image_url = params.get("preferred_style_image_url")
+            if email and service_id:
+                customer = await get_or_create_customer_by_identity(session, email=email)
+                await upsert_service_preference(
+                    session, customer.id, int(service_id), style_text, style_image_url
+                )
+                data = {"preference_saved": True}
+                reply_override = "Got it! I'll remember your preference."
+        elif action_type == "apply_same_as_last_time":
+            # Just acknowledge - the frontend will handle applying previous preference
+            data = {"using_last_preference": True}
+        elif action_type == "skip_preferred_style":
+            # Just acknowledge - no preference needed
+            data = {"skipped_preference": True}
     except HTTPException as exc:
         return ChatResponse(reply=str(exc.detail), action=None, data=None)
     except Exception:
@@ -3578,14 +3619,20 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
         )
         secondary_service = secondary_result.scalar_one_or_none()
 
-    if booking.customer_email:
-        customer = await get_or_create_customer(
-            session, booking.customer_email, booking.customer_name
+    # Create or update customer record
+    if booking.customer_email or booking.customer_phone:
+        customer = await get_or_create_customer_by_identity(
+            session, 
+            booking.customer_email, 
+            booking.customer_phone, 
+            booking.customer_name
         )
-        preference = await get_service_preference(session, customer.id, booking.service_id)
-        if preference:
-            booking.preferred_style_text = preference.preferred_style_text
-            booking.preferred_style_image_url = preference.preferred_style_image_url
+        if customer:
+            # Apply saved style preferences if available
+            preference = await get_service_preference(session, customer.id, booking.service_id)
+            if preference:
+                booking.preferred_style_text = preference.preferred_style_text
+                booking.preferred_style_image_url = preference.preferred_style_image_url
 
     booking.status = BookingStatus.CONFIRMED
     await update_customer_stats(session, booking, service, stylist)
@@ -3709,7 +3756,8 @@ class BookingTrackResponse(BaseModel):
 
 
 class CustomerProfileResponse(BaseModel):
-    email: str
+    email: str | None
+    phone: str | None = None
     name: str | None
     preferred_stylist: str | None
     last_service: str | None
@@ -3847,6 +3895,34 @@ async def get_customer_profile(email: str, session: AsyncSession = Depends(get_s
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
     return CustomerProfileResponse(
         email=context.get("email"),
+        phone=context.get("phone"),
+        name=context.get("name"),
+        preferred_stylist=context.get("preferred_stylist"),
+        last_service=context.get("last_service"),
+        last_stylist=context.get("last_stylist"),
+        average_spend_cents=int(context.get("average_spend_cents") or 0),
+        total_bookings=int(context.get("total_bookings") or 0),
+        total_spend_cents=int(context.get("total_spend_cents") or 0),
+        last_booking_at=context.get("last_booking_at"),
+    )
+
+@app.get("/customers/lookup/identity", response_model=CustomerProfileResponse)
+async def lookup_customer_by_identity(identity: str, session: AsyncSession = Depends(get_session)):
+    """Look up customer by email or phone number."""
+    # Determine if identity is phone or email
+    is_phone = bool(re.match(r'^[\d\s\-\+\(\)]+$', identity))
+    
+    if is_phone:
+        context = await get_customer_context(session, phone=identity)
+    else:
+        context = await get_customer_context(session, email=identity)
+    
+    if not context:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
+    
+    return CustomerProfileResponse(
+        email=context.get("email"),
+        phone=context.get("phone"),
         name=context.get("name"),
         preferred_stylist=context.get("preferred_stylist"),
         last_service=context.get("last_service"),

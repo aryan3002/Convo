@@ -257,7 +257,8 @@ export default function ChatPage() {
   } | null>(null);
 
   const [trackEmail, setTrackEmail] = useState("");
-  const [lastTrackedEmail, setLastTrackedEmail] = useState("");
+  const [trackIdentity, setTrackIdentity] = useState(""); // Can be email or phone
+  const [lastTrackedIdentity, setLastTrackedIdentity] = useState("");
   const [trackResults, setTrackResults] = useState<BookingTrack[]>([]);
   const [trackLoading, setTrackLoading] = useState(false);
   const [trackError, setTrackError] = useState("");
@@ -1858,10 +1859,10 @@ export default function ChatPage() {
     }
   }
 
-  async function trackBookings(overrideEmail?: string) {
-    const email = (overrideEmail || trackEmail || customerEmail).trim();
-    if (!email) {
-      setTrackError("Enter the email you used for booking.");
+  async function trackBookings(overrideIdentity?: string) {
+    const identity = (overrideIdentity || trackIdentity || trackEmail || customerEmail).trim();
+    if (!identity) {
+      setTrackError("Enter your email or phone number.");
       return;
     }
 
@@ -1869,16 +1870,18 @@ export default function ChatPage() {
     setTrackError("");
     setTrackResults([]);
     try {
-      const url = new URL(`${API_BASE}/bookings/track`);
-      url.searchParams.set("email", email);
+      // Determine if input is phone or email
+      const isPhone = /^[\d\s\-\+\(\)]+$/.test(identity);
+      const url = new URL(`${API_BASE}/bookings/${isPhone ? 'lookup' : 'track'}`);
+      url.searchParams.set(isPhone ? "phone" : "email", identity);
       const res = await fetch(url.toString());
       if (res.ok) {
         const data: BookingTrack[] = await res.json();
         setTrackResults(data);
         setSelectedTrackBooking(null);
-        setLastTrackedEmail(email.toLowerCase());
+        setLastTrackedIdentity(identity.toLowerCase());
         if (data.length === 0) {
-          setTrackError("No bookings found for this email yet.");
+          setTrackError(`No bookings found for this ${isPhone ? 'phone number' : 'email'} yet.`);
         }
       } else {
         setTrackError("Unable to fetch bookings right now.");
@@ -2580,7 +2583,7 @@ export default function ChatPage() {
                 <div>
                   <p className="text-sm uppercase tracking-wide text-gray-600 font-semibold">Track</p>
                   <h2 className="text-2xl font-semibold text-gray-900">Find your bookings</h2>
-                  <p className="text-sm text-gray-500">Enter the email you used when booking to see status and details.</p>
+                  <p className="text-sm text-gray-500">Enter your email or phone number to see status and details.</p>
                 </div>
                 <div className="hidden sm:block w-12 h-12 rounded-2xl bg-gray-100 text-gray-600 flex items-center justify-center">
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2597,16 +2600,16 @@ export default function ChatPage() {
                 className="flex flex-col sm:flex-row gap-3"
               >
                 <input
-                  type="email"
-                  value={trackEmail}
-                  onChange={(e) => setTrackEmail(e.target.value)}
-                  placeholder="Enter your email"
+                  type="text"
+                  value={trackIdentity}
+                  onChange={(e) => setTrackIdentity(e.target.value)}
+                  placeholder="Email or phone number"
                   className="flex-1 px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-gray-400"
                 />
                 <button
                   type="submit"
                   className="px-5 py-3 bg-gray-700 hover:bg-gray-800 text-white rounded-xl font-semibold transition disabled:bg-gray-300 disabled:cursor-not-allowed"
-                  disabled={trackLoading || !trackEmail.trim()}
+                  disabled={trackLoading || !trackIdentity.trim()}
                 >
                   {trackLoading ? "Checking..." : "View bookings"}
                 </button>
@@ -2704,8 +2707,8 @@ export default function ChatPage() {
                   );
                 })}
 
-                {!trackLoading && !trackResults.length && lastTrackedEmail && !trackError && (
-                  <p className="text-sm text-gray-500">No bookings found for {lastTrackedEmail} yet.</p>
+                {!trackLoading && !trackResults.length && lastTrackedIdentity && !trackError && (
+                  <p className="text-sm text-gray-500">No bookings found for {lastTrackedIdentity} yet.</p>
                 )}
               </div>
             </div>
