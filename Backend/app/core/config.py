@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     resend_api_key: str | None = Field(default=None, alias="RESEND_API_KEY")
     resend_from: str | None = Field(default=None, alias="RESEND_FROM")
     public_api_base: str = Field(default="http://localhost:8000", alias="PUBLIC_API_BASE")
+    cloudinary_cloud_name: str | None = Field(default=None, alias="CLOUDINARY_CLOUD_NAME")
+    cloudinary_upload_preset: str | None = Field(default=None, alias="CLOUDINARY_UPLOAD_PRESET")
+    cloudinary_api_key: str | None = Field(default=None, alias="CLOUDINARY_API_KEY")
 
     model_config = SettingsConfigDict(env_file=(".env", "Backend/.env", "backend/.env"), extra="ignore")
 

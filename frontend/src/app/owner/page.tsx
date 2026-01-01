@@ -49,8 +49,11 @@ type ScheduleBooking = {
   stylist_id: number;
   stylist_name: string;
   service_name: string;
+  secondary_service_name?: string | null;
   customer_name: string | null;
   status: "HOLD" | "CONFIRMED" | "EXPIRED";
+  preferred_style_text?: string | null;
+  preferred_style_image_url?: string | null;
   start_time: string;
   end_time: string;
 };
@@ -118,6 +121,7 @@ type PromoDraft = {
   usage_limit: string;
   valid_days: number[];
   service_id: number | null;
+  combo_secondary_service_id: number | null;
   start_at: string;
   end_at: string;
   active: boolean;
@@ -149,8 +153,6 @@ const PROMO_TRIGGERS = [
 const PROMO_DISCOUNTS = [
   { value: "PERCENT", label: "Percent off" },
   { value: "FIXED", label: "Fixed amount off" },
-  { value: "FREE_ADDON", label: "Free add-on" },
-  { value: "BUNDLE", label: "Bundle perk" },
 ];
 
 const DAY_OPTIONS = [
@@ -194,6 +196,8 @@ export default function OwnerPage() {
     return today.toISOString().split("T")[0];
   });
   const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [selectedBooking, setSelectedBooking] = useState<ScheduleBooking | null>(null);
+  const [styleFilter, setStyleFilter] = useState("");
   const [timeOffOpenStylistId, setTimeOffOpenStylistId] = useState<number | null>(null);
   const [timeOffLoading, setTimeOffLoading] = useState(false);
   const [timeOffEntries, setTimeOffEntries] = useState<Record<number, OwnerTimeOffEntry[]>>({});
@@ -219,6 +223,7 @@ export default function OwnerPage() {
     usage_limit: "",
     valid_days: [],
     service_id: null,
+    combo_secondary_service_id: null,
     start_at: "",
     end_at: "",
     active: true,
@@ -457,6 +462,7 @@ export default function OwnerPage() {
       usage_limit: "",
       valid_days: [],
       service_id: null,
+      combo_secondary_service_id: null,
       start_at: "",
       end_at: "",
       active: true,
@@ -691,21 +697,35 @@ export default function OwnerPage() {
     })}–${end.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
   }
 
+  function formatPromoServices(promo: OwnerPromo) {
+    if (promo.type !== "SERVICE_COMBO_PROMO") {
+      if (!promo.service_id) return "";
+      const svc = services.find((s) => s.id === promo.service_id);
+      return svc ? `Service: ${svc.name}` : "";
+    }
+    const comboIds = Array.isArray(promo.constraints_json?.combo_service_ids)
+      ? (promo.constraints_json?.combo_service_ids as number[])
+      : [];
+    if (comboIds.length !== 2) return "";
+    const names = comboIds
+      .map((id) => services.find((svc) => svc.id === id)?.name)
+      .filter(Boolean);
+    if (names.length !== 2) return "";
+    return `Combo: ${names[0]} + ${names[1]}`;
+  }
+
   function handlePromoNext() {
     setPromoWizardError("");
     if (promoWizardStep === 0 && !promoDraft.type) {
       setPromoWizardError("Select a promotion type to continue.");
       return;
     }
-    if (promoWizardStep === 1 && !promoDraft.trigger_point) {
-      setPromoWizardError("Select when the promotion should appear.");
-      return;
-    }
-    if (promoWizardStep === 2 && promoDraft.copy_mode === "custom" && !promoDraft.custom_copy.trim()) {
+    // Step 1 is now copy mode (trigger point removed - system auto-assigns)
+    if (promoWizardStep === 1 && promoDraft.copy_mode === "custom" && !promoDraft.custom_copy.trim()) {
       setPromoWizardError("Add your custom promo copy or switch to AI copy.");
       return;
     }
-    if (promoWizardStep === 3) {
+    if (promoWizardStep === 2) {
       if (!promoDraft.discount_type) {
         setPromoWizardError("Select a discount type.");
         return;
@@ -715,9 +735,14 @@ export default function OwnerPage() {
         return;
       }
     }
-    if (promoWizardStep === 4) {
-      if (promoDraft.type === "SERVICE_COMBO_PROMO" && !promoDraft.service_id) {
-        setPromoWizardError("Select a service for the combo promotion.");
+    if (promoWizardStep === 3) {
+      if (
+        promoDraft.type === "SERVICE_COMBO_PROMO" &&
+        (!promoDraft.service_id ||
+          !promoDraft.combo_secondary_service_id ||
+          promoDraft.service_id === promoDraft.combo_secondary_service_id)
+      ) {
+        setPromoWizardError("Select two different services for the combo promotion.");
         return;
       }
       if (promoDraft.type === "SEASONAL_PROMO" && (!promoDraft.start_at || !promoDraft.end_at)) {
@@ -725,7 +750,7 @@ export default function OwnerPage() {
         return;
       }
     }
-    setPromoWizardStep((step) => Math.min(step + 1, 5));
+    setPromoWizardStep((step) => Math.min(step + 1, 4));
   }
 
   function handlePromoBack() {
@@ -735,7 +760,7 @@ export default function OwnerPage() {
 
   async function handlePromoCreate() {
     setPromoWizardError("");
-    if (!promoDraft.type || !promoDraft.trigger_point || !promoDraft.discount_type) {
+    if (!promoDraft.type || !promoDraft.discount_type) {
       setPromoWizardError("Complete the required fields before saving.");
       return;
     }
@@ -771,10 +796,20 @@ export default function OwnerPage() {
     if (promoDraft.perk_description.trim()) {
       constraints.perk_description = promoDraft.perk_description.trim();
     }
+    if (
+      promoDraft.type === "SERVICE_COMBO_PROMO" &&
+      promoDraft.service_id &&
+      promoDraft.combo_secondary_service_id
+    ) {
+      constraints.combo_service_ids = [
+        promoDraft.service_id,
+        promoDraft.combo_secondary_service_id,
+      ];
+    }
 
     const payload = {
       type: promoDraft.type,
-      trigger_point: promoDraft.trigger_point,
+      // trigger_point is auto-assigned by backend based on promo type
       service_id: promoDraft.service_id,
       discount_type: promoDraft.discount_type,
       discount_value: discountValue,
@@ -841,7 +876,7 @@ export default function OwnerPage() {
   }
 
   async function removePromo(promoId: number) {
-    const confirmDelete = window.confirm("Disable this promotion?");
+    const confirmDelete = window.confirm("Are you sure you want to permanently remove this promotion?");
     if (!confirmDelete) return;
     setPromoActionLoading(true);
     try {
@@ -850,13 +885,13 @@ export default function OwnerPage() {
       });
       if (!res.ok) {
         const error = await res.json();
-        throw new Error(error.detail || "Unable to disable promotion.");
+        throw new Error(error.detail || "Unable to remove promotion.");
       }
       await fetchPromos();
       setPromoActionOpenId(null);
     } catch (error) {
       console.error("Failed to remove promo:", error);
-      alert(error instanceof Error ? error.message : "Unable to disable promotion.");
+      alert(error instanceof Error ? error.message : "Unable to remove promotion.");
     } finally {
       setPromoActionLoading(false);
     }
@@ -864,6 +899,47 @@ export default function OwnerPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
+      {selectedBooking && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full animate-fadeIn relative">
+            <button
+              onClick={() => setSelectedBooking(null)}
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Booking details</h3>
+              <p className="text-xs text-gray-500">
+                {selectedBooking.secondary_service_name
+                  ? `${selectedBooking.service_name} + ${selectedBooking.secondary_service_name}`
+                  : selectedBooking.service_name}{" "}
+                · {selectedBooking.customer_name || "Guest"}
+              </p>
+            </div>
+            {selectedBooking.preferred_style_text && (
+              <p className="text-sm text-gray-700 whitespace-pre-wrap mb-4">
+                {selectedBooking.preferred_style_text}
+              </p>
+            )}
+            {selectedBooking.preferred_style_image_url && (
+              <div className="rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
+                <img
+                  src={selectedBooking.preferred_style_image_url}
+                  alt="Preferred style"
+                  className="w-full max-h-64 object-cover"
+                />
+              </div>
+            )}
+            {!selectedBooking.preferred_style_text &&
+              !selectedBooking.preferred_style_image_url && (
+                <p className="text-sm text-gray-500">No preferred style saved for this booking.</p>
+              )}
+          </div>
+        </div>
+      )}
       {promoWizardOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
           <div className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-gray-100 p-6">
@@ -899,42 +975,13 @@ export default function OwnerPage() {
                       >
                         {option.label}
                       </button>
-                    ))}
-                  </div>
+                    ))}n                  </div>
                 </div>
               )}
+
+              {/* Step 1 removed - trigger point is auto-assigned by system */}
 
               {promoWizardStep === 1 && (
-                <div>
-                  <p className="text-sm font-medium text-gray-900 mb-3">Trigger point</p>
-                  <div className="flex flex-wrap gap-2">
-                    {PROMO_TRIGGERS.filter((option) => {
-                      if (promoDraft.type !== "SERVICE_COMBO_PROMO") return true;
-                      return [
-                        "AFTER_SERVICE_SELECTED",
-                        "AFTER_SLOT_SHOWN",
-                        "AFTER_HOLD_CREATED",
-                      ].includes(option.value);
-                    }).map((option) => (
-                      <button
-                        key={option.value}
-                        onClick={() =>
-                          setPromoDraft((prev) => ({ ...prev, trigger_point: option.value }))
-                        }
-                        className={`px-4 py-2 rounded-full text-sm ${
-                          promoDraft.trigger_point === option.value
-                            ? "bg-gray-900 text-white"
-                            : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {promoWizardStep === 2 && (
                 <div>
                   <p className="text-sm font-medium text-gray-900 mb-3">Promotion copy</p>
                   <div className="flex gap-2 mb-4">
@@ -966,7 +1013,7 @@ export default function OwnerPage() {
                 </div>
               )}
 
-              {promoWizardStep === 3 && (
+              {promoWizardStep === 2 && (
                 <div>
                   <p className="text-sm font-medium text-gray-900 mb-3">Discount details</p>
                   <div className="flex flex-wrap gap-2 mb-4">
@@ -1020,28 +1067,47 @@ export default function OwnerPage() {
                 </div>
               )}
 
-              {promoWizardStep === 4 && (
+              {promoWizardStep === 3 && (
                 <div className="space-y-4">
                   {promoDraft.type === "SERVICE_COMBO_PROMO" && (
                     <div>
                       <p className="text-sm font-medium text-gray-900 mb-2">Service selection</p>
-                      <select
-                        value={promoDraft.service_id ?? ""}
-                        onChange={(e) =>
-                          setPromoDraft((prev) => ({
-                            ...prev,
-                            service_id: e.target.value ? Number(e.target.value) : null,
-                          }))
-                        }
-                        className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm"
-                      >
-                        <option value="">Select a service</option>
-                        {services.map((svc) => (
-                          <option key={svc.id} value={svc.id}>
-                            {svc.name}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <select
+                          value={promoDraft.service_id ?? ""}
+                          onChange={(e) =>
+                            setPromoDraft((prev) => ({
+                              ...prev,
+                              service_id: e.target.value ? Number(e.target.value) : null,
+                            }))
+                          }
+                          className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm"
+                        >
+                          <option value="">Primary service</option>
+                          {services.map((svc) => (
+                            <option key={svc.id} value={svc.id}>
+                              {svc.name}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={promoDraft.combo_secondary_service_id ?? ""}
+                          onChange={(e) =>
+                            setPromoDraft((prev) => ({
+                              ...prev,
+                              combo_secondary_service_id: e.target.value ? Number(e.target.value) : null,
+                            }))
+                          }
+                          className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm"
+                        >
+                          <option value="">Secondary service</option>
+                          {services.map((svc) => (
+                            <option key={svc.id} value={svc.id}>
+                              {svc.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
                       {services.length === 0 && (
                         <p className="text-xs text-red-500 mt-2">
                           Add a service before creating a combo promotion.
@@ -1132,7 +1198,7 @@ export default function OwnerPage() {
                 </div>
               )}
 
-              {promoWizardStep === 5 && (
+              {promoWizardStep === 4 && (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
@@ -1185,7 +1251,7 @@ export default function OwnerPage() {
               >
                 Back
               </button>
-              {promoWizardStep < 5 ? (
+              {promoWizardStep < 4 ? (
                 <button
                   onClick={handlePromoNext}
                   className="px-5 py-2 rounded-full bg-gray-900 text-white text-sm"
@@ -1477,6 +1543,11 @@ export default function OwnerPage() {
                         <p className="text-[11px] text-gray-400">
                           {formatPromoWindow(promo)}
                         </p>
+                        {formatPromoServices(promo) && (
+                          <p className="text-[11px] text-gray-500">
+                            {formatPromoServices(promo)}
+                          </p>
+                        )}
                         <p className="text-[11px] text-gray-400">Promo ID: {promo.id}</p>
                       </div>
                       <span
@@ -1509,7 +1580,7 @@ export default function OwnerPage() {
                           disabled={promoActionLoading}
                           className="px-3 py-1 rounded-full text-xs bg-red-600 text-white disabled:opacity-60"
                         >
-                          Disable
+                          Remove
                         </button>
                       </div>
                     )}
@@ -1590,6 +1661,13 @@ export default function OwnerPage() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={styleFilter}
+                onChange={(event) => setStyleFilter(event.target.value)}
+                placeholder="Filter by style"
+                className="px-3 py-2 rounded-full border border-gray-200 text-xs text-gray-600"
+              />
               <button
                 onClick={() => {
                   const date = new Date(scheduleDate);
@@ -1715,9 +1793,9 @@ export default function OwnerPage() {
                           if (bookingId) {
                             const booking = scheduleBookings.find(b => b.id === bookingId);
                             if (!booking) return;
-                            const service = services.find(s => s.name === booking.service_name);
-                            if (!service) return;
-                            const duration = service.duration_minutes;
+                            const duration =
+                              parseTimeToMinutes(booking.end_time) -
+                              parseTimeToMinutes(booking.start_time);
                             if (slot < stylistStart || slot + duration > stylistEnd) {
                               alert("Cannot drop: the booking would extend outside the stylist's working hours.");
                               return;
@@ -1741,6 +1819,10 @@ export default function OwnerPage() {
                 );
                 if (stylistIndex === -1) return null;
                 const stylist = scheduleStylists[stylistIndex];
+                const normalizedFilter = styleFilter.trim().toLowerCase();
+                const matchesStyle =
+                  !normalizedFilter ||
+                  (booking.preferred_style_text || "").toLowerCase().includes(normalizedFilter);
                 return (
                   <div
                     key={booking.id}
@@ -1756,7 +1838,10 @@ export default function OwnerPage() {
                       event.dataTransfer.setData("text/plain", booking.id);
                       setTimeout(() => document.body.removeChild(dragImage), 0);
                     }}
-                    className="bg-[#0b1c36] text-white text-xs rounded-2xl px-3 py-2 shadow-lg border border-blue-900/50 z-20 cursor-grab active:cursor-grabbing"
+                    onClick={() => setSelectedBooking(booking)}
+                    className={`bg-[#0b1c36] text-white text-xs rounded-2xl px-3 py-2 shadow-lg border border-blue-900/50 z-20 cursor-pointer active:cursor-grabbing ${
+                      normalizedFilter && !matchesStyle ? "opacity-30" : ""
+                    }`}
                     style={{
                       gridColumn: stylistIndex + 2,
                       gridRow: `${rowStart} / span ${rowSpan}`,
@@ -1765,7 +1850,11 @@ export default function OwnerPage() {
                   >
                     <div className="flex justify-between items-start">
                       <div>
-                        <div className="font-semibold text-xs">{booking.service_name}</div>
+                        <div className="font-semibold text-xs">
+                          {booking.secondary_service_name
+                            ? `${booking.service_name} + ${booking.secondary_service_name}`
+                            : booking.service_name}
+                        </div>
                         <div className="text-[10px] text-gray-100">
                           {booking.start_time}–{booking.end_time}
                         </div>
@@ -1774,7 +1863,10 @@ export default function OwnerPage() {
                         </div>
                       </div>
                       <button
-                        onClick={() => cancelBooking(booking.id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          cancelBooking(booking.id);
+                        }}
                         className="px-2 py-1 text-[9px] bg-red-600 text-white rounded hover:bg-red-700"
                       >
                         Cancel

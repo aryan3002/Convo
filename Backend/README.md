@@ -63,3 +63,16 @@ Example payload:
   "priority": 1
 }
 ```
+
+## Preferred style per service
+Customers can save a preferred style (text and/or image URL) per service. Use Cloudinary for image uploads.
+
+Endpoints:
+- `POST /uploads/style-image` upload an image and get `{ "image_url": "..." }`
+- `GET /customers/{email}/preferences?service_id=...` get a saved preference
+- `PUT /customers/{email}/preferences` upsert a preference
+
+Env vars:
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_UPLOAD_PRESET`
+- `CLOUDINARY_API_KEY` (optional for unsigned uploads)

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from Backend.app.main import (
+from app.main import (
     PromoCreateRequest,
     PromoEligibilityContext,
     PromoImpressionSnapshot,
@@ -8,7 +8,7 @@ from Backend.app.main import (
     select_best_promo,
     validate_promo_payload,
 )
-from Backend.app.models import Promo, PromoDiscountType, PromoTriggerPoint, PromoType
+from app.models import Promo, PromoDiscountType, PromoTriggerPoint, PromoType
 
 
 def make_context(**overrides):
@@ -124,5 +124,71 @@ def test_select_best_promo_prefers_priority_then_specificity():
         trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
         priority=1,
     )
-    selected = select_best_promo([daily, combo])
+    context = make_context()
+    selected = select_best_promo([daily, combo], context)
     assert selected.id == combo.id
+
+
+def test_combo_promo_with_combo_service_ids():
+    """Test that combo promo matches when user selects one of the combo services."""
+    promo = make_promo(
+        type=PromoType.SERVICE_COMBO_PROMO,
+        trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
+        service_id=10,  # First combo service
+        constraints_json={"combo_service_ids": [10, 20]},
+    )
+    # User selected service 10 (one of the combo pair)
+    context = make_context(
+        selected_service_id=10,
+        trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
+    )
+    impressions = make_impressions()
+    eligible, reasons = evaluate_promo_candidate(promo, context, impressions)
+    assert eligible, f"Expected eligible but got reasons: {reasons}"
+
+
+def test_combo_promo_with_combo_service_ids_other_service():
+    """Test that combo promo matches when user selects the other combo service."""
+    promo = make_promo(
+        type=PromoType.SERVICE_COMBO_PROMO,
+        trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
+        service_id=10,
+        constraints_json={"combo_service_ids": [10, 20]},
+    )
+    # User selected service 20 (the other service in the combo)
+    context = make_context(
+        selected_service_id=20,
+        trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
+    )
+    impressions = make_impressions()
+    eligible, reasons = evaluate_promo_candidate(promo, context, impressions)
+    assert eligible, f"Expected eligible but got reasons: {reasons}"
+
+
+def test_combo_promo_rejects_non_combo_service():
+    """Test that combo promo is rejected if neither combo service is selected."""
+    promo = make_promo(
+        type=PromoType.SERVICE_COMBO_PROMO,
+        trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
+        service_id=10,
+        constraints_json={"combo_service_ids": [10, 20]},
+    )
+    # User selected service 30 (not in the combo)
+    context = make_context(
+        selected_service_id=30,
+        trigger_point=PromoTriggerPoint.AFTER_SERVICE_SELECTED,
+    )
+    impressions = make_impressions()
+    eligible, reasons = evaluate_promo_candidate(promo, context, impressions)
+    assert not eligible
+    assert "service_mismatch" in reasons
+
+
+def test_best_promo_selects_highest_discount_value():
+    """Test that best promo selection prefers highest discount when price known."""
+    promo_10 = make_promo(id=1, discount_type=PromoDiscountType.PERCENT, discount_value=10, priority=0)
+    promo_25 = make_promo(id=2, discount_type=PromoDiscountType.PERCENT, discount_value=25, priority=0)
+    context = make_context(selected_service_price_cents=10000)  # $100 service
+    selected = select_best_promo([promo_10, promo_25], context)
+    # 25% of $100 = $25 > 10% of $100 = $10
+    assert selected.id == promo_25.id

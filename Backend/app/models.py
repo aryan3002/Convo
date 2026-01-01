@@ -102,9 +102,16 @@ class Booking(Base):
     )
     shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id"), nullable=False, index=True)
     service_id: Mapped[int] = mapped_column(ForeignKey("services.id"), nullable=False, index=True)
+    secondary_service_id: Mapped[int | None] = mapped_column(
+        ForeignKey("services.id"), nullable=True, index=True
+    )
     stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
     customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    preferred_style_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preferred_style_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    promo_id: Mapped[int | None] = mapped_column(ForeignKey("promos.id"), nullable=True, index=True)
+    discount_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     start_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     end_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[BookingStatus] = mapped_column(PgEnum(BookingStatus), nullable=False)
@@ -205,6 +212,30 @@ class CustomerStylistPreference(Base):
             "customer_id",
             "stylist_id",
             name="uq_customer_stylist_preference",
+        ),
+    )
+
+
+class CustomerServicePreference(Base):
+    __tablename__ = "customer_service_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False, index=True)
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id"), nullable=False, index=True)
+    preferred_style_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preferred_style_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at_utc: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id",
+            "service_id",
+            name="uq_customer_service_preference",
         ),
     )
 

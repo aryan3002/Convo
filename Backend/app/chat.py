@@ -71,6 +71,7 @@ CRITICAL RULES:
 - If user tries to type a time, ask them to tap a time option.
 - Before holding: collect BOTH name AND email from user.
 - Follow the CURRENT STAGE and do not skip steps.
+- After a service is selected, ask about preferred style before asking for a date.
 - Prefer tool calls; do not invent availability or confirmation.
 - UI SELECTIONS:
   - "Service selected: <name>" → always use select_service with that service.
@@ -86,13 +87,32 @@ Actions:
 - fetch_availability: {{"service_id": <id>, "date": "YYYY-MM-DD"}}
 - hold_slot: {{"service_id": <id>, "stylist_id": <id>, "date": "YYYY-MM-DD", "start_time": "HH:MM", "customer_name": "<name>", "customer_email": "<email>"}}
 - confirm_booking: {{}}
+- get_last_preferred_style: {{"service_id": <id>, "customer_email": "<email>"}}
+- set_preferred_style: {{"service_id": <id>, "customer_email": "<email>", "preferred_style_text": "<text>", "preferred_style_image_url": "<url>"}}
+- apply_same_as_last_time: {{"service_id": <id>, "customer_email": "<email>"}}
+- skip_preferred_style: {{}}
+- check_promos: {{"trigger_point": "<TRIGGER_POINT>", "email": "<email>", "service_id": <id>, "date": "YYYY-MM-DD"}}
+
+PREFERRED STYLE RULES:
+- If user wants to add or update preferred style, use set_preferred_style with service_id + customer_email.
+- If user asks for "same as last time", use apply_same_as_last_time.
+- If user asks to see the last style, use get_last_preferred_style.
+- If customer_email is missing, ask for it and do not call the action yet.
 
 BOOKING FLOW:
-1. User picks service → select_service action, ask for date
-2. User picks date → IMMEDIATELY use fetch_availability action and say "Here are the available times for [date]:" (slots appear automatically)
-3. User picks time from displayed slots → ask which stylist (Alex=ID 1, Jamie=ID 2) + their name + their email
-4. Once you have ALL of: time + stylist + name + email → immediately use hold_slot action with ALL params
-5. After a hold exists, ask the user to confirm; only use confirm_booking when they confirm
+1. Ask for email at start (CAPTURE_EMAIL stage)
+2. User provides email → check_promos with AT_CHAT_START and AFTER_EMAIL_CAPTURE, display any eligible promos
+3. User picks service → select_service action, check_promos with AFTER_SERVICE_SELECTED, display any eligible promos, ask about preferred style
+4. Preferred style handled (set_preferred_style / apply_same_as_last_time / skip_preferred_style) → ask for date
+5. User picks date → IMMEDIATELY use fetch_availability action and check_promos with AFTER_SLOT_SHOWN, display any eligible promos, say "Here are the available times for [date]:" (slots appear automatically)
+6. User picks time from displayed slots → ask which stylist (Alex=ID 1, Jamie=ID 2) + their name + their email
+7. Once you have ALL of: time + stylist + name + email → immediately use hold_slot action with ALL params and check_promos with AFTER_HOLD_CREATED, display any eligible promos
+8. After a hold exists, ask the user to confirm; only use confirm_booking when they confirm
+
+PROMOTION RULES:
+- Check for promotions using check_promos action at the trigger points listed above
+- When check_promos returns a promo, display it to the user with the custom_copy text if available, otherwise generate a brief description
+- Promos should be applied automatically to the booking total when eligible
 
 RESPONSE STYLE:
 - Be professional and brief (one sentence)
@@ -101,8 +121,10 @@ RESPONSE STYLE:
 """
 
 ALLOWED_STAGES = {
+    "CAPTURE_EMAIL",
     "WELCOME",
     "SELECT_SERVICE",
+    "PREFERRED_STYLE",
     "SELECT_DATE",
     "SELECT_SLOT",
     "HOLDING",
@@ -111,18 +133,22 @@ ALLOWED_STAGES = {
 }
 
 ALLOWED_ACTIONS = {
-    "WELCOME": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
-    "SELECT_SERVICE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
-    "SELECT_DATE": {"fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
-    "SELECT_SLOT": {"hold_slot", "confirm_booking", "show_slots"},
-    "HOLDING": {"confirm_booking", "hold_slot"},
-    "CONFIRMING": {"confirm_booking"},
-    "DONE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots"},
+    "CAPTURE_EMAIL": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "WELCOME": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "SELECT_SERVICE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "PREFERRED_STYLE": {"show_services", "select_service", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "SELECT_DATE": {"fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "SELECT_SLOT": {"hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "HOLDING": {"confirm_booking", "hold_slot", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "CONFIRMING": {"confirm_booking", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
+    "DONE": {"show_services", "select_service", "fetch_availability", "hold_slot", "confirm_booking", "show_slots", "get_last_preferred_style", "set_preferred_style", "apply_same_as_last_time", "skip_preferred_style", "check_promos"},
 }
 
 STAGE_PROMPTS = {
+    "CAPTURE_EMAIL": "Hi! What's the best email to get started?",
     "WELCOME": "Welcome! What service would you like to book?",
     "SELECT_SERVICE": "Which service would you like? Please tap a service.",
+    "PREFERRED_STYLE": "Do you have a preferred style for this service?",
     "SELECT_DATE": "Pick a date below to see times.",
     "SELECT_SLOT": "Here are a few good options. Tap one to continue.",
     "HOLDING": "One moment while I reserve that.",
@@ -171,9 +197,9 @@ def parse_action_from_response(response: str) -> tuple[str, dict | None]:
 
 def normalize_stage(value: Any) -> str:
     if not value:
-        return "WELCOME"
+        return "CAPTURE_EMAIL"
     text = str(value).strip().upper()
-    return text if text in ALLOWED_STAGES else "WELCOME"
+    return text if text in ALLOWED_STAGES else "CAPTURE_EMAIL"
 
 
 def shorten_reply(text: str) -> str:
@@ -279,7 +305,7 @@ async def chat_with_ai(
             re.IGNORECASE,
         )
     )
-    if repeat_intent and stage in {"WELCOME", "SELECT_SERVICE"} and not selected_service:
+    if repeat_intent and stage in {"CAPTURE_EMAIL", "WELCOME", "SELECT_SERVICE"} and not selected_service:
         if not customer_email:
             return ChatResponse(
                 reply="Sure — what's the email on your last booking?",
@@ -359,6 +385,12 @@ async def chat_with_ai(
         if context.get("available_slots"):
             slots_summary = context['available_slots'][:5]  # First 5 slots
             context_parts.append(f"Available slots shown: {slots_summary}")
+        if context.get("preferred_style_text") or context.get("preferred_style_image_url"):
+            context_parts.append("Preferred style saved for this service.")
+        if "has_last_preferred_style" in context:
+            context_parts.append(
+                f"Has saved style for this service: {bool(context.get('has_last_preferred_style'))}"
+            )
         
         if context_parts:
             system_prompt += f"\n\nCURRENT BOOKING CONTEXT:\n" + "\n".join(context_parts)

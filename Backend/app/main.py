@@ -7,12 +7,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import List
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, File, HTTPException, Response, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+import httpx
 
 from .core.config import get_settings
 from .core.db import AsyncSessionLocal, Base, engine, get_session
@@ -21,6 +22,7 @@ from .customer_memory import (
     get_customer_by_email,
     get_customer_context,
     get_customers_by_preferred_stylist,
+    get_or_create_customer,
     update_customer_stats,
 )
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
@@ -30,6 +32,7 @@ from .models import (
     BookingStatus,
     Customer,
     CustomerBookingStats,
+    CustomerServicePreference,
     CustomerStylistPreference,
     Promo,
     PromoDiscountType,
@@ -128,18 +131,21 @@ class AvailabilitySlot(BaseModel):
 
 class HoldRequest(BaseModel):
     service_id: int
+    secondary_service_id: int | None = None
     date: str  # YYYY-MM-DD in local time
     start_time: str  # HH:MM in local time
     stylist_id: int
     customer_name: str | None = None
     customer_email: str | None = None
     tz_offset_minutes: int = Field(default=0, description="Minutes ahead of UTC. Browser offset is negative for Phoenix.")
+    promo_id: int | None = Field(default=None, description="Optional promo ID from earlier trigger point")
 
 
 class HoldResponse(BaseModel):
     booking_id: uuid.UUID
     status: BookingStatus
     hold_expires_at: datetime
+    discount_cents: int = 0
 
 
 class ConfirmRequest(BaseModel):
@@ -152,13 +158,29 @@ class ConfirmResponse(BaseModel):
     status: BookingStatus
 
 
+class StylePreferenceRequest(BaseModel):
+    service_id: int
+    preferred_style_text: str | None = None
+    preferred_style_image_url: str | None = None
+
+
+class StylePreferenceResponse(BaseModel):
+    service_id: int
+    preferred_style_text: str | None = None
+    preferred_style_image_url: str | None = None
+    updated_at_utc: datetime | None = None
+
+
 class OwnerScheduleBooking(BaseModel):
     id: uuid.UUID
     stylist_id: int
     stylist_name: str
     service_name: str
+    secondary_service_name: str | None = None
     customer_name: str | None
     status: BookingStatus
+    preferred_style_text: str | None = None
+    preferred_style_image_url: str | None = None
     start_time: str
     end_time: str
 
@@ -201,7 +223,7 @@ class OwnerCancelRequest(BaseModel):
 class PromoCreateRequest(BaseModel):
     shop_id: int | None = None
     type: PromoType
-    trigger_point: PromoTriggerPoint
+    trigger_point: PromoTriggerPoint | None = None  # Auto-assigned by system
     service_id: int | None = None
     discount_type: PromoDiscountType
     discount_value: int | None = None
@@ -245,6 +267,7 @@ class PromoResponse(BaseModel):
 
 class PromoEligibilityResponse(BaseModel):
     promo: PromoResponse | None = None
+    combo_promo: PromoResponse | None = None  # Separate combo promo (combinable with main promo)
     reason_codes: list[str] = Field(default_factory=list)
 
 
@@ -318,6 +341,44 @@ def to_local_date_str(dt: datetime, tz_offset_minutes: int) -> str:
     return dt.astimezone(tz).strftime("%Y-%m-%d")
 
 
+async def get_service_preference(
+    session: AsyncSession, customer_id: int, service_id: int
+) -> CustomerServicePreference | None:
+    result = await session.execute(
+        select(CustomerServicePreference).where(
+            CustomerServicePreference.customer_id == customer_id,
+            CustomerServicePreference.service_id == service_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def upsert_service_preference(
+    session: AsyncSession,
+    customer_id: int,
+    service_id: int,
+    preferred_style_text: str | None,
+    preferred_style_image_url: str | None,
+) -> CustomerServicePreference:
+    existing = await get_service_preference(session, customer_id, service_id)
+    if existing:
+        existing.preferred_style_text = preferred_style_text
+        existing.preferred_style_image_url = preferred_style_image_url
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+    preference = CustomerServicePreference(
+        customer_id=customer_id,
+        service_id=service_id,
+        preferred_style_text=preferred_style_text,
+        preferred_style_image_url=preferred_style_image_url,
+    )
+    session.add(preference)
+    await session.commit()
+    await session.refresh(preference)
+    return preference
+
+
 PROMO_COMBO_ALLOWED_TRIGGERS = {
     PromoTriggerPoint.AFTER_SERVICE_SELECTED,
     PromoTriggerPoint.AFTER_SLOT_SHOWN,
@@ -384,6 +445,21 @@ def normalize_constraints(constraints: dict | None) -> dict:
     return dict(constraints)
 
 
+def extract_combo_service_ids(constraints: dict | None) -> list[int]:
+    if not constraints:
+        return []
+    raw_ids = constraints.get("combo_service_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    combo_ids: list[int] = []
+    for item in raw_ids:
+        try:
+            combo_ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return combo_ids
+
+
 def validate_promo_payload(
     payload: PromoCreateRequest,
     has_services: bool,
@@ -394,10 +470,15 @@ def validate_promo_payload(
     if payload.type == PromoType.SERVICE_COMBO_PROMO:
         if not has_services:
             errors.append("service_required")
-        if payload.service_id is None:
-            errors.append("service_id_required")
-        if payload.trigger_point not in PROMO_COMBO_ALLOWED_TRIGGERS:
-            errors.append("trigger_point_invalid_for_service_combo")
+        combo_ids = extract_combo_service_ids(normalize_constraints(payload.constraints_json))
+        if combo_ids:
+            if len(combo_ids) != 2 or combo_ids[0] == combo_ids[1]:
+                errors.append("combo_service_ids_invalid")
+            if payload.service_id is None or payload.service_id not in combo_ids:
+                errors.append("service_id_required")
+        else:
+            # For combo promo, must have exactly 2 services in combo_service_ids
+            errors.append("combo_service_ids_required")
 
     if payload.service_id is not None and not service_exists:
         errors.append("service_id_invalid")
@@ -509,15 +590,12 @@ def evaluate_promo_candidate(
         reasons.append("day_not_allowed")
         return False, reasons
 
-    if context.session_id and promo.id in impressions.session_shown:
-        reasons.append("already_shown_session")
-        return False, reasons
-
+    # For DAILY_PROMO - check if already shown today (to this session or email)
     if promo.type == PromoType.DAILY_PROMO:
-        if context.email and promo.id in impressions.email_daily_shown:
+        if context.session_id and promo.id in impressions.session_daily_shown:
             reasons.append("daily_limit_reached")
             return False, reasons
-        if not context.email and context.session_id and promo.id in impressions.session_daily_shown:
+        if context.email and promo.id in impressions.email_daily_shown:
             reasons.append("daily_limit_reached")
             return False, reasons
 
@@ -533,21 +611,34 @@ def evaluate_promo_candidate(
         if promo.trigger_point not in PROMO_COMBO_ALLOWED_TRIGGERS:
             reasons.append("trigger_point_invalid_for_service_combo")
             return False, reasons
-        if promo.service_id is None:
+        constraints = normalize_constraints(promo.constraints_json)
+        combo_ids = extract_combo_service_ids(constraints)
+        allowed_ids = [promo.service_id] if promo.service_id else []
+        if combo_ids:
+            allowed_ids = combo_ids
+        if not allowed_ids:
             reasons.append("service_id_required")
             return False, reasons
-        if context.selected_service_id != promo.service_id:
+        if context.selected_service_id not in allowed_ids:
             reasons.append("service_mismatch")
             return False, reasons
 
     min_spend = constraints.get("min_spend_cents")
     if min_spend is not None:
-        if context.selected_service_price_cents is None:
-            reasons.append("min_spend_unknown")
-            return False, reasons
-        if context.selected_service_price_cents < min_spend:
-            reasons.append("min_spend_not_met")
-            return False, reasons
+        # For early triggers (before service is selected), defer min_spend check
+        # The promo can be shown and will be validated at booking time
+        early_triggers = {
+            PromoTriggerPoint.AT_CHAT_START,
+            PromoTriggerPoint.AFTER_EMAIL_CAPTURE,
+        }
+        if context.trigger_point not in early_triggers:
+            # Only enforce min_spend after service is selected
+            if context.selected_service_price_cents is None:
+                reasons.append("min_spend_unknown")
+                return False, reasons
+            if context.selected_service_price_cents < min_spend:
+                reasons.append("min_spend_not_met")
+                return False, reasons
 
     usage_limit = constraints.get("usage_limit_per_customer")
     if usage_limit is not None and context.email:
@@ -558,12 +649,47 @@ def evaluate_promo_candidate(
     return True, reasons
 
 
-def select_best_promo(promos: list[Promo]) -> Promo | None:
+def promo_discount_value_cents(promo: Promo, base_price_cents: int | None) -> int:
+    if base_price_cents is None:
+        return 0
+    if promo.discount_type == PromoDiscountType.PERCENT:
+        percent = promo.discount_value or 0
+        return max(0, round(base_price_cents * (percent / 100)))
+    if promo.discount_type == PromoDiscountType.FIXED:
+        return max(0, promo.discount_value or 0)
+    return 0
+
+
+def format_promo_discount(promo: Promo) -> str:
+    if promo.discount_type == PromoDiscountType.PERCENT:
+        return f"{promo.discount_value or 0}% off"
+    if promo.discount_type == PromoDiscountType.FIXED:
+        cents = promo.discount_value or 0
+        return f"${cents / 100:.2f} off"
+    if promo.discount_type == PromoDiscountType.FREE_ADDON:
+        return "Complimentary add-on"
+    if promo.discount_type == PromoDiscountType.BUNDLE:
+        return "Bundle perk"
+    return "Special offer"
+
+
+def select_best_promo(promos: list[Promo], context: PromoEligibilityContext) -> Promo | None:
     if not promos:
         return None
+    if context.selected_service_price_cents is None:
+        return sorted(
+            promos,
+            key=lambda promo: (promo.priority, PROMO_TYPE_WEIGHT.get(promo.type, 0), promo.id),
+            reverse=True,
+        )[0]
     return sorted(
         promos,
-        key=lambda promo: (promo.priority, PROMO_TYPE_WEIGHT.get(promo.type, 0), promo.id),
+        key=lambda promo: (
+            promo_discount_value_cents(promo, context.selected_service_price_cents),
+            promo.priority,
+            PROMO_TYPE_WEIGHT.get(promo.type, 0),
+            promo.id,
+        ),
         reverse=True,
     )[0]
 
@@ -741,6 +867,46 @@ def make_slots_for_stylist(
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS preferred_style_text TEXT;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS preferred_style_image_url TEXT;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS secondary_service_id INTEGER;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS promo_id INTEGER REFERENCES promos(id);
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS discount_cents INTEGER DEFAULT 0;
+                """
+            )
+        )
     async with AsyncSessionLocal() as session:
         await seed_initial_data(session)
 
@@ -841,6 +1007,103 @@ async def healthcheck():
     return {"ok": True}
 
 
+@app.post("/uploads/style-image")
+async def upload_style_image(file: UploadFile = File(...)):
+    if not settings.cloudinary_cloud_name or not settings.cloudinary_upload_preset:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME and CLOUDINARY_UPLOAD_PRESET.",
+        )
+    if file.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported image type")
+
+    content = await file.read()
+    max_size = 5 * 1024 * 1024
+    if len(content) > max_size:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File too large")
+
+    upload_url = (
+        f"https://api.cloudinary.com/v1_1/{settings.cloudinary_cloud_name}/image/upload"
+    )
+    data = {
+        "upload_preset": settings.cloudinary_upload_preset,
+    }
+    if settings.cloudinary_api_key:
+        data["api_key"] = settings.cloudinary_api_key
+    files = {"file": (file.filename, content, file.content_type)}
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.post(upload_url, data=data, files=files)
+    if response.status_code >= 400:
+        detail = "Upload failed"
+        try:
+            payload = response.json()
+            detail = payload.get("error", {}).get("message") or payload.get("message") or detail
+        except ValueError:
+            pass
+        raise HTTPException(status_code=500, detail=detail)
+
+    payload = response.json()
+    image_url = payload.get("secure_url") or payload.get("url")
+    if not image_url:
+        raise HTTPException(status_code=500, detail="Upload failed")
+    return {"image_url": image_url}
+
+
+@app.get("/customers/{email}/preferences", response_model=StylePreferenceResponse | None)
+async def get_customer_preference(
+    email: str,
+    service_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    if not email.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")
+    await fetch_service(session, service_id)
+    customer = await get_customer_by_email(session, email.strip().lower())
+    if not customer:
+        return None
+    preference = await get_service_preference(session, customer.id, service_id)
+    if not preference:
+        return None
+    return StylePreferenceResponse(
+        service_id=service_id,
+        preferred_style_text=preference.preferred_style_text,
+        preferred_style_image_url=preference.preferred_style_image_url,
+        updated_at_utc=preference.updated_at_utc,
+    )
+
+
+@app.put("/customers/{email}/preferences", response_model=StylePreferenceResponse)
+async def set_customer_preference(
+    email: str,
+    payload: StylePreferenceRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    if not email.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")
+    await fetch_service(session, payload.service_id)
+    preferred_text = payload.preferred_style_text.strip() if payload.preferred_style_text else None
+    preferred_image = payload.preferred_style_image_url.strip() if payload.preferred_style_image_url else None
+    if not preferred_text and not preferred_image:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Preferred style text or image is required",
+        )
+    customer = await get_or_create_customer(session, email.strip().lower(), None)
+    preference = await upsert_service_preference(
+        session,
+        customer.id,
+        payload.service_id,
+        preferred_text,
+        preferred_image,
+    )
+    return StylePreferenceResponse(
+        service_id=payload.service_id,
+        preferred_style_text=preference.preferred_style_text,
+        preferred_style_image_url=preference.preferred_style_image_url,
+        updated_at_utc=preference.updated_at_utc,
+    )
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(get_session)):
     """AI-powered chat endpoint for booking appointments."""
@@ -873,26 +1136,29 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
             service_id = int(params.get("service_id") or 0)
             if not service_id:
                 service_id = int((request.context or {}).get("selected_service_id") or 0)
-            date_str = params.get("date") or (request.context or {}).get("selected_date")
-            tz_offset = params.get("tz_offset_minutes")
-            if tz_offset is None:
-                tz_offset = (request.context or {}).get("tz_offset_minutes", 0)
-            if service_id and date_str:
-                slots = await get_availability(
-                    service_id=service_id,
-                    date=date_str,
-                    tz_offset_minutes=int(tz_offset),
-                    session=session,
-                )
-                data = {
-                    "slots": slots,
-                    "selected_service_id": service_id,
-                    "selected_date": date_str,
-                }
-                if not slots:
-                    reply_override = f"No openings on {date_str}. Try another date?"
-                else:
-                    reply_override = "Here are a few good options. Tap one to continue."
+            if not service_id:
+                reply_override = "Please select a service first."
+            else:
+                date_str = params.get("date") or (request.context or {}).get("selected_date")
+                tz_offset = params.get("tz_offset_minutes")
+                if tz_offset is None:
+                    tz_offset = (request.context or {}).get("tz_offset_minutes", 0)
+                if service_id and date_str:
+                    slots = await get_availability(
+                        service_id=service_id,
+                        date=date_str,
+                        tz_offset_minutes=int(tz_offset),
+                        session=session,
+                    )
+                    data = {
+                        "slots": slots,
+                        "selected_service_id": service_id,
+                        "selected_date": date_str,
+                    }
+                    if not slots:
+                        reply_override = f"No openings on {date_str}. Try another date?"
+                    else:
+                        reply_override = "Here are a few good options. Tap one to continue."
         elif action_type == "hold_slot":
             service_id = int(params.get("service_id") or 0)
             stylist_id = int(params.get("stylist_id") or 0)
@@ -947,6 +1213,26 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
                 )
                 data = {"confirmed": confirm_result.model_dump()}
                 reply_override = "You're all set. Your booking is confirmed."
+        elif action_type == "check_promos":
+            trigger_point = params.get("trigger_point")
+            email = params.get("email") or (request.context or {}).get("customer_email")
+            service_id = params.get("service_id") or (request.context or {}).get("selected_service_id")
+            date_str = params.get("date") or (request.context or {}).get("selected_date")
+            session_id = (request.context or {}).get("session_id")
+            
+            if trigger_point:
+                promo_response = await eligible_promo(
+                    trigger_point=PromoTriggerPoint(trigger_point),
+                    shop_id=None,
+                    email=email,
+                    service_id=int(service_id) if service_id else None,
+                    session_id=session_id,
+                    booking_date=date_str,
+                    session=session,
+                )
+                if promo_response.promo:
+                    data = {"promo": promo_response.promo}
+                    # The frontend will handle displaying the promo
     except HTTPException as exc:
         return ChatResponse(reply=str(exc.detail), action=None, data=None)
     except Exception:
@@ -2405,6 +2691,15 @@ async def create_promo(
         )
         service_exists = result.scalar_one_or_none() is not None
 
+    combo_ids = extract_combo_service_ids(normalize_constraints(payload.constraints_json))
+    if payload.type == PromoType.SERVICE_COMBO_PROMO and combo_ids:
+        combo_result = await session.execute(
+            select(Service.id).where(Service.id.in_(combo_ids), Service.shop_id == shop.id)
+        )
+        existing_ids = {row[0] for row in combo_result.all()}
+        if len(existing_ids) != len(set(combo_ids)):
+            service_exists = False
+
     count_result = await session.execute(select(func.count()).select_from(Service).where(Service.shop_id == shop.id))
     has_services = count_result.scalar_one() > 0
 
@@ -2416,10 +2711,19 @@ async def create_promo(
     start_at = parse_local_datetime(payload.start_at, tz, is_end=False)
     end_at = parse_local_datetime(payload.end_at, tz, is_end=True)
 
+    # Auto-assign trigger point based on promo type:
+    # - SERVICE_COMBO_PROMO → AFTER_SERVICE_SELECTED (shown when user picks one of the combo services)
+    # - All others → AFTER_EMAIL_CAPTURE (we know if first-time user by then)
+    assigned_trigger = (
+        PromoTriggerPoint.AFTER_SERVICE_SELECTED
+        if payload.type == PromoType.SERVICE_COMBO_PROMO
+        else PromoTriggerPoint.AFTER_EMAIL_CAPTURE
+    )
+
     promo = Promo(
         shop_id=shop.id,
         type=payload.type,
-        trigger_point=payload.trigger_point,
+        trigger_point=assigned_trigger,
         service_id=payload.service_id,
         discount_type=payload.discount_type,
         discount_value=payload.discount_value,
@@ -2483,6 +2787,14 @@ async def update_promo(
             select(Service).where(Service.id == merged.service_id, Service.shop_id == promo.shop_id)
         )
         service_exists = service_result.scalar_one_or_none() is not None
+    combo_ids = extract_combo_service_ids(normalize_constraints(merged.constraints_json))
+    if merged.type == PromoType.SERVICE_COMBO_PROMO and combo_ids:
+        combo_result = await session.execute(
+            select(Service.id).where(Service.id.in_(combo_ids), Service.shop_id == promo.shop_id)
+        )
+        existing_ids = {row[0] for row in combo_result.all()}
+        if len(existing_ids) != len(set(combo_ids)):
+            service_exists = False
 
     count_result = await session.execute(
         select(func.count()).select_from(Service).where(Service.shop_id == promo.shop_id)
@@ -2528,7 +2840,13 @@ async def delete_promo(promo_id: int, session: AsyncSession = Depends(get_sessio
     promo = result.scalar_one_or_none()
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo not found")
-    promo.active = False
+    
+    # Delete related impressions first
+    await session.execute(
+        delete(PromoImpression).where(PromoImpression.promo_id == promo_id)
+    )
+    # Hard delete the promo
+    await session.delete(promo)
     await session.commit()
     return {"ok": True}
 
@@ -2541,8 +2859,22 @@ async def eligible_promo(
     service_id: int | None = None,
     session_id: str | None = None,
     booking_date: str | None = None,
+    selected_service_price_cents: int | None = None,
     session: AsyncSession = Depends(get_session),
 ):
+    """
+    Get eligible promotions for the current trigger point.
+    
+    Returns:
+    - promo: Best non-combo promo (for AFTER_EMAIL_CAPTURE trigger)
+    - combo_promo: Combo promo if applicable (for AFTER_SERVICE_SELECTED trigger)
+    
+    Combo promos are combinable with regular promos.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[PROMO] eligible_promo called: trigger={trigger_point}, email={email}, service_id={service_id}, session_id={session_id}, booking_date={booking_date}, price={selected_service_price_cents}")
+    
     shop = await get_default_shop(session)
     if shop_id and shop_id != shop.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
@@ -2566,14 +2898,18 @@ async def eligible_promo(
     now_utc = effective_local.astimezone(timezone.utc)
     local_day = effective_date.isoformat()
 
-    selected_service_price = None
+    # Use provided price_cents if available, otherwise lookup from service
+    service_price_from_db = None
     if service_id:
         service_result = await session.execute(
             select(Service).where(Service.id == service_id, Service.shop_id == shop.id)
         )
         service = service_result.scalar_one_or_none()
         if service:
-            selected_service_price = service.price_cents
+            service_price_from_db = service.price_cents
+    
+    # Prefer frontend-provided price (accounts for combo), fallback to DB lookup
+    final_service_price = selected_service_price_cents if selected_service_price_cents is not None else service_price_from_db
 
     has_confirmed_booking = False
     if normalized_email:
@@ -2595,7 +2931,7 @@ async def eligible_promo(
         local_weekday=effective_date.weekday(),
         trigger_point=trigger_point,
         selected_service_id=service_id,
-        selected_service_price_cents=selected_service_price,
+        selected_service_price_cents=final_service_price,
         email=normalized_email,
         session_id=session_id,
         has_confirmed_booking=has_confirmed_booking,
@@ -2611,43 +2947,82 @@ async def eligible_promo(
         .order_by(Promo.priority.desc(), Promo.id)
     )
     promos = promo_result.scalars().all()
+    logger.info(f"[PROMO] Found {len(promos)} active promos for shop {shop.id}")
 
-    eligible_promos: list[Promo] = []
+    # Separate combo promos from regular promos
+    regular_promos: list[Promo] = []
+    combo_promos: list[Promo] = []
+    
+    for promo in promos:
+        if promo.type == PromoType.SERVICE_COMBO_PROMO:
+            combo_promos.append(promo)
+        else:
+            regular_promos.append(promo)
+
+    selected_regular: Promo | None = None
+    selected_combo: Promo | None = None
     reason_codes: set[str] = set()
 
-    for promo in promos:
-        eligible, reasons = evaluate_promo_candidate(promo, context, impressions)
-        if eligible:
-            eligible_promos.append(promo)
-        else:
-            reason_codes.update(reasons)
+    # Evaluate regular promos (for AFTER_EMAIL_CAPTURE)
+    if trigger_point == PromoTriggerPoint.AFTER_EMAIL_CAPTURE:
+        eligible_regular: list[Promo] = []
+        for promo in regular_promos:
+            eligible, reasons = evaluate_promo_candidate(promo, context, impressions)
+            promo_type_val = promo.type.value if hasattr(promo.type, 'value') else str(promo.type)
+            logger.info(f"[PROMO] Regular promo {promo.id} ({promo_type_val}): eligible={eligible}, reasons={reasons}")
+            if eligible:
+                eligible_regular.append(promo)
+            else:
+                reason_codes.update(reasons)
+        
+        selected_regular = select_best_promo(eligible_regular, context)
+        if selected_regular:
+            logger.info(f"[PROMO] Selected regular promo {selected_regular.id} ({selected_regular.type.value})")
 
-    selected = select_best_promo(eligible_promos)
-    if not selected:
-        if not reason_codes:
-            reason_codes.add("no_active_promos")
-        return PromoEligibilityResponse(promo=None, reason_codes=sorted(reason_codes))
+    # Evaluate combo promos (for AFTER_SERVICE_SELECTED)
+    if trigger_point == PromoTriggerPoint.AFTER_SERVICE_SELECTED and service_id:
+        eligible_combo: list[Promo] = []
+        for promo in combo_promos:
+            eligible, reasons = evaluate_promo_candidate(promo, context, impressions)
+            logger.info(f"[PROMO] Combo promo {promo.id}: eligible={eligible}, reasons={reasons}")
+            if eligible:
+                eligible_combo.append(promo)
+            else:
+                reason_codes.update(reasons)
+        
+        selected_combo = select_best_promo(eligible_combo, context)
+        if selected_combo:
+            logger.info(f"[PROMO] Selected combo promo {selected_combo.id}")
 
-    day_bucket = local_day
+    # Convert promos to responses BEFORE any commit (to avoid detached object issues)
+    regular_response = promo_to_response(selected_regular) if selected_regular else None
+    combo_response = promo_to_response(selected_combo) if selected_combo else None
+
+    # Record impressions for selected promos
     new_impressions: list[PromoImpression] = []
-    if session_key:
-        new_impressions.append(
-            PromoImpression(
-                promo_id=selected.id,
-                shop_id=shop.id,
-                identity_key=session_key,
-                day_bucket=day_bucket,
-            )
-        )
-    if email_key:
-        new_impressions.append(
-            PromoImpression(
-                promo_id=selected.id,
-                shop_id=shop.id,
-                identity_key=email_key,
-                day_bucket=day_bucket,
-            )
-        )
+    day_bucket = local_day
+    
+    for selected_promo in [selected_regular, selected_combo]:
+        if selected_promo:
+            if session_key:
+                new_impressions.append(
+                    PromoImpression(
+                        promo_id=selected_promo.id,
+                        shop_id=shop.id,
+                        identity_key=session_key,
+                        day_bucket=day_bucket,
+                    )
+                )
+            if email_key:
+                new_impressions.append(
+                    PromoImpression(
+                        promo_id=selected_promo.id,
+                        shop_id=shop.id,
+                        identity_key=email_key,
+                        day_bucket=day_bucket,
+                    )
+                )
+
     if new_impressions:
         session.add_all(new_impressions)
         try:
@@ -2655,7 +3030,18 @@ async def eligible_promo(
         except IntegrityError:
             await session.rollback()
 
-    return PromoEligibilityResponse(promo=promo_to_response(selected), reason_codes=[])
+    # Build response
+    if not regular_response and not combo_response:
+        if not reason_codes:
+            reason_codes.add("no_active_promos")
+        logger.info(f"[PROMO] No promos selected. Reason codes: {reason_codes}")
+        return PromoEligibilityResponse(promo=None, combo_promo=None, reason_codes=sorted(reason_codes))
+
+    return PromoEligibilityResponse(
+        promo=regular_response,
+        combo_promo=combo_response,
+        reason_codes=[]
+    )
 
 
 @app.get("/owner/stylists/{stylist_id}/time_off")
@@ -2707,14 +3093,25 @@ async def owner_schedule(
     )
     bookings = []
     for booking, service, stylist in booking_result.all():
+        secondary_service_name = None
+        if booking.secondary_service_id:
+            secondary_result = await session.execute(
+                select(Service).where(Service.id == booking.secondary_service_id)
+            )
+            secondary_service = secondary_result.scalar_one_or_none()
+            if secondary_service:
+                secondary_service_name = secondary_service.name
         bookings.append(
             OwnerScheduleBooking(
                 id=booking.id,
                 stylist_id=stylist.id,
                 stylist_name=stylist.name,
                 service_name=service.name,
+                secondary_service_name=secondary_service_name,
                 customer_name=booking.customer_name,
                 status=booking.status,
+                preferred_style_text=booking.preferred_style_text,
+                preferred_style_image_url=booking.preferred_style_image_url,
                 start_time=to_local_time_str(booking.start_at_utc, tz_offset_minutes),
                 end_time=to_local_time_str(booking.end_at_utc, tz_offset_minutes),
             )
@@ -2850,6 +3247,7 @@ async def get_availability(
     service_id: int,
     date: str,
     tz_offset_minutes: int,
+    secondary_service_id: int | None = None,
     session: AsyncSession = Depends(get_session),
 ):
     try:
@@ -2861,6 +3259,14 @@ async def get_availability(
         return []
 
     service = await fetch_service(session, service_id)
+    secondary_service = None
+    if secondary_service_id:
+        secondary_service = await fetch_service(session, secondary_service_id)
+        if secondary_service.shop_id != service.shop_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Secondary service does not belong to this shop",
+            )
     # Get stylists in same shop
     result = await session.execute(
         select(Stylist).where(Stylist.shop_id == service.shop_id, Stylist.active.is_(True)).order_by(Stylist.id)
@@ -2883,10 +3289,13 @@ async def get_availability(
             day_end_utc,
             now,
         )
+        total_duration = service.duration_minutes + (
+            secondary_service.duration_minutes if secondary_service else 0
+        )
         slots.extend(
             make_slots_for_stylist(
                 stylist,
-                service.duration_minutes,
+                total_duration,
                 local_date,
                 tz_offset_minutes,
                 working_start,
@@ -2904,6 +3313,14 @@ async def get_availability(
 @app.post("/bookings/hold", response_model=HoldResponse)
 async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_session)):
     service = await fetch_service(session, payload.service_id)
+    secondary_service = None
+    if payload.secondary_service_id:
+        secondary_service = await fetch_service(session, payload.secondary_service_id)
+        if secondary_service.shop_id != service.shop_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Secondary service does not belong to this shop",
+            )
     stylist = await fetch_stylist(session, payload.stylist_id)
 
     if stylist.shop_id != service.shop_id:
@@ -2927,7 +3344,10 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Outside working days")
 
     working_start, working_end = get_stylist_hours(stylist)
-    duration = timedelta(minutes=service.duration_minutes)
+    total_duration_minutes = service.duration_minutes + (
+        secondary_service.duration_minutes if secondary_service else 0
+    )
+    duration = timedelta(minutes=total_duration_minutes)
     local_end_time = (datetime.combine(local_date, local_time) + duration).time()
 
     if not (working_start <= local_time < working_end) or local_end_time > working_end:
@@ -2963,12 +3383,108 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
 
     hold_expires_at = now + timedelta(minutes=settings.hold_ttl_minutes)
     customer_email = payload.customer_email.strip().lower()
+
+    # Check for eligible promos
+    shop = await get_default_shop(session)
+    tz = ZoneInfo(settings.chat_timezone)
+    local_now = now.astimezone(tz)
+    local_date = local_date  # already defined
+    effective_local = datetime.combine(local_date, time(12, 0), tzinfo=tz)
+    now_utc = effective_local.astimezone(timezone.utc)
+    local_day = local_date.isoformat()
+
+    total_price_cents = service.price_cents + (secondary_service.price_cents if secondary_service else 0)
+
+    has_confirmed_booking = False
+    if customer_email:
+        booking_result = await session.execute(
+            select(func.count())
+            .select_from(Booking)
+            .where(
+                Booking.shop_id == shop.id,
+                Booking.customer_email == customer_email,
+                Booking.status == BookingStatus.CONFIRMED,
+            )
+        )
+        has_confirmed_booking = booking_result.scalar_one() > 0
+
+    # Check if frontend provided a promo_id from an earlier trigger
+    selected_promo: Promo | None = None
+    if payload.promo_id:
+        promo_result = await session.execute(
+            select(Promo).where(Promo.id == payload.promo_id, Promo.shop_id == shop.id, Promo.active.is_(True))
+        )
+        candidate_promo = promo_result.scalar_one_or_none()
+        if candidate_promo:
+            # Validate the promo is still valid (check dates, constraints, etc.)
+            # We use a permissive context that doesn't check trigger_point for frontend-provided promos
+            impressions = await build_promo_impression_snapshot(
+                session, shop.id, customer_email, None, local_day
+            )
+            # Create context for validation without trigger_point check
+            validation_context = PromoEligibilityContext(
+                now_utc=now_utc,
+                local_now=local_now,
+                local_day=local_day,
+                local_weekday=local_date.weekday(),
+                trigger_point=candidate_promo.trigger_point,  # Use promo's own trigger for validation
+                selected_service_id=service.id,
+                selected_service_price_cents=total_price_cents,
+                email=customer_email,
+                session_id=None,
+                has_confirmed_booking=has_confirmed_booking,
+            )
+            is_valid, _ = evaluate_promo_candidate(candidate_promo, validation_context, impressions)
+            if is_valid:
+                selected_promo = candidate_promo
+    
+    # If no valid promo from frontend, try to find best eligible promo at AFTER_HOLD_CREATED
+    if not selected_promo:
+        context = PromoEligibilityContext(
+            now_utc=now_utc,
+            local_now=local_now,
+            local_day=local_day,
+            local_weekday=local_date.weekday(),
+            trigger_point=PromoTriggerPoint.AFTER_HOLD_CREATED,
+            selected_service_id=service.id,
+            selected_service_price_cents=total_price_cents,
+            email=customer_email,
+            session_id=None,
+            has_confirmed_booking=has_confirmed_booking,
+        )
+
+        impressions = await build_promo_impression_snapshot(
+            session, shop.id, customer_email, None, local_day
+        )
+
+        promo_result = await session.execute(
+            select(Promo)
+            .where(Promo.shop_id == shop.id, Promo.active.is_(True))
+            .order_by(Promo.priority.desc(), Promo.id)
+        )
+        promos = promo_result.scalars().all()
+
+        eligible_promos: list[Promo] = []
+        for promo in promos:
+            eligible, _ = evaluate_promo_candidate(promo, context, impressions)
+            if eligible:
+                eligible_promos.append(promo)
+
+        selected_promo = select_best_promo(eligible_promos, context)
+
+    discount_cents = 0
+    if selected_promo:
+        discount_cents = promo_discount_value_cents(selected_promo, total_price_cents)
+
     booking = Booking(
         shop_id=service.shop_id,
         service_id=service.id,
+        secondary_service_id=secondary_service.id if secondary_service else None,
         stylist_id=stylist.id,
         customer_name=payload.customer_name,
         customer_email=customer_email,
+        promo_id=selected_promo.id if selected_promo else None,
+        discount_cents=discount_cents,
         start_at_utc=start_at_utc,
         end_at_utc=end_at_utc,
         status=BookingStatus.HOLD,
@@ -2982,6 +3498,7 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
         booking_id=booking.id,
         status=booking.status,
         hold_expires_at=booking.hold_expires_at_utc,
+        discount_cents=booking.discount_cents,
     )
 
 
@@ -3028,6 +3545,21 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
         )
     )
     service, stylist = result.one()
+    secondary_service = None
+    if booking.secondary_service_id:
+        secondary_result = await session.execute(
+            select(Service).where(Service.id == booking.secondary_service_id)
+        )
+        secondary_service = secondary_result.scalar_one_or_none()
+
+    if booking.customer_email:
+        customer = await get_or_create_customer(
+            session, booking.customer_email, booking.customer_name
+        )
+        preference = await get_service_preference(session, customer.id, booking.service_id)
+        if preference:
+            booking.preferred_style_text = preference.preferred_style_text
+            booking.preferred_style_image_url = preference.preferred_style_image_url
 
     booking.status = BookingStatus.CONFIRMED
     await update_customer_stats(session, booking, service, stylist)
@@ -3037,7 +3569,10 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
     if booking.customer_email:
         try:
             customer_name = booking.customer_name or "Guest"
-            summary = f"{service.name} with {stylist.name}"
+            service_label = service.name
+            if secondary_service:
+                service_label = f"{service.name} + {secondary_service.name}"
+            summary = f"{service_label} with {stylist.name}"
             description = f"Booking for {customer_name}"
             location = settings.default_shop_name
             ics_text = build_ics_event(
@@ -3049,15 +3584,17 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
                 location=location,
             )
             invite_url = f"{settings.public_api_base}/bookings/{booking.id}/invite"
+            total_cents = service.price_cents + (secondary_service.price_cents if secondary_service else 0) - booking.discount_cents
             html = f"""
                 <p>Hi {customer_name},</p>
                 <p>Your booking is confirmed.</p>
                 <ul>
-                  <li><strong>Service:</strong> {service.name}</li>
+                  <li><strong>Service:</strong> {service_label}</li>
                   <li><strong>Stylist:</strong> {stylist.name}</li>
                   <li><strong>Start:</strong> {booking.start_at_utc} UTC</li>
                   <li><strong>End:</strong> {booking.end_at_utc} UTC</li>
                   <li><strong>Location:</strong> {location}</li>
+                  <li><strong>Total:</strong> ${total_cents / 100:.2f}</li>
                 </ul>
                 <p><a href="{invite_url}">Download calendar invite</a></p>
             """
@@ -3090,13 +3627,22 @@ async def booking_invite(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
 
     booking, service, stylist = row
+    secondary_service = None
+    if booking.secondary_service_id:
+        secondary_result = await session.execute(
+            select(Service).where(Service.id == booking.secondary_service_id)
+        )
+        secondary_service = secondary_result.scalar_one_or_none()
     if not booking.is_confirmed():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Booking is not confirmed"
         )
 
     customer_name = booking.customer_name or "Guest"
-    summary = f"{service.name} with {stylist.name}"
+    service_label = service.name
+    if secondary_service:
+        service_label = f"{service.name} + {secondary_service.name}"
+    summary = f"{service_label} with {stylist.name}"
     description = f"Booking for {customer_name}"
     location = settings.default_shop_name
 
@@ -3119,13 +3665,20 @@ async def booking_invite(
 class BookingTrackResponse(BaseModel):
     booking_id: uuid.UUID
     service_name: str
+    secondary_service_name: str | None = None
     stylist_name: str
     customer_name: str | None
     customer_email: str | None
+    preferred_style_text: str | None = None
+    preferred_style_image_url: str | None = None
     start_time: datetime
     end_time: datetime
     status: str
     created_at: datetime
+    service_price_cents: int = 0
+    secondary_service_price_cents: int | None = None
+    discount_cents: int = 0
+    total_price_cents: int = 0
 
 
 class CustomerProfileResponse(BaseModel):
@@ -3159,24 +3712,40 @@ async def track_bookings(email: str, session: AsyncSession = Depends(get_session
     # Fetch service and stylist names for each booking
     response = []
     for booking in bookings:
-        # Get service name
         svc_result = await session.execute(select(Service).where(Service.id == booking.service_id))
         service = svc_result.scalar_one_or_none()
-        
-        # Get stylist name
+        secondary_service = None
+        if booking.secondary_service_id:
+            secondary_result = await session.execute(
+                select(Service).where(Service.id == booking.secondary_service_id)
+            )
+            secondary_service = secondary_result.scalar_one_or_none()
+
         stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
         stylist = stylist_result.scalar_one_or_none()
+        
+        service_price = service.price_cents if service else 0
+        secondary_price = secondary_service.price_cents if secondary_service else 0
+        discount_cents = booking.discount_cents or 0
+        total_price = max(service_price + secondary_price - discount_cents, 0)
         
         response.append(BookingTrackResponse(
             booking_id=booking.id,
             service_name=service.name if service else "Unknown Service",
+            secondary_service_name=secondary_service.name if secondary_service else None,
             stylist_name=stylist.name if stylist else "Unknown Stylist",
             customer_name=booking.customer_name,
             customer_email=booking.customer_email,
+            preferred_style_text=booking.preferred_style_text,
+            preferred_style_image_url=booking.preferred_style_image_url,
             start_time=booking.start_at_utc,
             end_time=booking.end_at_utc,
             status=booking.status.value,
             created_at=booking.created_at,
+            service_price_cents=service_price,
+            secondary_service_price_cents=secondary_price if secondary_service else None,
+            discount_cents=discount_cents,
+            total_price_cents=total_price,
         ))
     
     return response

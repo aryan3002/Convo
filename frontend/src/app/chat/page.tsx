@@ -28,13 +28,16 @@ type HoldResponse = {
   booking_id: string;
   status: "HOLD";
   hold_expires_at: string;
+  discount_cents: number;
 };
 
 type BookingMode = "chat" | "track";
 
 type Stage =
   | "WELCOME"
+  | "CAPTURE_EMAIL"
   | "SELECT_SERVICE"
+  | "PREFERRED_STYLE"
   | "SELECT_DATE"
   | "SELECT_SLOT"
   | "SELECT_STYLIST"
@@ -57,13 +60,20 @@ type ChatAPIResponse = {
 type BookingTrack = {
   booking_id: string;
   service_name: string;
+  secondary_service_name?: string | null;
   stylist_name: string;
   customer_name: string | null;
   customer_email: string | null;
+  preferred_style_text?: string | null;
+  preferred_style_image_url?: string | null;
   start_time: string;
   end_time: string;
   status: string;
   created_at: string;
+  service_price_cents?: number;
+  secondary_service_price_cents?: number | null;
+  discount_cents?: number;
+  total_price_cents?: number;
 };
 
 type Promo = {
@@ -84,7 +94,13 @@ type Promo = {
 
 type PromoEligibilityResponse = {
   promo: Promo | null;
+  combo_promo: Promo | null;  // Combo promo returned separately (combinable with main promo)
   reason_codes: string[];
+};
+
+type PreferredStyle = {
+  text?: string | null;
+  image_url?: string | null;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
@@ -157,8 +173,15 @@ function getPromoDiscountCents(promo: Promo, baseCents: number) {
   return 0;
 }
 
-function applyPromoTotal(baseCents: number, promo: Promo | null) {
+function applyPromoTotal(
+  baseCents: number,
+  promo: Promo | null,
+  options?: { comboAccepted?: boolean }
+) {
   if (!promo) {
+    return { totalCents: baseCents, discountCents: 0 };
+  }
+  if (promo.type === "SERVICE_COMBO_PROMO" && !options?.comboAccepted) {
     return { totalCents: baseCents, discountCents: 0 };
   }
   const discount = getPromoDiscountCents(promo, baseCents);
@@ -166,14 +189,32 @@ function applyPromoTotal(baseCents: number, promo: Promo | null) {
   return { totalCents: total, discountCents: discount };
 }
 
+function promoValueForCompare(promo: Promo | null, baseCents: number) {
+  if (!promo) return 0;
+  if (promo.discount_type === "PERCENT") {
+    const percent = promo.discount_value ?? 0;
+    return Math.round((baseCents * percent) / 100);
+  }
+  if (promo.discount_type === "FIXED") {
+    return promo.discount_value ?? 0;
+  }
+  return 0;
+}
+
+function hasPreferredStyleData(style: PreferredStyle | null) {
+  if (!style) return false;
+  if (style.text && style.text.trim()) return true;
+  return Boolean(style.image_url);
+}
+
 export default function ChatPage() {
   const [mode, setMode] = useState<BookingMode>("chat");
-  const [stage, setStage] = useState<Stage>("WELCOME");
+  const [stage, setStage] = useState<Stage>("CAPTURE_EMAIL");
   const [messages, setMessages] = useState<Message[]>([
     {
       id: uid(),
       role: "assistant",
-      text: "Hi! What service would you like to book?",
+      text: "Hi! What's the best email to get started?",
     },
   ]);
 
@@ -182,6 +223,8 @@ export default function ChatPage() {
 
   const [services, setServices] = useState<Service[]>([]);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [comboServiceId, setComboServiceId] = useState<number | null>(null);
+  const [comboChoice, setComboChoice] = useState<"pending" | "accepted" | "declined" | null>(null);
   const [dateStr, setDateStr] = useState<string>(toLocalDateInputValue());
   const [slots, setSlots] = useState<Slot[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
@@ -195,17 +238,37 @@ export default function ChatPage() {
 
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
+  const [preferredStyle, setPreferredStyle] = useState<PreferredStyle | null>(null);
+  const [lastPreferredStyle, setLastPreferredStyle] = useState<PreferredStyle | null>(null);
+  const [preferredStyleComplete, setPreferredStyleComplete] = useState(false);
+  const [styleDraftText, setStyleDraftText] = useState("");
+  const [styleDraftImageUrl, setStyleDraftImageUrl] = useState<string | null>(null);
+  const [styleMode, setStyleMode] = useState<"idle" | "text" | "image">("idle");
+  const [styleError, setStyleError] = useState("");
+  const [styleSaving, setStyleSaving] = useState(false);
+  const [styleUploading, setStyleUploading] = useState(false);
+  const [pendingStyle, setPendingStyle] = useState<PreferredStyle | null>(null);
+  const [awaitingStyleEmail, setAwaitingStyleEmail] = useState<"none" | "save" | "same">("none");
+  const [deferredStyleSave, setDeferredStyleSave] = useState<{
+    style: PreferredStyle;
+    serviceId: number;
+  } | null>(null);
 
   const [trackEmail, setTrackEmail] = useState("");
   const [lastTrackedEmail, setLastTrackedEmail] = useState("");
   const [trackResults, setTrackResults] = useState<BookingTrack[]>([]);
   const [trackLoading, setTrackLoading] = useState(false);
   const [trackError, setTrackError] = useState("");
+  const [selectedTrackBooking, setSelectedTrackBooking] = useState<BookingTrack | null>(null);
   const [appliedPromo, setAppliedPromo] = useState<Promo | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const pendingSlotRef = useRef<Slot | null>(null); // Store slot while waiting for email
+  const pendingDateRef = useRef<string | null>(null);
   const shownPromosRef = useRef<Set<number>>(new Set());
+  const promoMessageShownRef = useRef<boolean>(false);
+  const styleFileInputRef = useRef<HTMLInputElement | null>(null);
+  const chatStartPromoCheckedRef = useRef<boolean>(false); // Guard AT_CHAT_START to run once
 
   const promoSessionId = useMemo(() => {
     if (typeof window === "undefined") return "";
@@ -221,9 +284,29 @@ export default function ChatPage() {
 
   const tzOffset = useMemo(() => -new Date().getTimezoneOffset(), []);
 
+  const comboServiceIds =
+    appliedPromo?.type === "SERVICE_COMBO_PROMO" &&
+    Array.isArray(appliedPromo.constraints_json?.combo_service_ids)
+      ? (appliedPromo.constraints_json?.combo_service_ids as number[])
+      : [];
+  const comboOtherServiceId =
+    selectedService && comboServiceIds.length === 2
+      ? comboServiceIds.find((id) => id !== selectedService.id) ?? null
+      : null;
+  const comboOtherService = comboOtherServiceId
+    ? services.find((svc) => svc.id === comboOtherServiceId)
+    : null;
+  const comboAccepted = comboChoice === "accepted" && comboServiceId === comboOtherServiceId;
+  const combinedServiceLabel =
+    selectedService && comboAccepted && comboOtherService
+      ? `${selectedService.name} + ${comboOtherService.name}`
+      : selectedService?.name || "";
+
   const stagePrompts: Record<Stage, string> = {
     WELCOME: "Welcome! What service would you like to book?",
+    CAPTURE_EMAIL: "What's the best email to get started?",
     SELECT_SERVICE: "Please choose a service below.",
+    PREFERRED_STYLE: "Do you have a preferred style for this service?",
     SELECT_DATE: "Pick a date below to see times.",
     SELECT_SLOT: "Here are a few good options. Tap one to continue.",
     SELECT_STYLIST: "Which stylist would you prefer?",
@@ -240,6 +323,50 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, { id: uid(), role: "user", text }]);
   };
 
+  const resetPreferredStyleState = () => {
+    setPreferredStyle(null);
+    setLastPreferredStyle(null);
+    setPreferredStyleComplete(false);
+    setStyleDraftText("");
+    setStyleDraftImageUrl(null);
+    setStyleMode("idle");
+    setStyleError("");
+    setPendingStyle(null);
+    setAwaitingStyleEmail("none");
+    pendingDateRef.current = null;
+  };
+
+  const fetchLastPreferredStyle = async (email: string, serviceId: number) => {
+    try {
+      const url = new URL(`${API_BASE}/customers/${encodeURIComponent(email)}/preferences`);
+      url.searchParams.set("service_id", String(serviceId));
+      const res = await fetch(url.toString());
+      if (!res.ok) {
+        setLastPreferredStyle(null);
+        return null;
+      }
+      const data = await res.json();
+      if (!data) {
+        setLastPreferredStyle(null);
+        return null;
+      }
+      const style = {
+        text: data.preferred_style_text ?? "",
+        image_url: data.preferred_style_image_url ?? null,
+      };
+      if (!hasPreferredStyleData(style)) {
+        setLastPreferredStyle(null);
+        return null;
+      }
+      setLastPreferredStyle(style);
+      return style;
+    } catch (error) {
+      console.error("Failed to load preferred style:", error);
+      setLastPreferredStyle(null);
+      return null;
+    }
+  };
+
   const handleEmailFromChat = (text: string) => {
     const extracted = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
     if (extracted) {
@@ -252,6 +379,204 @@ export default function ChatPage() {
   const extractEmail = (text: string) => {
     const extracted = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
     return extracted ? extracted[0].trim().toLowerCase() : "";
+  };
+
+  const completePreferredStyle = async (message?: string) => {
+    setPreferredStyleComplete(true);
+    setStyleMode("idle");
+    setStyleDraftText("");
+    setStyleDraftImageUrl(null);
+    setStyleError("");
+    if (message) {
+      appendAssistantMessage(message);
+    }
+    if (pendingDateRef.current && selectedService) {
+      const pendingDate = pendingDateRef.current;
+      pendingDateRef.current = null;
+      try {
+        await loadSlots(selectedService, pendingDate, {
+          announce: true,
+          secondaryServiceId: comboAccepted ? comboOtherServiceId : null,
+        });
+      } catch (error) {
+        console.error("Failed to load slots after preferred style:", error);
+        appendAssistantMessage("I had trouble loading available times. Please pick a date below.");
+        setStage("SELECT_DATE");
+      }
+    } else {
+      setStage("SELECT_DATE");
+    }
+  };
+
+  const savePreferredStyle = async (
+    style: PreferredStyle,
+    options?: { emailOverride?: string; serviceIdOverride?: number; announce?: boolean }
+  ) => {
+    const serviceId = options?.serviceIdOverride ?? selectedService?.id;
+    if (!serviceId) {
+      appendAssistantMessage("Please pick a service first.");
+      return;
+    }
+    if (!hasPreferredStyleData(style)) {
+      appendAssistantMessage("Share a short style note or add an image.");
+      return;
+    }
+    const email = (options?.emailOverride || customerEmail).trim();
+    const announce = options?.announce ?? true;
+    if (!email) {
+      setPreferredStyle(style);
+      setDeferredStyleSave({ style, serviceId });
+      if (stage === "PREFERRED_STYLE") {
+        await completePreferredStyle(
+          "Got it. I'll save this after you share your email. Pick a date below."
+        );
+      } else if (announce) {
+        appendAssistantMessage("Got it. I'll save this after you share your email.");
+      }
+      return;
+    }
+    setStyleSaving(true);
+    setStyleError("");
+    try {
+      const res = await fetch(`${API_BASE}/customers/${encodeURIComponent(email)}/preferences`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          service_id: serviceId,
+          preferred_style_text: style.text || null,
+          preferred_style_image_url: style.image_url || null,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.detail || "Unable to save preference");
+      }
+      const savedStyle = {
+        text: data.preferred_style_text ?? style.text ?? "",
+        image_url: data.preferred_style_image_url ?? style.image_url ?? null,
+      };
+      setPreferredStyle(savedStyle);
+      setLastPreferredStyle(savedStyle);
+      setDeferredStyleSave(null);
+      if (stage === "PREFERRED_STYLE" && announce) {
+        await completePreferredStyle("Got it. Pick a date below.");
+      } else if (announce) {
+        appendAssistantMessage("Saved your preferred style.");
+      }
+    } catch (error) {
+      console.error("Failed to save preferred style:", error);
+      const message =
+        error instanceof Error ? error.message : "Couldn't save the style preference.";
+      setStyleError(message);
+    } finally {
+      setStyleSaving(false);
+      setPendingStyle(null);
+      setAwaitingStyleEmail("none");
+    }
+  };
+
+  const applySameAsLastTime = async (emailOverride?: string, serviceIdOverride?: number) => {
+    const serviceId = serviceIdOverride ?? selectedService?.id;
+    if (!serviceId) {
+      appendAssistantMessage("Please pick a service first.");
+      return;
+    }
+    const email = (emailOverride || customerEmail).trim();
+    if (!email) {
+      setAwaitingStyleEmail("same");
+      appendAssistantMessage(
+        "Tell me the email you used before so I can retrieve your preferred style."
+      );
+      return;
+    }
+    setStyleSaving(true);
+    setStyleError("");
+    try {
+      const url = new URL(`${API_BASE}/customers/${encodeURIComponent(email)}/preferences`);
+      url.searchParams.set("service_id", String(serviceId));
+      const res = await fetch(url.toString());
+      if (!res.ok) {
+        throw new Error("Unable to fetch preference");
+      }
+      const data = await res.json();
+      if (!data) {
+        appendAssistantMessage("I don't have a saved style for this service yet.");
+        setLastPreferredStyle(null);
+        return;
+      }
+      const savedStyle = {
+        text: data.preferred_style_text ?? "",
+        image_url: data.preferred_style_image_url ?? null,
+      };
+      if (!hasPreferredStyleData(savedStyle)) {
+        appendAssistantMessage("I don't have a saved style for this service yet.");
+        setLastPreferredStyle(null);
+        return;
+      }
+      setPreferredStyle(savedStyle);
+      setLastPreferredStyle(savedStyle);
+      if (stage === "PREFERRED_STYLE") {
+        await completePreferredStyle("Perfect. Pick a date below.");
+      } else {
+        appendAssistantMessage("Applied your last saved style.");
+      }
+    } catch (error) {
+      console.error("Failed to fetch preferred style:", error);
+      setStyleError("Couldn't load that style preference.");
+    } finally {
+      setStyleSaving(false);
+      setAwaitingStyleEmail("none");
+      setPendingStyle(null);
+    }
+  };
+
+  const skipPreferredStyle = async () => {
+    setPreferredStyle(null);
+    if (stage === "PREFERRED_STYLE") {
+      setPreferredStyleComplete(true);
+    }
+    setPendingStyle(null);
+    setAwaitingStyleEmail("none");
+    if (stage === "PREFERRED_STYLE") {
+      await completePreferredStyle("No problem. Pick a date below.");
+    } else {
+      appendAssistantMessage("No preferred style saved.");
+    }
+  };
+
+  const handleStyleImageUpload = async (file: File) => {
+    setStyleUploading(true);
+    setStyleError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      console.log('[UPLOAD] Uploading style image to:', `${API_BASE}/uploads/style-image`);
+      const res = await fetch(`${API_BASE}/uploads/style-image`, {
+        method: "POST",
+        body: form,
+      });
+      console.log('[UPLOAD] Response status:', res.status, res.statusText);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const errorMsg = data?.detail || "Upload failed";
+        console.error('[UPLOAD] Upload failed:', errorMsg, data);
+        throw new Error(errorMsg);
+      }
+      if (!data?.image_url) {
+        console.error('[UPLOAD] No image URL in response:', data);
+        throw new Error("Upload failed - no image URL returned");
+      }
+      console.log('[UPLOAD] Image uploaded successfully:', data.image_url);
+      setStyleDraftImageUrl(data.image_url);
+      setStyleMode("image");
+    } catch (error) {
+      console.error('[UPLOAD] Failed to upload style image:', error);
+      const message = error instanceof Error ? error.message : "Couldn't upload that image.";
+      setStyleError(message);
+      appendAssistantMessage(`I had trouble uploading that image: ${message}`);
+    } finally {
+      setStyleUploading(false);
+    }
   };
 
   const handleNameFromChat = (text: string) => {
@@ -273,10 +598,21 @@ export default function ChatPage() {
   };
 
   const renderPromoCopy = (promo: Promo) => {
+    const comboIds = Array.isArray(promo.constraints_json?.combo_service_ids)
+      ? (promo.constraints_json?.combo_service_ids as number[])
+      : [];
+    const comboNames =
+      promo.type === "SERVICE_COMBO_PROMO" && comboIds.length === 2
+        ? comboIds
+            .map((id) => services.find((svc) => svc.id === id)?.name)
+            .filter(Boolean)
+        : [];
     const serviceName =
-      selectedService?.name ||
-      (promo.service_id ? services.find((svc) => svc.id === promo.service_id)?.name : "") ||
-      "";
+      comboNames.length === 2
+        ? `${comboNames[0]} + ${comboNames[1]}`
+        : selectedService?.name ||
+          (promo.service_id ? services.find((svc) => svc.id === promo.service_id)?.name : "") ||
+          "";
     const discountLabel = formatPromoDiscount(promo);
     const perkDescription =
       promo.constraints_json && typeof promo.constraints_json.perk_description === "string"
@@ -312,38 +648,106 @@ export default function ChatPage() {
 
   const maybeShowPromo = async (
     triggerPoint: string,
-    overrides?: { email?: string; serviceId?: number | null; bookingDate?: string }
+    overrides?: { email?: string; serviceId?: number | null; bookingDate?: string; servicePriceCents?: number | null }
   ) => {
-    if (!promoSessionId) return;
-    const resolvedEmail = overrides?.email ?? customerEmail.trim();
-    const resolvedServiceId =
-      overrides?.serviceId ?? selectedService?.id ?? null;
-    const resolvedBookingDate = overrides?.bookingDate ?? dateStr;
-    const url = new URL(`${API_BASE}/promos/eligible`);
-    url.searchParams.set("trigger_point", triggerPoint);
-    url.searchParams.set("shop_id", String(SHOP_ID));
-    url.searchParams.set("session_id", promoSessionId);
-    if (resolvedEmail) {
-      url.searchParams.set("email", resolvedEmail);
-    }
-    if (resolvedServiceId) {
-      url.searchParams.set("service_id", String(resolvedServiceId));
-    }
-    if (resolvedBookingDate) {
-      url.searchParams.set("booking_date", resolvedBookingDate);
-    }
-
+    console.log('[PROMO] maybeShowPromo called', { triggerPoint, overrides });
     try {
+      const resolvedEmail = overrides?.email ?? customerEmail.trim();
+      const resolvedServiceId =
+        overrides?.serviceId ?? selectedService?.id ?? null;
+      const resolvedBookingDate = overrides?.bookingDate ?? dateStr;
+      // Resolve service price for min_spend constraint evaluation
+      const resolvedServicePriceCents =
+        overrides?.servicePriceCents ??
+        (resolvedServiceId ? services.find((s) => s.id === resolvedServiceId)?.price_cents : null) ??
+        selectedService?.price_cents ??
+        null;
+      const url = new URL(`${API_BASE}/promos/eligible`);
+      url.searchParams.set("trigger_point", triggerPoint);
+      url.searchParams.set("shop_id", String(SHOP_ID));
+      url.searchParams.set("session_id", promoSessionId);
+      if (resolvedEmail) {
+        url.searchParams.set("email", resolvedEmail);
+      }
+      if (resolvedServiceId) {
+        url.searchParams.set("service_id", String(resolvedServiceId));
+      }
+      if (resolvedServicePriceCents != null) {
+        url.searchParams.set("selected_service_price_cents", String(resolvedServicePriceCents));
+      }
+      if (resolvedBookingDate) {
+        url.searchParams.set("booking_date", resolvedBookingDate);
+      }
+
+      console.log('[PROMO] Fetching from URL:', url.toString());
       const res = await fetch(url.toString());
-      if (!res.ok) return;
+      console.log('[PROMO] Response status:', res.status, res.statusText);
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => 'Unknown error');
+        console.error('[PROMO] Failed to fetch promo:', res.status, errorText);
+        return;
+      }
       const data: PromoEligibilityResponse = await res.json();
-      if (!data.promo) return;
-      if (shownPromosRef.current.has(data.promo.id)) return;
-      shownPromosRef.current.add(data.promo.id);
-      setAppliedPromo(data.promo);
-      appendAssistantMessage(renderPromoCopy(data.promo));
+      console.log('[PROMO] Fetched promo data:', data);
+      
+      // Handle regular (non-combo) promo
+      if (data.promo && !shownPromosRef.current.has(data.promo.id)) {
+        shownPromosRef.current.add(data.promo.id);
+        const baseCents =
+          (selectedService?.price_cents ?? 0) +
+          (comboAccepted && comboOtherService ? comboOtherService.price_cents : 0);
+        const currentValue = promoValueForCompare(appliedPromo, baseCents);
+        const nextValue = promoValueForCompare(data.promo, baseCents);
+        const shouldReplace =
+          !appliedPromo || nextValue > currentValue || data.promo.priority > (appliedPromo.priority ?? 0);
+        if (shouldReplace) {
+          setAppliedPromo(data.promo);
+        }
+        console.log('[PROMO] Appending promo message:', renderPromoCopy(data.promo));
+        appendAssistantMessage(renderPromoCopy(data.promo));
+      }
+      
+      // Handle combo promo separately (combinable with regular promo)
+      if (data.combo_promo && !shownPromosRef.current.has(data.combo_promo.id)) {
+        shownPromosRef.current.add(data.combo_promo.id);
+        if (
+          selectedService &&
+          Array.isArray(data.combo_promo.constraints_json?.combo_service_ids)
+        ) {
+          const comboIds = data.combo_promo.constraints_json?.combo_service_ids as number[];
+          const otherId = comboIds.includes(selectedService.id)
+            ? comboIds.find((id) => id !== selectedService.id) ?? null
+            : null;
+          if (otherId) {
+            // Store the combo promo for later application if user accepts
+            setComboServiceId(otherId);
+            setComboChoice("pending");
+            // Show the combo offer message
+            const otherService = services.find(s => s.id === otherId);
+            const comboDiscount = data.combo_promo.discount_type === "PERCENT" 
+              ? `${data.combo_promo.discount_value}% off`
+              : data.combo_promo.discount_type === "FIXED"
+              ? `$${(data.combo_promo.discount_value || 0) / 100} off`
+              : "special discount";
+            const comboMessage = otherService 
+              ? `🎁 Combo offer: Add ${otherService.name} for ${comboDiscount}! Would you like to add it?`
+              : renderPromoCopy(data.combo_promo);
+            console.log('[PROMO] Appending combo promo message:', comboMessage);
+            appendAssistantMessage(comboMessage);
+          }
+        }
+      }
+      
+      if (!data.promo && !data.combo_promo) {
+        if (data.reason_codes && data.reason_codes.length > 0) {
+          console.log('[PROMO] No promo eligible. Reason codes:', data.reason_codes);
+        }
+      }
     } catch (error) {
-      console.error("Failed to load promo:", error);
+      console.error('[PROMO] Failed to load promo:', error);
+      if (error instanceof Error) {
+        console.error('[PROMO] Error details:', error.message, error.stack);
+      }
     }
   };
 
@@ -383,6 +787,10 @@ export default function ChatPage() {
         start_time: slot.start_time,
         stylist_name: slot.stylist_name,
       })),
+      preferred_style_text: preferredStyle?.text || undefined,
+      preferred_style_image_url: preferredStyle?.image_url || undefined,
+      preferred_style_complete: preferredStyleComplete,
+      has_last_preferred_style: hasPreferredStyleData(lastPreferredStyle),
     };
   }
 
@@ -398,23 +806,28 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  useEffect(() => {
-    if (dateStr) {
-      maybeShowPromo("AT_CHAT_START", { bookingDate: dateStr });
-    }
-  }, [dateStr]);
+  // Note: AT_CHAT_START trigger removed - promos are now shown at AFTER_EMAIL_CAPTURE 
+  // (when we know if user is first-time or returning) or AFTER_SERVICE_SELECTED (for combos)
+  // AFTER_HOLD_CREATED trigger also removed - promos are applied earlier now
 
   useEffect(() => {
-    if (customerEmail.trim()) {
-      maybeShowPromo("AFTER_EMAIL_CAPTURE", { email: customerEmail.trim(), bookingDate: dateStr });
-    }
-  }, [customerEmail]);
+    if (!selectedService || !dateStr) return;
+    if (comboChoice !== "accepted" && comboChoice !== "declined") return;
+    if (stage !== "SELECT_DATE" && stage !== "SELECT_SLOT") return;
+    loadSlots(selectedService, dateStr, {
+      announce: false,
+      setStageToSlot: stage === "SELECT_SLOT",
+      secondaryServiceId: comboChoice === "accepted" ? comboOtherServiceId : null,
+    });
+  }, [comboChoice, comboOtherServiceId, selectedService?.id, dateStr, stage]);
 
   useEffect(() => {
-    if (selectedService) {
-      maybeShowPromo("AFTER_SERVICE_SELECTED", { bookingDate: dateStr });
+    if (!selectedService || !customerEmail.trim()) {
+      setLastPreferredStyle(null);
+      return;
     }
-  }, [selectedService?.id]);
+    fetchLastPreferredStyle(customerEmail.trim(), selectedService.id);
+  }, [selectedService?.id, customerEmail]);
 
   // Load services on mount
   useEffect(() => {
@@ -424,7 +837,7 @@ export default function ChatPage() {
         if (res.ok) {
           const data = await res.json();
           setServices(data);
-          setStage("SELECT_SERVICE");
+          setStage(customerEmail.trim() ? "SELECT_SERVICE" : "CAPTURE_EMAIL");
         }
       } catch (e) {
         console.error("Failed to load services:", e);
@@ -438,7 +851,7 @@ export default function ChatPage() {
   async function loadSlots(
     service: Service,
     date: string,
-    options?: { announce?: boolean; setStageToSlot?: boolean }
+    options?: { announce?: boolean; setStageToSlot?: boolean; secondaryServiceId?: number | null }
   ): Promise<Slot[]> {
     setDateStr(date);
     setSlotsLoading(true);
@@ -450,16 +863,19 @@ export default function ChatPage() {
     }
     let fetchedSlots: Slot[] = [];
     try {
-      const url = new URL(`${API_BASE}/availability`);
-      url.searchParams.set("service_id", String(service.id));
-      url.searchParams.set("date", date);
-      url.searchParams.set("tz_offset_minutes", String(tzOffset));
+    const url = new URL(`${API_BASE}/availability`);
+    url.searchParams.set("service_id", String(service.id));
+    url.searchParams.set("date", date);
+    url.searchParams.set("tz_offset_minutes", String(tzOffset));
+    if (options?.secondaryServiceId) {
+      url.searchParams.set("secondary_service_id", String(options.secondaryServiceId));
+    }
       const res = await fetch(url.toString());
       if (res.ok) {
         const data = await res.json();
         fetchedSlots = data;
         setSlots(data);
-        maybeShowPromo("AFTER_SLOT_SHOWN", { serviceId: service.id, bookingDate: date });
+        // Note: AFTER_SLOT_SHOWN trigger removed - promos handled at AFTER_EMAIL_CAPTURE and AFTER_SERVICE_SELECTED
         if (!data.length && options?.setStageToSlot !== false) {
           setStage("SELECT_DATE");
         }
@@ -487,7 +903,10 @@ export default function ChatPage() {
     const svc = services.find((s) => s.id === numericId);
     if (svc) {
       setSelectedService(svc);
-      return await loadSlots(svc, date, options);
+      return await loadSlots(svc, date, {
+        ...options,
+        secondaryServiceId: comboAccepted ? comboOtherServiceId : null,
+      });
     } else {
       // If service not found in loaded services, try to load slots anyway
       // by creating a temporary service object
@@ -496,13 +915,16 @@ export default function ChatPage() {
         url.searchParams.set("service_id", String(numericId));
         url.searchParams.set("date", date);
         url.searchParams.set("tz_offset_minutes", String(tzOffset));
+        if (comboAccepted && comboOtherServiceId) {
+          url.searchParams.set("secondary_service_id", String(comboOtherServiceId));
+        }
         const res = await fetch(url.toString());
         if (res.ok) {
           const data = await res.json();
           setSlots(data);
           setDateStr(date);
           setStage(data.length ? "SELECT_SLOT" : "SELECT_DATE");
-          maybeShowPromo("AFTER_SLOT_SHOWN", { serviceId: numericId, bookingDate: date });
+          // Note: AFTER_SLOT_SHOWN trigger removed
           if (options?.announce) {
             appendAssistantMessage(describeSlots(data, date));
           }
@@ -521,8 +943,12 @@ export default function ChatPage() {
   async function onSelectService(svc: Service) {
     appendUserMessage(svc.name);
     setSelectedService(svc);
-    setStage("SELECT_DATE");
-    appendAssistantMessage(`Great choice. Pick a date below for your ${svc.name}.`);
+    setComboServiceId(null);
+    setComboChoice(null);
+    resetPreferredStyleState();
+    await maybeShowPromo("AFTER_SERVICE_SELECTED", { serviceId: svc.id, servicePriceCents: svc.price_cents });
+    setStage("PREFERRED_STYLE");
+    appendAssistantMessage(`Great choice. ${stagePrompts.PREFERRED_STYLE}`);
   }
 
   async function onSelectDate(date: string) {
@@ -534,7 +960,10 @@ export default function ChatPage() {
       appendAssistantMessage(stagePrompts.SELECT_SERVICE);
       return;
     }
-    await loadSlots(selectedService, date, { announce: true });
+    await loadSlots(selectedService, date, {
+      announce: true,
+      secondaryServiceId: comboAccepted ? comboOtherServiceId : null,
+    });
   }
 
   // When user clicks a time slot button (time only, no stylist yet)
@@ -629,6 +1058,26 @@ export default function ChatPage() {
     const isoMatch = normalized.match(/\b20\d{2}-\d{2}-\d{2}\b/);
     if (isoMatch) {
       return isoMatch[0];
+    }
+    // Handle "Saturday, January 3" format
+    const dayMonthMatch = normalized.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s*(\d{1,2})\b/);
+    if (dayMonthMatch) {
+      const monthKey = dayMonthMatch[1];
+      const day = parseInt(dayMonthMatch[2], 10);
+      const monthMap: Record<string, number> = {
+        jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+        jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11,
+      };
+      const month = monthMap[monthKey];
+      if (month !== undefined) {
+        const now = new Date();
+        let year = now.getFullYear();
+        const candidate = new Date(year, month, day);
+        if (candidate < now) {
+          year += 1;
+        }
+        return toLocalDateInputValue(new Date(year, month, day));
+      }
     }
     const ordinalMatch = normalized.match(/\b(\d{1,2})(st|nd|rd|th)?\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/);
     if (ordinalMatch) {
@@ -853,6 +1302,13 @@ export default function ChatPage() {
     if (extractedEmail) {
       setCustomerEmail(extractedEmail);
       setTrackEmail(extractedEmail);
+      if (deferredStyleSave && awaitingStyleEmail === "none") {
+        void savePreferredStyle(deferredStyleSave.style, {
+          emailOverride: extractedEmail,
+          serviceIdOverride: deferredStyleSave.serviceId,
+          announce: false,
+        });
+      }
     }
     if (extractedName) {
       setCustomerName(extractedName);
@@ -864,6 +1320,69 @@ export default function ChatPage() {
     setIsLoading(true);
 
     try {
+      const normalized = text.toLowerCase();
+      const matchedService = findServiceMatch(text);
+      const parsedDate = parseDateFromText(text);
+      const parsedTime = parseTimeFromText(text);
+      const parsedStylist = parseStylistFromText(text);
+
+      if (awaitingStyleEmail !== "none" && extractedEmail) {
+        if (awaitingStyleEmail === "save" && pendingStyle) {
+          await savePreferredStyle(pendingStyle, { emailOverride: extractedEmail });
+        } else if (awaitingStyleEmail === "same") {
+          await applySameAsLastTime(extractedEmail);
+        }
+        setIsLoading(false);
+        return;
+      }
+
+      if (stage === "CAPTURE_EMAIL") {
+        if (!extractedEmail) {
+          appendAssistantMessage("Please share your email to get started.");
+          setIsLoading(false);
+          return;
+        }
+        appendAssistantMessage("Thanks! What service would you like to book?");
+        await maybeShowPromo("AFTER_EMAIL_CAPTURE", { 
+          email: extractedEmail,
+          serviceId: selectedService?.id ?? null,
+          servicePriceCents: selectedService?.price_cents ?? null,
+        });
+        setStage("SELECT_SERVICE");
+        setIsLoading(false);
+        return;
+      }
+
+      if (stage === "PREFERRED_STYLE") {
+        if (/^(skip|no|none|not now)\b/i.test(normalized)) {
+          await skipPreferredStyle();
+          setIsLoading(false);
+          return;
+        }
+
+        if (/\bsame\b|same as last time|same as last|same as before|same again/i.test(normalized)) {
+          await applySameAsLastTime();
+          setIsLoading(false);
+          return;
+        }
+
+        if (parsedDate) {
+          pendingDateRef.current = parsedDate;
+          appendAssistantMessage(stagePrompts.PREFERRED_STYLE);
+          setIsLoading(false);
+          return;
+        }
+
+        if (!isSimpleQuestion(text)) {
+          await savePreferredStyle({
+            text: text.trim(),
+            image_url: styleDraftImageUrl ?? undefined,
+          });
+          setIsLoading(false);
+          return;
+        }
+      }
+
       // If we're waiting for email to hold a slot and user just provided email
       const slotToHold = pendingSlotRef.current || selectedSlot;
       if (stage === "HOLDING" && extractedEmail && slotToHold && selectedService) {
@@ -884,23 +1403,35 @@ export default function ChatPage() {
         return;
       }
 
-      const normalized = text.toLowerCase();
-      const matchedService = findServiceMatch(text);
-      const parsedDate = parseDateFromText(text);
-      const parsedTime = parseTimeFromText(text);
-      const parsedStylist = parseStylistFromText(text);
-      const wantsConfirm = /confirm|book|schedule|reserve|lock in|finalize/.test(normalized);
-
       if (matchedService && selectedService?.id !== matchedService.id) {
         setSelectedService(matchedService);
+        resetPreferredStyleState();
+        setStage("PREFERRED_STYLE");
+        if (parsedDate) {
+          setDateStr(parsedDate);
+          pendingDateRef.current = parsedDate;
+        }
+        appendAssistantMessage(stagePrompts.PREFERRED_STYLE);
+        setIsLoading(false);
+        return;
       }
       if (parsedDate) {
         setDateStr(parsedDate);
       }
 
+      const serviceForFlow = matchedService ?? selectedService;
+      if (serviceForFlow && !preferredStyleComplete && stage !== "PREFERRED_STYLE") {
+        if (parsedDate) {
+          pendingDateRef.current = parsedDate;
+        }
+        setStage("PREFERRED_STYLE");
+        appendAssistantMessage(stagePrompts.PREFERRED_STYLE);
+        setIsLoading(false);
+        return;
+      }
+
       // Fast-path: if the user typed a clear service/date/time, advance without waiting for LLM
       if (!isSimpleQuestion(text)) {
-        const serviceForFlow = matchedService ?? selectedService;
         const dateForFlow = parsedDate ?? dateStr;
 
         // User provided service + date + time (e.g., "haircut 2pm Jan 1")
@@ -1019,6 +1550,7 @@ export default function ChatPage() {
 
     switch (action.type) {
       case "show_services": {
+        resetPreferredStyleState();
         setStage("SELECT_SERVICE");
         appendAssistantMessage(stagePrompts.SELECT_SERVICE);
         break;
@@ -1030,7 +1562,8 @@ export default function ChatPage() {
           const svc = services.find((s) => s.id === numericId);
           if (svc) {
             setSelectedService(svc);
-            setStage("SELECT_DATE");
+            resetPreferredStyleState();
+            setStage("PREFERRED_STYLE");
           }
         }
         break;
@@ -1100,6 +1633,55 @@ export default function ChatPage() {
         }
         break;
       }
+      case "get_last_preferred_style": {
+        const serviceId = Number(params.service_id || selectedService?.id);
+        const email = String(params.customer_email || customerEmail || "").trim();
+        if (!serviceId) {
+          appendAssistantMessage("Which service should I check for?");
+          break;
+        }
+        if (!email) {
+          appendAssistantMessage("What's your email so I can look that up?");
+          break;
+        }
+        const style = await fetchLastPreferredStyle(email, serviceId);
+        if (style && hasPreferredStyleData(style)) {
+          appendAssistantMessage("I found your last saved style preference.");
+        } else {
+          appendAssistantMessage("I don't see a saved style for that service yet.");
+        }
+        break;
+      }
+      case "set_preferred_style": {
+        const serviceId = Number(params.service_id || selectedService?.id);
+        const email = String(params.customer_email || customerEmail || "").trim();
+        if (!serviceId) {
+          appendAssistantMessage("Which service should I save this style for?");
+          break;
+        }
+        const svc = services.find((s) => s.id === serviceId);
+        if (svc) {
+          setSelectedService(svc);
+        }
+        await savePreferredStyle(
+          {
+            text: params.preferred_style_text as string | undefined,
+            image_url: params.preferred_style_image_url as string | undefined,
+          },
+          { emailOverride: email, serviceIdOverride: serviceId }
+        );
+        break;
+      }
+      case "apply_same_as_last_time": {
+        const email = String(params.customer_email || customerEmail || "").trim();
+        const serviceId = Number(params.service_id || selectedService?.id);
+        await applySameAsLastTime(email || undefined, serviceId || undefined);
+        break;
+      }
+      case "skip_preferred_style": {
+        await skipPreferredStyle();
+        break;
+      }
       default:
         break;
     }
@@ -1117,6 +1699,8 @@ export default function ChatPage() {
     autoConfirm?: boolean;
   }) {
     const svc = services.find((s) => s.id === args.serviceId) || selectedService;
+    const secondaryService =
+      comboAccepted && comboOtherService ? comboOtherService : null;
     if (!svc) {
       appendAssistantMessage("Please pick a service to continue.");
       return;
@@ -1153,15 +1737,20 @@ export default function ChatPage() {
             new Date(slot.start_time).getMinutes() === holdMinute
         );
 
-      const payload = {
-        service_id: svc.id,
-        date: args.date,
-        start_time: args.startTime,
-        stylist_id: args.stylistId,
-        customer_name: name,
-        customer_email: email,
-        tz_offset_minutes: tzOffset,
-      };
+    // Send promo_id if we have an applied promo from an earlier trigger point
+    const promoIdToSend = appliedPromo?.id ?? null;
+
+    const payload = {
+      service_id: svc.id,
+      secondary_service_id: secondaryService?.id ?? null,
+      date: args.date,
+      start_time: args.startTime,
+      stylist_id: args.stylistId,
+      customer_name: name,
+      customer_email: email,
+      tz_offset_minutes: tzOffset,
+      promo_id: promoIdToSend,
+    };
 
       const res = await fetch(`${API_BASE}/bookings/hold`, {
         method: "POST",
@@ -1187,22 +1776,20 @@ export default function ChatPage() {
           setSelectedSlot(urlSlot);
         } else {
           const dateObj = new Date(`${args.date}T${args.startTime}`);
+          const totalDurationMinutes =
+            svc.duration_minutes + (secondaryService?.duration_minutes ?? 0);
           setSelectedSlot({
             stylist_id: args.stylistId,
             stylist_name: "Selected stylist",
             start_time: dateObj.toISOString(),
-            end_time: new Date(dateObj.getTime() + (svc.duration_minutes || 30) * 60000).toISOString(),
+            end_time: new Date(dateObj.getTime() + (totalDurationMinutes || 30) * 60000).toISOString(),
           });
         }
         setStage("CONFIRMING");
         if (announceHold) {
           appendAssistantMessage("Slot reserved. Tap Confirm booking to finalize.");
         }
-        maybeShowPromo("AFTER_HOLD_CREATED", {
-          email,
-          serviceId: svc.id,
-          bookingDate: args.date,
-        });
+        // Note: AFTER_HOLD_CREATED trigger removed - promos applied earlier at AFTER_EMAIL_CAPTURE/AFTER_SERVICE_SELECTED
         // Immediately refresh booking list for this email
         if (email) {
           await trackBookings(email);
@@ -1284,6 +1871,7 @@ export default function ChatPage() {
       if (res.ok) {
         const data: BookingTrack[] = await res.json();
         setTrackResults(data);
+        setSelectedTrackBooking(null);
         setLastTrackedEmail(email.toLowerCase());
         if (data.length === 0) {
           setTrackError("No bookings found for this email yet.");
@@ -1306,8 +1894,11 @@ export default function ChatPage() {
     setConfirmed(false);
     setCustomerName("");
     setCustomerEmail("");
-    setStage("SELECT_SERVICE");
+    resetPreferredStyleState();
+    setStage("CAPTURE_EMAIL");
     setAppliedPromo(null);
+    setComboServiceId(null);
+    setComboChoice(null);
   }
 
   // Generate next 7 days for date selection
@@ -1348,10 +1939,21 @@ export default function ChatPage() {
     resetBooking();
   };
 
-  const basePriceCents = selectedService?.price_cents ?? 0;
+  const basePriceCents =
+    (selectedService?.price_cents ?? 0) +
+    (comboAccepted && comboOtherService ? comboOtherService.price_cents : 0);
+  
+  // Use the backend's discount if available (from hold), otherwise calculate from appliedPromo
+  const actualDiscountCents = hold?.discount_cents ?? 0;
+  const calculatedDiscountCents = appliedPromo 
+    ? getPromoDiscountCents(appliedPromo, basePriceCents)
+    : 0;
+  const discountCents = hold ? actualDiscountCents : calculatedDiscountCents;
+  const totalCents = Math.max(basePriceCents - discountCents, 0);
+  
   const promoTotals = useMemo(
-    () => applyPromoTotal(basePriceCents, appliedPromo),
-    [basePriceCents, appliedPromo]
+    () => ({ totalCents, discountCents }),
+    [totalCents, discountCents]
   );
 
   return (
@@ -1384,7 +1986,7 @@ export default function ChatPage() {
             <div className="bg-gray-50 rounded-xl p-4 text-sm space-y-2 mb-4">
               <div className="flex justify-between">
                 <span className="text-gray-500">Service</span>
-                <span className="font-medium text-gray-900">{selectedService?.name}</span>
+                <span className="font-medium text-gray-900">{combinedServiceLabel}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-500">Date</span>
@@ -1403,10 +2005,10 @@ export default function ChatPage() {
               <div className="border-t border-gray-200 pt-2 flex justify-between">
                 <span className="text-gray-500">Subtotal</span>
                 <span className="font-medium text-gray-900">
-                  {selectedService && formatMoney(selectedService.price_cents)}
+                  {formatMoney(basePriceCents)}
                 </span>
               </div>
-              {appliedPromo && (
+              {(promoTotals.discountCents > 0 || (appliedPromo && (appliedPromo.type !== "SERVICE_COMBO_PROMO" || comboAccepted))) && (
                 <div className="flex justify-between text-sm">
                   <span className="text-gray-500">Promotion</span>
                   <span className="font-medium text-green-700">
@@ -1434,6 +2036,48 @@ export default function ChatPage() {
         </div>
       )}
 
+      {selectedTrackBooking && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full animate-fadeIn relative">
+            <button
+              onClick={() => setSelectedTrackBooking(null)}
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">Preferred style</h3>
+              <p className="text-xs text-gray-500">
+                {selectedTrackBooking.secondary_service_name
+                  ? `${selectedTrackBooking.service_name} + ${selectedTrackBooking.secondary_service_name}`
+                  : selectedTrackBooking.service_name}{" "}
+                · {formatTime(selectedTrackBooking.start_time)}
+              </p>
+            </div>
+            {selectedTrackBooking.preferred_style_text && (
+              <p className="text-sm text-gray-700 whitespace-pre-wrap mb-4">
+                {selectedTrackBooking.preferred_style_text}
+              </p>
+            )}
+            {selectedTrackBooking.preferred_style_image_url && (
+              <div className="rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
+                <img
+                  src={selectedTrackBooking.preferred_style_image_url}
+                  alt="Preferred style"
+                  className="w-full max-h-64 object-cover"
+                />
+              </div>
+            )}
+            {!selectedTrackBooking.preferred_style_text &&
+              !selectedTrackBooking.preferred_style_image_url && (
+                <p className="text-sm text-gray-500">No preferred style saved for this booking.</p>
+              )}
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-100">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4">
@@ -1442,27 +2086,35 @@ export default function ChatPage() {
               <h1 className="text-xl font-semibold text-gray-900">Bishops Tempe</h1>
               <p className="text-sm text-gray-500">Premium Hair Studio</p>
             </div>
-            <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
-              <button
-                onClick={() => setMode("chat")}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                  mode === "chat"
-                    ? "bg-white text-gray-900 shadow-sm"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
+            <div className="flex items-center gap-3">
+              <a
+                href="/owner"
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
               >
-                AI Assistant
-              </button>
-              <button
-                onClick={() => setMode("track")}
-                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                  mode === "track"
-                    ? "bg-white text-gray-900 shadow-sm"
-                    : "text-gray-600 hover:text-gray-900"
-                }`}
-              >
-                Bookings
-              </button>
+                Owner
+              </a>
+              <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
+                <button
+                  onClick={() => setMode("chat")}
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                    mode === "chat"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  AI Assistant
+                </button>
+                <button
+                  onClick={() => setMode("track")}
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                    mode === "track"
+                      ? "bg-white text-gray-900 shadow-sm"
+                      : "text-gray-600 hover:text-gray-900"
+                  }`}
+                >
+                  Bookings
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1527,9 +2179,193 @@ export default function ChatPage() {
                 </div>
               )}
 
+              {stage === "PREFERRED_STYLE" && selectedService && (
+                <div className="px-6 pb-4">
+                  <p className="text-xs text-gray-500 mb-3">
+                    Preferred style for {selectedService.name}?
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {hasPreferredStyleData(lastPreferredStyle) && (
+                      <button
+                        onClick={() => applySameAsLastTime()}
+                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                      >
+                        Same as last time
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        setStyleMode("text");
+                        setStyleDraftText("");
+                        setStyleDraftImageUrl(null);
+                      }}
+                      className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                    >
+                      Type it
+                    </button>
+                    <button
+                      onClick={() => styleFileInputRef.current?.click()}
+                      disabled={styleUploading}
+                      className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors disabled:opacity-60"
+                    >
+                      {styleUploading ? "Uploading..." : "Add image"}
+                    </button>
+                    <button
+                      onClick={() => skipPreferredStyle()}
+                      className="px-4 py-2 bg-gray-800 text-white text-sm rounded-full transition-colors"
+                    >
+                      Skip
+                    </button>
+                  </div>
+
+                  {styleMode !== "idle" && (
+                    <div className="mt-4 rounded-2xl border border-gray-100 bg-gray-50/70 p-4 space-y-3">
+                      {styleDraftImageUrl && (
+                        <div className="rounded-xl overflow-hidden border border-gray-200 bg-white">
+                          <img
+                            src={styleDraftImageUrl}
+                            alt="Preferred style"
+                            className="w-full max-h-48 object-cover"
+                          />
+                        </div>
+                      )}
+                      <textarea
+                        value={styleDraftText}
+                        onChange={(event) => setStyleDraftText(event.target.value)}
+                        placeholder="Describe your preferred style (optional if you uploaded an image)."
+                        className="w-full min-h-[90px] rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-200"
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() =>
+                            savePreferredStyle({
+                              text: styleDraftText,
+                              image_url: styleDraftImageUrl ?? undefined,
+                            })
+                          }
+                          disabled={styleSaving}
+                          className="px-4 py-2 bg-gray-800 text-white text-sm rounded-full disabled:opacity-60"
+                        >
+                          {styleSaving ? "Saving..." : "Save preference"}
+                        </button>
+                        <button
+                          onClick={() => {
+                            setStyleMode("idle");
+                            setStyleDraftText("");
+                            setStyleDraftImageUrl(null);
+                          }}
+                          className="px-4 py-2 bg-white text-gray-600 text-sm rounded-full border border-gray-200"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      {styleError && (
+                        <p className="text-xs text-red-600">{styleError}</p>
+                      )}
+                    </div>
+                  )}
+                  {styleMode === "idle" && styleError && (
+                    <p className="mt-3 text-xs text-red-600">{styleError}</p>
+                  )}
+
+                  {appliedPromo?.type === "SERVICE_COMBO_PROMO" &&
+                    comboOtherService &&
+                    comboChoice === "pending" && (
+                      <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+                        <p className="text-sm text-blue-900 font-medium">
+                          Bundle this with {comboOtherService.name} for the combo offer?
+                        </p>
+                        <p className="text-xs text-blue-700 mt-1">
+                          You can add it now or skip the combo.
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            onClick={() => {
+                              if (comboOtherServiceId) {
+                                setComboServiceId(comboOtherServiceId);
+                                setComboChoice("accepted");
+                                appendAssistantMessage(
+                                  `Added ${comboOtherService.name} to your booking.`
+                                );
+                              }
+                            }}
+                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-full"
+                          >
+                            Add {comboOtherService.name}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setComboChoice("declined");
+                              setComboServiceId(null);
+                              appendAssistantMessage("No problem, we'll keep just the main service.");
+                            }}
+                            className="px-4 py-2 bg-white text-blue-700 text-sm rounded-full border border-blue-200"
+                          >
+                            No thanks
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  {comboChoice === "accepted" && comboOtherService && (
+                    <p className="mt-3 text-xs text-green-700">
+                      Combo added: {comboOtherService.name}.
+                    </p>
+                  )}
+
+                  <input
+                    ref={styleFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) {
+                        handleStyleImageUpload(file);
+                      }
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </div>
+              )}
+
               {stage === "SELECT_DATE" && selectedService && (
                 <div className="px-6 pb-4">
                   <p className="text-xs text-gray-500 mb-3">Pick a date:</p>
+                  {appliedPromo?.type === "SERVICE_COMBO_PROMO" &&
+                    comboOtherService &&
+                    comboChoice === "pending" && (
+                      <div className="mb-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+                        <p className="text-sm text-blue-900 font-medium">
+                          Bundle this with {comboOtherService.name} for the combo offer?
+                        </p>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button
+                            onClick={() => {
+                              if (comboOtherServiceId) {
+                                setComboServiceId(comboOtherServiceId);
+                                setComboChoice("accepted");
+                                appendAssistantMessage(
+                                  `Added ${comboOtherService.name} to your booking.`
+                                );
+                              }
+                            }}
+                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-full"
+                          >
+                            Add {comboOtherService.name}
+                          </button>
+                          <button
+                            onClick={() => {
+                              setComboChoice("declined");
+                              setComboServiceId(null);
+                              appendAssistantMessage("No problem, we'll keep just the main service.");
+                            }}
+                            className="px-4 py-2 bg-white text-blue-700 text-sm rounded-full border border-blue-200"
+                          >
+                            No thanks
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   <div className="flex flex-wrap gap-2">
                     {dateOptions.map((opt) => (
                       <button
@@ -1658,18 +2494,20 @@ export default function ChatPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-500">Service</span>
                     <span className="font-medium text-gray-900">
-                      {selectedService?.name || "Select a service"}
+                      {combinedServiceLabel || "Select a service"}
                     </span>
                   </div>
                   {selectedService && (
                     <div className="flex justify-between">
                       <span className="text-gray-500">Subtotal</span>
                       <span className="font-medium text-gray-800">
-                        {formatMoney(selectedService.price_cents)}
+                        {formatMoney(basePriceCents)}
                       </span>
                     </div>
                   )}
-                  {selectedService && appliedPromo && (
+                  {selectedService &&
+                    appliedPromo &&
+                    (appliedPromo.type !== "SERVICE_COMBO_PROMO" || comboAccepted) && (
                     <div className="flex justify-between">
                       <span className="text-gray-500">Promotion</span>
                       <span className="font-medium text-green-700">
@@ -1777,48 +2615,90 @@ export default function ChatPage() {
               )}
 
               <div className="mt-6 space-y-4">
-                {trackResults.map((b) => (
-                  <div key={b.booking_id} className="border border-gray-100 rounded-2xl p-5 bg-gray-50/60">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm text-gray-500">{new Date(b.start_time).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</p>
-                        <h3 className="text-lg font-semibold text-gray-900">{b.service_name}</h3>
-                        <p className="text-sm text-gray-600">With {b.stylist_name}</p>
+                {trackResults.map((b) => {
+                  const hasStyle = Boolean(
+                    (b.preferred_style_text && b.preferred_style_text.trim()) ||
+                      b.preferred_style_image_url
+                  );
+                  return (
+                    <div
+                      key={b.booking_id}
+                      onClick={() => {
+                        if (hasStyle) setSelectedTrackBooking(b);
+                      }}
+                      className={`border border-gray-100 rounded-2xl p-5 bg-gray-50/60 ${
+                        hasStyle ? "cursor-pointer hover:border-blue-200" : ""
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm text-gray-500">{new Date(b.start_time).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</p>
+                          <h3 className="text-lg font-semibold text-gray-900">
+                            {b.secondary_service_name
+                              ? `${b.service_name} + ${b.secondary_service_name}`
+                              : b.service_name}
+                          </h3>
+                          <p className="text-sm text-gray-600">With {b.stylist_name}</p>
+                        </div>
+                        <span
+                          className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                            b.status === "CONFIRMED"
+                              ? "bg-green-100 text-green-700"
+                              : b.status === "HOLD"
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-gray-200 text-gray-700"
+                          }`}
+                        >
+                          {b.status}
+                        </span>
                       </div>
-                      <span
-                        className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                          b.status === "CONFIRMED"
-                            ? "bg-green-100 text-green-700"
-                            : b.status === "HOLD"
-                            ? "bg-amber-100 text-amber-700"
-                            : "bg-gray-200 text-gray-700"
-                        }`}
-                      >
-                        {b.status}
-                      </span>
+                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-gray-600">
+                        <div className="flex items-center gap-2">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-9 4h4" />
+                          </svg>
+                          {formatTime(b.start_time)} - {formatTime(b.end_time)}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                          {b.customer_name || "Guest"}
+                        </div>
+                        {b.total_price_cents != null && (
+                          <div className="flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            {b.discount_cents && b.discount_cents > 0 ? (
+                              <span>
+                                <span className="line-through text-gray-400 mr-1">
+                                  {formatMoney((b.service_price_cents || 0) + (b.secondary_service_price_cents || 0))}
+                                </span>
+                                <span className="text-green-700 font-medium">
+                                  {formatMoney(b.total_price_cents)}
+                                </span>
+                              </span>
+                            ) : (
+                              <span>{formatMoney(b.total_price_cents)}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {hasStyle && (
+                        <button
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedTrackBooking(b);
+                          }}
+                          className="mt-4 inline-flex items-center gap-2 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-100 px-3 py-2 rounded-full"
+                        >
+                          View preferred style
+                        </button>
+                      )}
                     </div>
-                    <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-gray-600">
-                      <div className="flex items-center gap-2">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-9 4h4" />
-                        </svg>
-                        {formatTime(b.start_time)} - {formatTime(b.end_time)}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                        </svg>
-                        {b.customer_name || "Guest"}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12h.01M12 12h.01M8 12h.01M21 12c0 4.418-4.03 8-9 8a9.77 9.77 0 01-4-.838L3 21l1.445-4.815C3.524 14.993 3 13.552 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                        </svg>
-                        {b.customer_email}
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
 
                 {!trackLoading && !trackResults.length && lastTrackedEmail && !trackError && (
                   <p className="text-sm text-gray-500">No bookings found for {lastTrackedEmail} yet.</p>
