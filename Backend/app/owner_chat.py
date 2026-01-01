@@ -49,7 +49,8 @@ RULES:
 - Use 24h time (HH:MM) and ISO dates (YYYY-MM-DD).
 - Today is {today} in {timezone}.
 - If the user gives a time range like "from 12pm-9pm", map it to work_start/work_end or time off.
-- For customer history or preferences, use get_customer_profile (email or phone) or list_customers_by_stylist.
+- For customer history or preferences, use get_customer_profile or list_customers_by_stylist.
+- Promotions require structured fields. Ask one short clarification at a time if anything is missing.
 
 SERVICES:
 {services}
@@ -57,8 +58,28 @@ SERVICES:
 STYLISTS:
 {stylists}
 
+PROMO TYPES:
+- FIRST_USER_PROMO
+- DAILY_PROMO
+- SEASONAL_PROMO
+- SERVICE_COMBO_PROMO (requires service_id and trigger points after service selection)
+
+PROMO TRIGGER POINTS:
+- AT_CHAT_START
+- AFTER_EMAIL_CAPTURE
+- AFTER_SERVICE_SELECTED
+- AFTER_SLOT_SHOWN
+- AFTER_HOLD_CREATED
+
+DISCOUNT TYPES:
+- PERCENT
+- FIXED
+- FREE_ADDON
+- BUNDLE
+
 Actions:
 - list_services: {{}}
+- list_promos: {{}}
 - list_schedule: {{"date": "YYYY-MM-DD", "tz_offset_minutes": <int>}}
 - reschedule_booking: {{"date": "YYYY-MM-DD", "from_stylist_name": "<name>", "to_stylist_name": "<name>", "from_time": "HH:MM", "to_time": "HH:MM", "tz_offset_minutes": <int>}}
 - create_service: {{"name": "<name>", "duration_minutes": <int>, "price_cents": <int>, "availability_rule": "<rule>"}}
@@ -73,8 +94,11 @@ Actions:
 - update_stylist_specialties: {{"stylist_id": <id>, "stylist_name": "<name>", "tags": ["color","balayage"]}}
 - add_time_off: {{"stylist_id": <id>, "stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
 - remove_time_off: {{"stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
-- get_customer_profile: {{"identifier": "name@example.com"}}
+- get_customer_profile: {{"email": "name@example.com"}}
 - list_customers_by_stylist: {{"stylist_name": "<name>"}}
+- create_promo: {{"type": "<PROMO_TYPE>", "trigger_point": "<TRIGGER_POINT>", "discount_type": "<DISCOUNT_TYPE>", "discount_value": <int>, "service_id": <id|null>, "constraints_json": {{"min_spend_cents": 2000, "valid_days_of_week":[0,1,2], "usage_limit_per_customer": 1}}, "custom_copy": "<optional>", "start_at": "YYYY-MM-DD", "end_at": "YYYY-MM-DD", "active": true, "priority": 0}}
+- update_promo: {{"promo_id": <id>, "trigger_point": "<TRIGGER_POINT>", "active": false}}
+- delete_promo: {{"promo_id": <id>}}
 
 Examples:
 User: "Create Keratin Treatment: 90 minutes, $200"
@@ -90,9 +114,11 @@ Reply: "Got it. I'll add John as a new stylist." [ACTION: {{"type":"create_styli
 User: "Remove John as a stylist"
 Reply: "Got it. I'll remove John." [ACTION: {{"type":"remove_stylist","params":{{"stylist_name":"John"}}}}]
 User: "Show me Aryan's booking history (aryan@email.com)"
-Reply: "Here is Aryan's booking history." [ACTION: {{"type":"get_customer_profile","params":{{"identifier":"aryan@email.com"}}}}]
+Reply: "Here is Aryan's booking history." [ACTION: {{"type":"get_customer_profile","params":{{"email":"aryan@email.com"}}}}]
 User: "Which customers prefer Alex?"
 Reply: "Here are customers who prefer Alex." [ACTION: {{"type":"list_customers_by_stylist","params":{{"stylist_name":"Alex"}}}}]
+User: "Add a daily promo for 10% off after email capture"
+Reply: "Got it. I'll add that promotion." [ACTION: {{"type":"create_promo","params":{{"type":"DAILY_PROMO","trigger_point":"AFTER_EMAIL_CAPTURE","discount_type":"PERCENT","discount_value":10,"active":true,"priority":0}}}}]
 """
 
 
@@ -166,6 +192,7 @@ async def get_stylists_context(session: AsyncSession) -> str:
 
 ALLOWED_ACTIONS = {
     "list_services",
+    "list_promos",
     "list_schedule",
     "reschedule_booking",
     "create_service",
@@ -182,6 +209,9 @@ ALLOWED_ACTIONS = {
     "remove_time_off",
     "get_customer_profile",
     "list_customers_by_stylist",
+    "create_promo",
+    "update_promo",
+    "delete_promo",
 }
 
 
