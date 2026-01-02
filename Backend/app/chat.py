@@ -101,8 +101,8 @@ PREFERRED STYLE RULES:
 - If customer_email is missing, ask for it and do not call the action yet.
 
 BOOKING FLOW:
-1. Ask for email at start (CAPTURE_EMAIL stage)
-2. User provides email → check_promos with AT_CHAT_START and AFTER_EMAIL_CAPTURE, display any eligible promos
+1. Ask for BOTH name AND email at start (CAPTURE_EMAIL stage) - do not proceed until you have both
+2. User provides name and email → check_promos with AT_CHAT_START and AFTER_EMAIL_CAPTURE, display any eligible promos
 3. User picks service → select_service action, check_promos with AFTER_SERVICE_SELECTED, display any eligible promos, ask about preferred style
 4. Preferred style handled (set_preferred_style / apply_same_as_last_time / skip_preferred_style) → ask for date
 5. User picks date → IMMEDIATELY use fetch_availability action and check_promos with AFTER_SLOT_SHOWN, display any eligible promos, say "Here are the available times for [date]:" (slots appear automatically)
@@ -185,7 +185,7 @@ ALLOWED_ACTIONS = {
 }
 
 STAGE_PROMPTS = {
-    "CAPTURE_EMAIL": "Hi! What's the best email to get started?",
+    "CAPTURE_EMAIL": "Hi! What's your name and best email to get started?",
     "WELCOME": "Welcome! What service would you like to book?",
     "SELECT_SERVICE": "Which service would you like? Please tap a service.",
     "PREFERRED_STYLE": "Do you have a preferred style for this service?",
@@ -276,6 +276,23 @@ def extract_email_from_messages(messages: list[ChatMessage]) -> str:
     return ""
 
 
+def extract_name_from_messages(messages: list[ChatMessage]) -> str:
+    """Extract customer name from messages - look for names in context or user messages."""
+    for msg in reversed(messages):
+        if msg.role != "user":
+            continue
+        # Look for patterns like "I'm John" or "my name is Sarah" or just "John Smith"
+        name_patterns = [
+            r"(?:my name is|i'?m|call me|it'?s)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+            r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*(?:,|and|@)",  # Name at start followed by comma/and/@
+        ]
+        for pattern in name_patterns:
+            match = re.search(pattern, msg.content, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+    return ""
+
+
 async def find_service_by_name(session: AsyncSession, name: str) -> Service | None:
     if not name:
         return None
@@ -345,6 +362,34 @@ async def chat_with_ai(
         customer_email = str(context.get("customer_email") or "").strip().lower()
     if not customer_email:
         customer_email = extract_email_from_messages(messages)
+    
+    customer_name = None
+    if context and context.get("customer_name"):
+        customer_name = str(context.get("customer_name") or "").strip()
+    if not customer_name:
+        customer_name = extract_name_from_messages(messages)
+
+    # During CAPTURE_EMAIL stage, if we have one but not the other, ask for both
+    if stage == "CAPTURE_EMAIL":
+        has_email = bool(customer_email)
+        has_name = bool(customer_name)
+        if not has_email or not has_name:
+            if has_email and not has_name:
+                return ChatResponse(
+                    reply="Thanks! What's your name?",
+                    action=None,
+                )
+            elif has_name and not has_email:
+                return ChatResponse(
+                    reply="Nice to meet you! What's your email address?",
+                    action=None,
+                )
+            else:
+                # Neither name nor email provided yet
+                return ChatResponse(
+                    reply="Hi! What's your name and best email to get started?",
+                    action=None,
+                )
 
     last_user_text = messages[-1].content if messages else ""
     repeat_intent = bool(

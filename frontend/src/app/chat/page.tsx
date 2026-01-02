@@ -215,7 +215,7 @@ export default function ChatPage() {
     {
       id: uid(),
       role: "assistant",
-      text: "Hi! What's the best email to get started?",
+      text: "Hi! What's your name and best email to get started?",
     },
   ]);
 
@@ -307,7 +307,7 @@ export default function ChatPage() {
 
   const stagePrompts: Record<Stage, string> = {
     WELCOME: "Welcome! What service would you like to book?",
-    CAPTURE_EMAIL: "What's the best email to get started?",
+    CAPTURE_EMAIL: "What's your name and best email to get started?",
     SELECT_SERVICE: "Please choose a service below.",
     PREFERRED_STYLE: "Do you have a preferred style for this service?",
     SELECT_DATE: "Pick a date below to see times.",
