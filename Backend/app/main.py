@@ -30,6 +30,7 @@ from .customer_memory import (
 )
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
 from .emailer import send_booking_email_with_ics
+from .sms import send_sms
 from .voice import router as voice_router
 from .models import (
     Booking,
@@ -874,6 +875,7 @@ async def ensure_identity_schema(conn) -> None:
     statements = [
         "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(32)",
         "CREATE INDEX IF NOT EXISTS ix_bookings_customer_phone ON bookings (customer_phone)",
+        "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS sms_sent_at_utc TIMESTAMP WITH TIME ZONE",
         "ALTER TABLE customers ADD COLUMN IF NOT EXISTS phone VARCHAR(32)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_customers_phone ON customers (phone)",
         "ALTER TABLE customers ALTER COLUMN email DROP NOT NULL",
@@ -3681,6 +3683,40 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
         except Exception as exc:
             logger.exception("Failed to send booking confirmation email: %s", exc)
 
+    # Send SMS confirmation if phone number is provided and SMS hasn't been sent yet
+    if booking.customer_phone and not booking.sms_sent_at_utc:
+        try:
+            customer_name = booking.customer_name or "Guest"
+            service_label = service.name
+            if secondary_service:
+                service_label = f"{service.name} + {secondary_service.name}"
+            
+            # Convert UTC time to local timezone for SMS
+            tz = ZoneInfo(settings.chat_timezone)
+            local_start = booking.start_at_utc.astimezone(tz)
+            date_str = local_start.strftime("%b %d")  # e.g., "Jan 15"
+            time_str = local_start.strftime("%-I:%M %p")  # e.g., "2:30 PM"
+            
+            # Build ICS download URL
+            ics_url = f"{settings.public_api_base.rstrip('/')}/bookings/{booking.id}/invite.ics"
+            
+            # Build SMS message
+            sms_body = f"✅ Confirmed: {service_label} with {stylist.name} on {date_str} at {time_str}. Add to calendar: {ics_url}"
+            
+            # Send SMS (this won't raise exceptions, just logs errors)
+            sms_sent = await send_sms(booking.customer_phone, sms_body)
+            
+            # Mark SMS as sent if successful
+            if sms_sent:
+                booking.sms_sent_at_utc = datetime.now(timezone.utc)
+                await session.commit()
+                logger.info(f"SMS confirmation sent for booking {booking.id}")
+            else:
+                logger.warning(f"Failed to send SMS confirmation for booking {booking.id}")
+                
+        except Exception as exc:
+            logger.exception("Failed to send SMS confirmation: %s", exc)
+
     return ConfirmResponse(ok=True, booking_id=booking.id, status=booking.status)
 
 
@@ -3731,6 +3767,63 @@ async def booking_invite(
     return Response(
         content=ics,
         media_type="text/calendar",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/bookings/{booking_id}/invite.ics")
+async def booking_invite_ics(
+    booking_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+):
+    """
+    Return a .ics invite file for direct calendar download.
+    This endpoint is specifically for SMS links that need the .ics extension.
+    """
+    result = await session.execute(
+        select(Booking, Service, Stylist)
+        .join(Service, Service.id == Booking.service_id)
+        .join(Stylist, Stylist.id == Booking.stylist_id)
+        .where(Booking.id == booking_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Booking not found")
+
+    booking, service, stylist = row
+    secondary_service = None
+    if booking.secondary_service_id:
+        secondary_result = await session.execute(
+            select(Service).where(Service.id == booking.secondary_service_id)
+        )
+        secondary_service = secondary_result.scalar_one_or_none()
+    
+    if booking.status not in [BookingStatus.CONFIRMED, BookingStatus.HOLD]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Booking must be confirmed or on hold"
+        )
+
+    customer_name = booking.customer_name or "Guest"
+    service_label = service.name
+    if secondary_service:
+        service_label = f"{service.name} + {secondary_service.name}"
+    summary = f"{service_label} with {stylist.name}"
+    description = f"Booking for {customer_name}"
+    location = settings.default_shop_name
+
+    ics = build_ics_event(
+        uid=str(booking.id),
+        start_at=booking.start_at_utc,
+        end_at=booking.end_at_utc,
+        summary=summary,
+        description=description,
+        location=location,
+    )
+    
+    filename = f"appointment-{booking.id}.ics"
+    return Response(
+        content=ics,
+        media_type="text/calendar; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 

@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     cloudinary_cloud_name: str | None = Field(default=None, alias="CLOUDINARY_CLOUD_NAME")
     cloudinary_upload_preset: str | None = Field(default=None, alias="CLOUDINARY_UPLOAD_PRESET")
     cloudinary_api_key: str | None = Field(default=None, alias="CLOUDINARY_API_KEY")
+    twilio_account_sid: str | None = Field(default=None, alias="TWILIO_ACCOUNT_SID")
     twilio_auth_token: str | None = Field(default=None, alias="TWILIO_AUTH_TOKEN")
+    twilio_from_number: str | None = Field(default=None, alias="TWILIO_FROM_NUMBER")
     twilio_verify_signature: bool = Field(default=False, alias="TWILIO_VERIFY_SIGNATURE")
 
     model_config = SettingsConfigDict(env_file=(".env", "Backend/.env", "backend/.env"), extra="ignore")

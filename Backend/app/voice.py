@@ -452,34 +452,49 @@ def fuzzy_match_service(text: str, services: list[Service]) -> Service | None:
         service_has_color = "color" in service_normalized or "colour" in service_normalized
         service_has_beard = "beard" in service_normalized
         
-        # STRICT RULE: If speech specifies gender, service MUST match that gender
-        if has_women and not service_has_women:
-            logger.debug(f"Skipping '{service.name}' - speech has women, service doesn't")
-            continue
-        if has_men and not service_has_men:
-            logger.debug(f"Skipping '{service.name}' - speech has men, service doesn't")
-            continue
+        # Check if this is a gender-specific service
+        service_is_gendered = service_has_women or service_has_men
         
-        # STRICT RULE: Gender-specific services must match the gender in speech
-        if service_has_women and has_men:
-            logger.debug(f"Skipping '{service.name}' - service is women's but speech says men")
-            continue
-        if service_has_men and has_women:
-            logger.debug(f"Skipping '{service.name}' - service is men's but speech says women")
-            continue
+        # STRICT RULE: If speech specifies gender AND service is gendered, they MUST match
+        if service_is_gendered:
+            if has_women and not service_has_women:
+                logger.debug(f"Skipping '{service.name}' - speech has women, service doesn't")
+                continue
+            if has_men and not service_has_men:
+                logger.debug(f"Skipping '{service.name}' - speech has men, service doesn't")
+                continue
+            
+            # STRICT RULE: Gender-specific services must match the gender in speech
+            if service_has_women and has_men:
+                logger.debug(f"Skipping '{service.name}' - service is women's but speech says men")
+                continue
+            if service_has_men and has_women:
+                logger.debug(f"Skipping '{service.name}' - service is men's but speech says women")
+                continue
         
-        # Service type matching
-        if has_haircut and not service_has_haircut and not service_has_trim:
-            continue
-        if has_color and not service_has_color:
-            continue
-        if has_trim and service_has_haircut and not service_has_trim:
-            continue
-        if has_beard and not service_has_beard:
-            continue
+        # For gendered services, enforce service type matching
+        if service_is_gendered:
+            if has_haircut and not service_has_haircut and not service_has_trim:
+                continue
+            if has_color and not service_has_color:
+                continue
+            if has_trim and service_has_haircut and not service_has_trim:
+                continue
+            if has_beard and not service_has_beard:
+                continue
         
         # Calculate match score
         score = 0.0
+        
+        # SIMPLE EXACT MATCH (highest priority) - case insensitive
+        if service_normalized == normalized or service_lower == lowered:
+            logger.info(f"EXACT MATCH: '{service.name}' with score 1000")
+            return service
+        
+        # SIMPLE SUBSTRING MATCH - if service name is in speech or vice versa
+        if service_normalized in normalized or normalized in service_normalized:
+            score += 200
+            logger.info(f"SUBSTRING MATCH: '{service.name}' with score {score}")
         
         # High priority for exact gender + service type match
         if has_women and service_has_women:
@@ -500,9 +515,22 @@ def fuzzy_match_service(text: str, services: list[Service]) -> Service | None:
         service_words = set(service_normalized.split())
         common = speech_words.intersection(service_words)
         meaningful = [w for w in common if len(w) > 2 and w not in ["the", "and", "for", "with", "is", "are"]]
-        score += len(meaningful) * 5
         
-        if score > best_score and score >= 50:  # Need at least one major match
+        # Boost score significantly if any word matches
+        if meaningful:
+            score += len(meaningful) * 30
+            logger.debug(f"Word matches for '{service.name}': {meaningful}, score: {score}")
+        
+        # For non-gendered services, be more lenient with partial matches
+        if not service_is_gendered:
+            # Check if any significant part of the service name appears in speech
+            service_parts = [w for w in service_words if len(w) > 3]
+            for part in service_parts:
+                if part in normalized:
+                    score += 40
+                    logger.debug(f"Partial match '{part}' in '{service.name}', score: {score}")
+        
+        if score > best_score and score >= 30:  # Lower threshold for better matching
             best_score = score
             best_match = service
             logger.info(f"Potential match: '{service.name}' with score {score}")

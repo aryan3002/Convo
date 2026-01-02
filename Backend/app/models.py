@@ -117,6 +117,7 @@ class Booking(Base):
     end_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[BookingStatus] = mapped_column(PgEnum(BookingStatus), nullable=False)
     hold_expires_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sms_sent_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
