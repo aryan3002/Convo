@@ -232,12 +232,52 @@ export default function OwnerPage() {
     priority: 0,
     perk_description: "",
   });
+  const [serviceBookingCounts, setServiceBookingCounts] = useState<Record<number, number>>({});
+  const [selectedServiceBookings, setSelectedServiceBookings] = useState<any[]>([]);
+  const [serviceBookingsModalOpen, setServiceBookingsModalOpen] = useState(false);
+  const [selectedServiceName, setSelectedServiceName] = useState("");
+  const [serviceBookingsLoading, setServiceBookingsLoading] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  async function fetchServiceBookingCounts() {
+    try {
+      const res = await fetch(`${API_BASE}/services/booking-counts`);
+      if (!res.ok) return;
+      const data: { service_id: number; upcoming_bookings: number }[] = await res.json();
+      const counts: Record<number, number> = {};
+      data.forEach((item) => {
+        counts[item.service_id] = item.upcoming_bookings;
+      });
+      setServiceBookingCounts(counts);
+    } catch (err) {
+      console.error("Failed to fetch booking counts:", err);
+    }
+  }
+
+  async function fetchServiceBookings(serviceId: number, serviceName: string) {
+    setServiceBookingsLoading(true);
+    setSelectedServiceName(serviceName);
+    setServiceBookingsModalOpen(true);
+    try {
+      const res = await fetch(`${API_BASE}/services/${serviceId}/bookings`);
+      if (!res.ok) {
+        setSelectedServiceBookings([]);
+        return;
+      }
+      const data = await res.json();
+      setSelectedServiceBookings(data);
+    } catch (err) {
+      console.error("Failed to fetch service bookings:", err);
+      setSelectedServiceBookings([]);
+    } finally {
+      setServiceBookingsLoading(false);
+    }
+  }
 
   const quickActions = useMemo(
     () => [
@@ -372,6 +412,12 @@ export default function OwnerPage() {
   useEffect(() => {
     fetchPromos();
   }, []);
+
+  useEffect(() => {
+    if (services.length > 0) {
+      fetchServiceBookingCounts();
+    }
+  }, [services]);
 
   async function sendMessage(text: string) {
     if (!text.trim() || isLoading) return;
@@ -947,6 +993,69 @@ export default function OwnerPage() {
           </div>
         </div>
       )}
+
+      {serviceBookingsModalOpen && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-2xl w-full animate-fadeIn relative max-h-[80vh] flex flex-col">
+            <button
+              onClick={() => {
+                setServiceBookingsModalOpen(false);
+                setSelectedServiceBookings([]);
+              }}
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-gray-900">{selectedServiceName}</h3>
+              <p className="text-xs text-gray-500">Upcoming bookings (next 7 days)</p>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-2">
+              {serviceBookingsLoading ? (
+                <div className="text-sm text-gray-400 text-center py-8">Loading...</div>
+              ) : selectedServiceBookings.length === 0 ? (
+                <div className="text-sm text-gray-400 text-center py-8">No bookings found</div>
+              ) : (
+                selectedServiceBookings.map((booking) => {
+                  const startDate = new Date(booking.start_time);
+                  const endDate = new Date(booking.end_time);
+                  const dateStr = startDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+                  const timeStr = `${startDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} - ${endDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+                  
+                  return (
+                    <div key={booking.id} className="border border-gray-100 rounded-xl p-3 hover:bg-gray-50 transition-colors">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="text-sm font-medium text-gray-900">{booking.customer_name || "Guest"}</p>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+                              booking.status === "CONFIRMED"
+                                ? "bg-green-50 text-green-600"
+                                : "bg-yellow-50 text-yellow-600"
+                            }`}>
+                              {booking.status}
+                            </span>
+                          </div>
+                          <p className="text-xs text-gray-600 mb-1">{dateStr} · {timeStr}</p>
+                          <p className="text-xs text-gray-500">Stylist: {booking.stylist_name}</p>
+                          {booking.customer_email && (
+                            <p className="text-xs text-gray-400 mt-1">{booking.customer_email}</p>
+                          )}
+                          {booking.customer_phone && (
+                            <p className="text-xs text-gray-400">{booking.customer_phone}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {promoWizardOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
           <div className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-gray-100 p-6">
@@ -1409,21 +1518,33 @@ export default function OwnerPage() {
                 {services.length === 0 && (
                   <div className="text-xs text-gray-400">No services loaded yet.</div>
                 )}
-                {services.map((svc) => (
-                  <div key={svc.id} className="border border-gray-100 rounded-2xl p-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{svc.name}</p>
-                        <p className="text-xs text-gray-500">
-                          {svc.duration_minutes} min · {formatMoney(svc.price_cents)}
-                        </p>
+                {services.map((svc) => {
+                  const count = serviceBookingCounts[svc.id] || 0;
+                  return (
+                    <div key={svc.id} className="border border-gray-100 rounded-2xl p-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">{svc.name}</p>
+                          <p className="text-xs text-gray-500">
+                            {svc.duration_minutes} min · {formatMoney(svc.price_cents)}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => count > 0 && fetchServiceBookings(svc.id, svc.name)}
+                          disabled={count === 0}
+                          className={`text-[11px] px-2 py-1 rounded-full transition-colors ${
+                            count > 0
+                              ? "bg-blue-50 text-blue-600 hover:bg-blue-100 cursor-pointer"
+                              : "bg-gray-100 text-gray-500 cursor-default"
+                          }`}
+                        >
+                          {count > 0 ? `${count} booking${count === 1 ? "" : "s"}` : "none"}
+                        </button>
                       </div>
-                      <span className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-500">
-                        {svc.availability_rule || "none"}
-                      </span>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

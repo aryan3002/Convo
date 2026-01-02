@@ -3932,3 +3932,93 @@ async def lookup_customer_by_identity(identity: str, session: AsyncSession = Dep
         total_spend_cents=int(context.get("total_spend_cents") or 0),
         last_booking_at=context.get("last_booking_at"),
     )
+
+
+class ServiceBookingCount(BaseModel):
+    service_id: int
+    upcoming_bookings: int
+
+
+class ServiceBookingDetail(BaseModel):
+    booking_id: str = Field(..., alias="id")
+    customer_name: str | None
+    customer_email: str | None
+    customer_phone: str | None
+    stylist_name: str
+    start_time: datetime
+    end_time: datetime
+    status: str
+    created_at: datetime
+    
+    class Config:
+        populate_by_name = True
+
+
+@app.get("/services/booking-counts")
+async def get_service_booking_counts(session: AsyncSession = Depends(get_session)) -> List[ServiceBookingCount]:
+    """Get upcoming booking counts for all services (next 7 days)."""
+    local_now = get_local_now()
+    one_week_later = local_now + timedelta(days=7)
+    
+    # Get bookings from now until one week later
+    result = await session.execute(
+        select(Booking.service_id, func.count(Booking.id).label("count"))
+        .where(
+            and_(
+                Booking.start_at_utc >= local_now,
+                Booking.start_at_utc < one_week_later,
+                Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.HOLD])
+            )
+        )
+        .group_by(Booking.service_id)
+    )
+    
+    counts = []
+    for row in result:
+        counts.append(ServiceBookingCount(
+            service_id=row[0],
+            upcoming_bookings=row[1]
+        ))
+    
+    return counts
+
+
+@app.get("/services/{service_id}/bookings")
+async def get_bookings_by_service(service_id: int, session: AsyncSession = Depends(get_session)) -> List[ServiceBookingDetail]:
+    """Get all upcoming bookings for a specific service (next 7 days)."""
+    local_now = get_local_now()
+    one_week_later = local_now + timedelta(days=7)
+    
+    result = await session.execute(
+        select(Booking)
+        .where(
+            and_(
+                Booking.service_id == service_id,
+                Booking.start_at_utc >= local_now,
+                Booking.start_at_utc < one_week_later,
+                Booking.status.in_([BookingStatus.CONFIRMED, BookingStatus.HOLD])
+            )
+        )
+        .order_by(Booking.start_at_utc)
+    )
+    
+    bookings = result.scalars().all()
+    details = []
+    
+    for booking in bookings:
+        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
+        stylist = stylist_result.scalar_one_or_none()
+        
+        details.append(ServiceBookingDetail(
+            id=str(booking.id),
+            customer_name=booking.customer_name,
+            customer_email=booking.customer_email,
+            customer_phone=booking.customer_phone,
+            stylist_name=stylist.name if stylist else "Unknown Stylist",
+            start_time=booking.start_at_utc,
+            end_time=booking.end_at_utc,
+            status=booking.status.value,
+            created_at=booking.created_at
+        ))
+    
+    return details
