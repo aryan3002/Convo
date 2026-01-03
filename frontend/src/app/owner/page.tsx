@@ -1334,21 +1334,6 @@ export default function OwnerPage() {
                       {promoDraft.active ? "Active" : "Paused"}
                     </button>
                   </div>
-                  <div>
-                    <label className="text-xs text-gray-500">Priority</label>
-                    <input
-                      type="number"
-                      value={promoDraft.priority}
-                      onChange={(e) =>
-                        setPromoDraft((prev) => ({
-                          ...prev,
-                          priority: Number(e.target.value || 0),
-                        }))
-                      }
-                      className="w-full rounded-full border border-gray-200 px-3 py-2 text-sm"
-                      min={0}
-                    />
-                  </div>
                 </div>
               )}
 
