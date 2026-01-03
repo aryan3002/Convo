@@ -39,6 +39,7 @@ from twilio.twiml.voice_response import Gather, VoiceResponse
 from .core.config import get_settings
 from .core.db import AsyncSessionLocal
 from .models import Service, Stylist
+from .call_summary import generate_call_summary, format_transcript
 
 # ────────────────────────────────────────────────────────────────
 # Configuration
@@ -91,12 +92,76 @@ def build_gather(prompt: str, timeout: int = 5) -> VoiceResponse:
     return response
 
 
+def build_gather_with_transcript(call_sid: str, prompt: str, timeout: int = 5) -> VoiceResponse:
+    """Build a Gather TwiML and track the agent prompt in transcript."""
+    add_to_transcript(call_sid, "Agent", prompt)
+    return build_gather(prompt, timeout)
+
+
 def build_say_hangup(message: str) -> VoiceResponse:
     """Say something and hang up."""
     response = VoiceResponse()
     response.say(message, voice="Polly.Joanna")
     response.hangup()
     return response
+
+
+def build_say_hangup_with_summary(call_sid: str, message: str) -> VoiceResponse:
+    """Say something, hang up, and schedule call summary generation."""
+    try:
+        add_to_transcript(call_sid, "Agent", message)
+    except Exception:
+        pass  # Don't let transcript tracking break the call
+    
+    # Schedule summary generation in background (don't block)
+    try:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(generate_summary_for_call(call_sid))
+        else:
+            # If no loop is running, create a new task in a new loop
+            import threading
+            threading.Thread(target=lambda: asyncio.run(generate_summary_for_call(call_sid)), daemon=True).start()
+    except Exception as e:
+        logger.warning(f"Failed to schedule summary for {call_sid}: {e}")
+    
+    return build_say_hangup(message)
+
+
+async def generate_summary_for_call(call_sid: str) -> None:
+    """
+    Generate and store a call summary for the given call.
+    Fire-and-forget - does not block the voice response.
+    """
+    session = CALL_SESSIONS.get(call_sid)
+    if not session:
+        logger.warning(f"No session found for call {call_sid}, skipping summary")
+        return
+    
+    # Get transcript
+    transcript_turns = session.get("transcript", [])
+    if not transcript_turns or len(transcript_turns) < 2:
+        logger.info(f"Transcript too short for call {call_sid}, skipping summary")
+        return
+    
+    # Format transcript
+    transcript_text = format_transcript(transcript_turns)
+    
+    # Get customer phone - use from Twilio form data or session
+    customer_phone = session.get("customer_phone") or session.get("caller_phone", "Unknown")
+    
+    try:
+        async with AsyncSessionLocal() as db:
+            await generate_call_summary(
+                call_sid=call_sid,
+                customer_phone=customer_phone,
+                transcript=transcript_text,
+                session_data=dict(session),  # Pass a copy
+                db=db,
+            )
+    except Exception as e:
+        logger.exception(f"Failed to generate summary for call {call_sid}: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -159,6 +224,7 @@ def get_session(call_sid: str) -> dict[str, Any]:
             "held_slot": None,
             "no_input_count": 0,
             "updated_at": datetime.now(timezone.utc),
+            "transcript": [],  # List of (speaker, message) tuples for call summary
         }
     return CALL_SESSIONS[call_sid]
 
@@ -168,6 +234,17 @@ def update_session(call_sid: str, **kwargs) -> None:
     session = get_session(call_sid)
     session.update(kwargs)
     session["updated_at"] = datetime.now(timezone.utc)
+
+
+def add_to_transcript(call_sid: str, speaker: str, message: str) -> None:
+    """Add a conversation turn to the transcript for call summary."""
+    try:
+        session = get_session(call_sid)
+        if "transcript" not in session:
+            session["transcript"] = []
+        session["transcript"].append((speaker, message))
+    except Exception as e:
+        logger.warning(f"Failed to add to transcript for {call_sid}: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -779,7 +856,7 @@ async def handle_get_identity(call_sid: str, speech: str) -> VoiceResponse:
     
     # Check for goodbye
     if is_goodbye(speech):
-        return build_say_hangup("No problem. Call us back anytime. Goodbye!")
+        return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
     
     # Handle phone confirmation FIRST (before extracting new data)
     if session["pending_phone"]:
@@ -791,24 +868,24 @@ async def handle_get_identity(call_sid: str, speech: str) -> VoiceResponse:
             if session["customer_name"]:
                 # We have both, move to next stage
                 update_session(call_sid, stage=Stage.GET_SERVICE)
-                return build_gather(f"Great, {session['customer_name']}! What service would you like to book today?")
+                return build_gather_with_transcript(call_sid, f"Great, {session['customer_name']}! What service would you like to book today?")
             else:
-                return build_gather("And what's your name?")
+                return build_gather_with_transcript(call_sid, "And what's your name?")
         elif is_negative(speech):
             # Phone rejected, ask again
             update_session(call_sid, pending_phone=None)
-            return build_gather("Okay, please tell me your phone number again.")
+            return build_gather_with_transcript(call_sid, "Okay, please tell me your phone number again.")
         else:
             # Check if they're providing a new phone number
             new_phone = extract_phone_from_speech(speech)
             if new_phone and new_phone != session["pending_phone"]:
                 update_session(call_sid, pending_phone=new_phone)
                 formatted = format_phone_for_voice(new_phone)
-                return build_gather(f"I heard {formatted}. Is that correct?")
+                return build_gather_with_transcript(call_sid, f"I heard {formatted}. Is that correct?")
             else:
                 # Ask for confirmation again
                 formatted = format_phone_for_voice(session["pending_phone"])
-                return build_gather(f"I heard {formatted}. Is that correct?")
+                return build_gather_with_transcript(call_sid, f"I heard {formatted}. Is that correct?")
     
     # Extract name if we don't have it
     if not session["customer_name"]:
@@ -828,23 +905,23 @@ async def handle_get_identity(call_sid: str, speech: str) -> VoiceResponse:
     # If we have a pending phone, ask for confirmation
     if session["pending_phone"]:
         formatted = format_phone_for_voice(session["pending_phone"])
-        return build_gather(f"I heard {formatted}. Is that correct?")
+        return build_gather_with_transcript(call_sid, f"I heard {formatted}. Is that correct?")
     
     # Build next prompt based on what we have
     if not session["customer_name"] and not session["customer_phone"]:
-        return build_gather("I didn't catch that. What's your name and phone number?")
+        return build_gather_with_transcript(call_sid, "I didn't catch that. What's your name and phone number?")
     
     if not session["customer_phone"]:
         name = session["customer_name"]
-        return build_gather(f"Thanks {name}! What's a good phone number for your booking?")
+        return build_gather_with_transcript(call_sid, f"Thanks {name}! What's a good phone number for your booking?")
     
     if not session["customer_name"]:
-        return build_gather("And what's your name?")
+        return build_gather_with_transcript(call_sid, "And what's your name?")
     
     # We have both, move to next stage
     update_session(call_sid, stage=Stage.GET_SERVICE)
     name = session["customer_name"]
-    return build_gather(f"Great, {name}! What service would you like to book today?")
+    return build_gather_with_transcript(call_sid, f"Great, {name}! What service would you like to book today?")
 
 
 async def handle_get_service(call_sid: str, speech: str) -> VoiceResponse:
@@ -852,7 +929,7 @@ async def handle_get_service(call_sid: str, speech: str) -> VoiceResponse:
     session = get_session(call_sid)
     
     if is_goodbye(speech):
-        return build_say_hangup("No problem. Call us back anytime. Goodbye!")
+        return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
     
     async with AsyncSessionLocal() as db:
         services = await get_all_services(db)
@@ -867,7 +944,7 @@ async def handle_get_service(call_sid: str, speech: str) -> VoiceResponse:
             stage=Stage.GET_DATE
         )
         # Confirm the service so customer can correct if wrong
-        return build_gather(f"Perfect! I've got you down for a {matched.name}. What day works for you?")
+        return build_gather_with_transcript(call_sid, f"Perfect! I've got you down for a {matched.name}. What day works for you?")
     
     # List available services with better categorization
     service_names = [s.name for s in services[:6]]  # Max 6 for voice
@@ -875,7 +952,7 @@ async def handle_get_service(call_sid: str, speech: str) -> VoiceResponse:
         service_list = ", ".join(service_names[:-1]) + f", or {service_names[-1]}"
     else:
         service_list = service_names[0] if service_names else "various services"
-    return build_gather(f"I didn't quite catch that. We offer {service_list}. Which service would you like?")
+    return build_gather_with_transcript(call_sid, f"I didn't quite catch that. We offer {service_list}. Which service would you like?")
 
 
 async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
@@ -883,7 +960,7 @@ async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
     session = get_session(call_sid)
     
     if is_goodbye(speech):
-        return build_say_hangup("No problem. Call us back anytime. Goodbye!")
+        return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
     
     # Check if user wants to correct the service
     if any(word in speech.lower() for word in ["change", "wrong", "different service", "not that", "actually"]):
@@ -897,7 +974,7 @@ async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
                 service_id=matched.id,
                 service_name=matched.name
             )
-            return build_gather(f"No problem! I've updated it to {matched.name}. What day works for you?")
+            return build_gather_with_transcript(call_sid, f"No problem! I've updated it to {matched.name}. What day works for you?")
         else:
             # Reset to service selection
             update_session(call_sid, stage=Stage.GET_SERVICE, service_id=None, service_name=None)
@@ -906,18 +983,18 @@ async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
                 service_list = ", ".join(service_names[:-1]) + f", or {service_names[-1]}"
             else:
                 service_list = service_names[0] if service_names else "various services"
-            return build_gather(f"Let me help you choose the right service. We offer {service_list}. Which one would you like?")
+            return build_gather_with_transcript(call_sid, f"Let me help you choose the right service. We offer {service_list}. Which one would you like?")
     
     tz = ZoneInfo(settings.chat_timezone)
     date = extract_date_from_speech(speech, tz)
     
     if date:
         update_session(call_sid, date=date, stage=Stage.GET_TIME_AND_STYLIST)
-        return build_gather("Got it! Do you have a preferred time or stylist? Or I can show you what's available.")
+        return build_gather_with_transcript(call_sid, "Got it! Do you have a preferred time or stylist? Or I can show you what's available.")
     
     # Remind them what service they selected
     service_name = session.get("service_name", "your service")
-    return build_gather(f"I didn't catch the date for your {service_name}. You can say today, tomorrow, or a specific day like Monday or March 15th.")
+    return build_gather_with_transcript(call_sid, f"I didn't catch the date for your {service_name}. You can say today, tomorrow, or a specific day like Monday or March 15th.")
 
 
 async def handle_get_time_and_stylist(call_sid: str, speech: str) -> VoiceResponse:
@@ -925,7 +1002,7 @@ async def handle_get_time_and_stylist(call_sid: str, speech: str) -> VoiceRespon
     session = get_session(call_sid)
     
     if is_goodbye(speech):
-        return build_say_hangup("No problem. Call us back anytime. Goodbye!")
+        return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
     
     # Extract time preference
     time_minutes = extract_time_from_speech(speech)
@@ -960,7 +1037,7 @@ async def handle_get_time_and_stylist(call_sid: str, speech: str) -> VoiceRespon
     
     if not slots:
         update_session(call_sid, stage=Stage.GET_DATE)
-        return build_gather("Sorry, I couldn't find any availability for that day. Would you like to try a different date?")
+        return build_gather_with_transcript(call_sid, "Sorry, I couldn't find any availability for that day. Would you like to try a different date?")
     
     # Select best slots
     displayed = select_best_slots(slots, session.get("preferred_time_minutes"), max_count=3)
@@ -971,7 +1048,7 @@ async def handle_get_time_and_stylist(call_sid: str, speech: str) -> VoiceRespon
         stage=Stage.HOLD_SLOT
     )
     
-    return build_gather(format_slots_for_voice(displayed))
+    return build_gather_with_transcript(call_sid, format_slots_for_voice(displayed))
 
 
 async def handle_hold_slot(call_sid: str, speech: str) -> VoiceResponse:
@@ -979,7 +1056,7 @@ async def handle_hold_slot(call_sid: str, speech: str) -> VoiceResponse:
     session = get_session(call_sid)
     
     if is_goodbye(speech):
-        return build_say_hangup("No problem. Call us back anytime. Goodbye!")
+        return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
     
     displayed = session.get("displayed_slots", [])
     
@@ -991,22 +1068,43 @@ async def handle_hold_slot(call_sid: str, speech: str) -> VoiceResponse:
     if option_idx is not None and option_idx < len(displayed):
         selected_slot = displayed[option_idx]
     else:
-        # Try to match by time or stylist name
+        # Try to match by time AND/OR stylist name
         time_minutes = extract_time_from_speech(speech)
-        if time_minutes is not None:
-            # Find closest match
-            for slot in displayed:
+        
+        # Check if any stylist name from displayed slots is mentioned
+        speech_lower = speech.lower()
+        stylist_matches = []
+        for slot in displayed:
+            stylist_name = slot.get("stylist_name", "")
+            if stylist_name and stylist_name.lower() in speech_lower:
+                stylist_matches.append(slot)
+        
+        candidates = stylist_matches if stylist_matches else displayed
+        
+        # Now match by time from the candidates
+        if time_minutes is not None and candidates:
+            best_match = None
+            best_diff = float('inf')
+            
+            for slot in candidates:
                 start = slot.get("start_time", "")
                 if isinstance(start, str) and "T" in start:
                     time_part = start.split("T")[1][:5]
                     hour, minute = map(int, time_part.split(":"))
                     slot_minutes = hour * 60 + minute
-                    if abs(slot_minutes - time_minutes) < 30:  # Within 30 min
-                        selected_slot = slot
-                        break
+                    diff = abs(slot_minutes - time_minutes)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_match = slot
+            
+            if best_match and best_diff < 60:  # Within 1 hour
+                selected_slot = best_match
+        elif len(candidates) == 1:
+            # They mentioned a stylist and there's only one match
+            selected_slot = candidates[0]
     
     if not selected_slot:
-        return build_gather("I didn't catch which option. Please say first, second, or third, or the time you'd like.")
+        return build_gather_with_transcript(call_sid, "I didn't catch which option. Please say first, second, or third, or tell me the time and stylist you'd like.")
     
     # Extract slot details
     start_time = selected_slot.get("start_time", "")
@@ -1040,7 +1138,7 @@ async def handle_hold_slot(call_sid: str, speech: str) -> VoiceResponse:
     
     if not time_24:
         logger.error(f"Could not parse start_time: {start_time}, type: {type(start_time)}")
-        return build_gather("Sorry, there was an issue with that time. Please try again.")
+        return build_gather_with_transcript(call_sid, "Sorry, there was an issue with that time. Please try again.")
     
     # Create hold
     try:
@@ -1060,6 +1158,7 @@ async def handle_hold_slot(call_sid: str, speech: str) -> VoiceResponse:
             call_sid,
             held_booking_id=str(booking_id) if booking_id else None,
             held_slot=selected_slot,
+            stylist_name=stylist_name,  # Store for later
             stage=Stage.CONFIRM
         )
         
@@ -1072,14 +1171,14 @@ async def handle_hold_slot(call_sid: str, speech: str) -> VoiceResponse:
         else:
             time_voice = f"{display_hour}:{minute:02d} {period}"
         
-        return build_gather(
+        return build_gather_with_transcript(call_sid, 
             f"I've reserved {time_voice} with {stylist_name} for you. "
             f"This hold lasts 5 minutes. Should I confirm this booking?"
         )
         
     except Exception as e:
         logger.exception(f"Failed to hold slot: {e}")
-        return build_gather("Sorry, I couldn't reserve that slot. It may have just been taken. Would you like to try another time?")
+        return build_gather_with_transcript(call_sid, "Sorry, I couldn't reserve that slot. It may have just been taken. Would you like to try another time?")
 
 
 async def handle_confirm(call_sid: str, speech: str) -> VoiceResponse:
@@ -1087,16 +1186,19 @@ async def handle_confirm(call_sid: str, speech: str) -> VoiceResponse:
     session = get_session(call_sid)
     
     if is_goodbye(speech):
-        return build_say_hangup("No problem. Your hold has been released. Call us back anytime. Goodbye!")
+        return build_say_hangup_with_summary(call_sid, "No problem. Your hold has been released. Call us back anytime. Goodbye!")
     
     if is_negative(speech):
         update_session(call_sid, stage=Stage.HOLD_SLOT)
-        return build_gather("No problem. Would you like to choose a different time?")
+        return build_gather_with_transcript(call_sid, "No problem. Would you like to choose a different time?")
     
-    if is_affirmative(speech):
+    # Check for affirmative OR explicit "confirm" words
+    is_confirm = is_affirmative(speech) or bool(re.search(r'\b(confirm|confirmed|book|booked)\b', speech.lower()))
+    
+    if is_confirm:
         booking_id = session.get("held_booking_id")
         if not booking_id:
-            return build_gather("I don't have a reservation to confirm. Let's start over. What service would you like?")
+            return build_gather_with_transcript(call_sid, "I don't have a reservation to confirm. Let's start over. What service would you like?")
         
         try:
             async with AsyncSessionLocal() as db:
@@ -1104,25 +1206,25 @@ async def handle_confirm(call_sid: str, speech: str) -> VoiceResponse:
             
             update_session(call_sid, stage=Stage.DONE)
             
-            held_slot = session.get("held_slot", {})
-            stylist_name = held_slot.get("stylist_name", "your stylist")
+            stylist_name = session.get("stylist_name", "your stylist")
             
-            return build_say_hangup(
-                f"Your booking is confirmed! We'll see you then with {stylist_name}. "
-                f"A confirmation will be sent to your phone. Thanks for calling!"
+            # Generate call summary for confirmed booking
+            return build_say_hangup_with_summary(call_sid, 
+                f"Perfect! Your booking is confirmed with {stylist_name}. "
+                f"A confirmation will be sent to your phone. Thanks for calling Bishops Tempe!"
             )
             
         except Exception as e:
             logger.exception(f"Failed to confirm booking: {e}")
-            return build_gather("Sorry, I couldn't confirm that booking. Would you like me to try again?")
+            return build_gather_with_transcript(call_sid, "Sorry, I couldn't confirm that booking. Would you like me to try again?")
     
-    return build_gather("Should I confirm this booking? Just say yes or no.")
+    return build_gather_with_transcript(call_sid, "Should I confirm this booking? Just say yes or no.")
 
 
 async def handle_done(call_sid: str, speech: str) -> VoiceResponse:
     """Stage 7: Booking complete, anything else?"""
     if is_goodbye(speech) or is_negative(speech):
-        return build_say_hangup("Thanks for calling! Have a great day!")
+        return build_say_hangup_with_summary(call_sid, "Thanks for calling! Have a great day!")
     
     # Reset for another booking
     update_session(
@@ -1139,7 +1241,7 @@ async def handle_done(call_sid: str, speech: str) -> VoiceResponse:
         held_booking_id=None,
         held_slot=None,
     )
-    return build_gather("Would you like to book another appointment? What service would you like?")
+    return build_gather_with_transcript(call_sid, "Would you like to book another appointment? What service would you like?")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -1159,12 +1261,11 @@ async def twilio_voice(request: Request) -> Response:
     logger.info(f"Voice call started: {call_sid}")
     
     # Initialize session
-    get_session(call_sid)
+    session = get_session(call_sid)
     
-    twiml = build_gather(
-        "Hi, thanks for calling! I can help you book an appointment. "
-        "What's your name and phone number?"
-    )
+    prompt = "Hi, thanks for calling Bishops Tempe! I can help you book an appointment. What's your name and phone number?"
+    add_to_transcript(call_sid, "Agent", prompt)
+    twiml = build_gather(prompt)
     
     return Response(str(twiml), media_type="application/xml")
 
@@ -1181,6 +1282,13 @@ async def twilio_gather(request: Request) -> Response:
     speech = str(form.get("SpeechResult", "")).strip()
     
     session = get_session(call_sid)
+    
+    # Store caller phone from Twilio if not already set
+    if not session.get("caller_phone"):
+        caller_phone = str(form.get("From", "") or form.get("Caller", ""))
+        if caller_phone:
+            update_session(call_sid, caller_phone=caller_phone)
+    
     logger.info(f"Gather input: call={call_sid}, stage={session['stage']}, speech='{speech}'")
     
     # Handle no input
@@ -1198,6 +1306,9 @@ async def twilio_gather(request: Request) -> Response:
     
     # Reset no-input counter on successful input
     update_session(call_sid, no_input_count=0)
+    
+    # Track customer speech in transcript
+    add_to_transcript(call_sid, "Customer", speech)
     
     # Route to appropriate handler based on stage
     stage = session.get("stage", Stage.GET_IDENTITY)

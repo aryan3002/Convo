@@ -28,6 +28,13 @@ class BookingStatus(str, Enum):
     EXPIRED = "EXPIRED"
 
 
+class CallSummaryStatus(str, Enum):
+    """Status of the call outcome for owner summaries."""
+    CONFIRMED = "confirmed"
+    NOT_CONFIRMED = "not_confirmed"
+    FOLLOW_UP = "follow_up"
+
+
 class Shop(Base):
     __tablename__ = "shops"
 
@@ -325,4 +332,36 @@ class PromoImpression(Base):
             "day_bucket",
             name="uq_promo_impression_daily",
         ),
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+# Call Summaries - Internal owner feature for voice call tracking
+# ────────────────────────────────────────────────────────────────
+
+
+class CallSummary(Base):
+    """
+    Stores AI-generated summaries of voice calls for salon owners.
+    Generated after each completed phone call handled by the voice agent.
+    """
+    __tablename__ = "call_summaries"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    call_sid: Mapped[str] = mapped_column(String(64), nullable=False, index=True, unique=True)
+    customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_phone: Mapped[str] = mapped_column(String(20), nullable=False)
+    service: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stylist: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    appointment_date: Mapped[str | None] = mapped_column(String(20), nullable=True)  # YYYY-MM-DD
+    appointment_time: Mapped[str | None] = mapped_column(String(20), nullable=True)  # HH:MM format
+    booking_status: Mapped[CallSummaryStatus] = mapped_column(
+        PgEnum(CallSummaryStatus), nullable=False, default=CallSummaryStatus.NOT_CONFIRMED
+    )
+    key_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # Full transcript for reference
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
