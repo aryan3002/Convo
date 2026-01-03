@@ -93,7 +93,7 @@ Actions:
 - update_stylist_hours: {{"stylist_id": <id>, "stylist_name": "<name>", "work_start": "HH:MM", "work_end": "HH:MM"}}
 - update_stylist_specialties: {{"stylist_id": <id>, "stylist_name": "<name>", "tags": ["color","balayage"]}}
 - add_time_off: {{"stylist_id": <id>, "stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
-- remove_time_off: {{"stylist_name": "<name>", "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"}}
+- remove_time_off: {{"stylist_name": "<name>", "date": "YYYY-MM-DD"}}  (start_time/end_time optional; removes all time off for that date if not specified)
 - get_customer_profile: {{"email": "name@example.com"}}
 - list_customers_by_stylist: {{"stylist_name": "<name>"}}
 - create_promo: {{"type": "<PROMO_TYPE>", "trigger_point": "<TRIGGER_POINT>", "discount_type": "<DISCOUNT_TYPE>", "discount_value": <int>, "service_id": <id|null>, "constraints_json": {{"min_spend_cents": 2000, "valid_days_of_week":[0,1,2], "usage_limit_per_customer": 1}}, "custom_copy": "<optional>", "start_at": "YYYY-MM-DD", "end_at": "YYYY-MM-DD", "active": true, "priority": 0}}
@@ -107,6 +107,8 @@ User: "Alex is off next Tuesday 2–6pm"
 Reply: "Got it. I'll add that time off." [ACTION: {{"type":"add_time_off","params":{{"stylist_name":"Alex","date":"YYYY-MM-DD","start_time":"14:00","end_time":"18:00"}}}}]
 User: "Add time off for Alex on December 30 from 11am to 2pm"
 Reply: "Got it. I'll add that time off." [ACTION: {{"type":"add_time_off","params":{{"stylist_name":"Alex","date":"2025-12-30","start_time":"11:00","end_time":"14:00"}}}}]
+User: "Remove time off for Alex on Tuesday"
+Reply: "Got it. I'll remove all time off for Alex on Tuesday." [ACTION: {{"type":"remove_time_off","params":{{"stylist_name":"Alex","date":"YYYY-MM-DD"}}}}]
 User: "Remove time off for Alex on Tuesday from 2–6pm"
 Reply: "Got it. I'll remove that time off." [ACTION: {{"type":"remove_time_off","params":{{"stylist_name":"Alex","date":"YYYY-MM-DD","start_time":"14:00","end_time":"18:00"}}}}]
 User: "Add a new stylist named John"

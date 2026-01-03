@@ -2611,12 +2611,71 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
             stylist = await resolve_stylist()
             if not stylist:
                 return OwnerChatResponse(reply="Which stylist is this for?", action=None)
+            
+            logger.info(f"[REMOVE_TIME_OFF] Stylist: {stylist.name}, Params: {params}")
             start_at_utc, end_at_utc, error = parse_time_off_range(params)
-            if error:
-                return OwnerChatResponse(reply=error, action=None)
+            
+            # If no specific time range provided, try to find all time off blocks for the date
             if not start_at_utc or not end_at_utc:
-                return OwnerChatResponse(reply="Please provide a valid start and end time.", action=None)
-            # Find and delete the time off block
+                # Try to extract just the date from the request
+                date_str = params.get("date") or (infer_date_from_messages().isoformat() if infer_date_from_messages() else None)
+                logger.info(f"[REMOVE_TIME_OFF] No time range. Date string: {date_str}")
+                if date_str:
+                    # Parse the date
+                    target_date = parse_date_str(date_str)
+                    logger.info(f"[REMOVE_TIME_OFF] Parsed date: {target_date}")
+                    if target_date:
+                        # Get timezone offset
+                        tz_offset = (
+                            int(params.get("tz_offset_minutes"))
+                            if params.get("tz_offset_minutes") is not None
+                            else get_local_tz_offset_minutes()
+                        )
+                        # Convert to UTC range for the entire day
+                        day_start_utc = to_utc_from_local(target_date, time(0, 0), tz_offset)
+                        day_end_utc = to_utc_from_local(target_date, time(23, 59), tz_offset)
+                        logger.info(f"[REMOVE_TIME_OFF] Searching between {day_start_utc} and {day_end_utc}")
+                        
+                        # Find all time off blocks for this stylist on this date
+                        result = await session.execute(
+                            select(TimeOffBlock).where(
+                                TimeOffBlock.stylist_id == stylist.id,
+                                TimeOffBlock.start_at_utc >= day_start_utc,
+                                TimeOffBlock.start_at_utc <= day_end_utc,
+                            ).order_by(TimeOffBlock.start_at_utc)
+                        )
+                        blocks = list(result.scalars().all())
+                        logger.info(f"[REMOVE_TIME_OFF] Found {len(blocks)} blocks to remove")
+                        
+                        if not blocks:
+                            return OwnerChatResponse(reply=f"No time off found for {stylist.name} on {date_str}.", action=None)
+                        
+                        # Remove all blocks for this date
+                        for block in blocks:
+                            await session.delete(block)
+                        await session.commit()
+                        logger.info(f"[REMOVE_TIME_OFF] Successfully removed {len(blocks)} blocks")
+                        
+                        # Refresh schedule
+                        schedule = await owner_schedule(
+                            date=date_str,
+                            tz_offset_minutes=tz_offset,
+                            session=session,
+                        )  # type: ignore[arg-type]
+                        data = {
+                            "stylists": await list_stylists_with_details(session, shop.id),
+                            "schedule": schedule.model_dump(),
+                        }
+                        count = len(blocks)
+                        reply_override = f"Removed {count} time off block{'s' if count > 1 else ''} for {stylist.name} on {date_str}."
+                        return OwnerChatResponse(reply=reply_override, action=None, data=data)
+                
+                # If we still don't have enough info, ask for clarification
+                if error:
+                    return OwnerChatResponse(reply=error, action=None)
+                return OwnerChatResponse(reply="Which date should I remove time off from?", action=None)
+            
+            # If specific times were provided, remove that exact block
             result = await session.execute(
                 select(TimeOffBlock).where(
                     TimeOffBlock.stylist_id == stylist.id,
@@ -2736,7 +2795,8 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
 
     except HTTPException as exc:
         return OwnerChatResponse(reply=str(exc.detail), action=None)
-    except Exception:
+    except Exception as e:
+        logger.exception(f"[OWNER_CHAT] Unexpected error: {e}")
         return OwnerChatResponse(reply="I couldn't complete that update. Please try again.", action=None)
 
     return OwnerChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
