@@ -104,6 +104,20 @@ type CustomerProfile = {
   last_booking_at: string | null;
 };
 
+type CallSummary = {
+  id: string;
+  call_sid: string;
+  customer_name: string | null;
+  customer_phone: string;
+  service: string | null;
+  stylist: string | null;
+  appointment_date: string | null;
+  appointment_time: string | null;
+  booking_status: "confirmed" | "not_confirmed" | "follow_up";
+  key_notes: string | null;
+  created_at: string;
+};
+
 type OwnerTimeOffEntry = {
   start_time: string;
   end_time: string;
@@ -237,6 +251,11 @@ export default function OwnerPage() {
   const [serviceBookingsModalOpen, setServiceBookingsModalOpen] = useState(false);
   const [selectedServiceName, setSelectedServiceName] = useState("");
   const [serviceBookingsLoading, setServiceBookingsLoading] = useState(false);
+  
+  // Call Summaries - Internal owner feature
+  const [callSummaries, setCallSummaries] = useState<CallSummary[]>([]);
+  const [callSummariesLoading, setCallSummariesLoading] = useState(false);
+  const [callSummariesExpanded, setCallSummariesExpanded] = useState(false);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -276,6 +295,24 @@ export default function OwnerPage() {
       setSelectedServiceBookings([]);
     } finally {
       setServiceBookingsLoading(false);
+    }
+  }
+
+  async function fetchCallSummaries() {
+    setCallSummariesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/owner/call-summaries?limit=20`);
+      if (!res.ok) {
+        setCallSummaries([]);
+        return;
+      }
+      const data: CallSummary[] = await res.json();
+      setCallSummaries(data);
+    } catch (err) {
+      console.error("Failed to fetch call summaries:", err);
+      setCallSummaries([]);
+    } finally {
+      setCallSummariesLoading(false);
     }
   }
 
@@ -411,6 +448,7 @@ export default function OwnerPage() {
 
   useEffect(() => {
     fetchPromos();
+    fetchCallSummaries();
   }, []);
 
   useEffect(() => {
@@ -1458,6 +1496,108 @@ export default function OwnerPage() {
             >
               Send
             </button>
+          </div>
+
+          {/* Call Summaries Section - Collapsible */}
+          <div className="mt-6 border-t border-gray-200 pt-4">
+            <button
+              onClick={() => {
+                setCallSummariesExpanded(!callSummariesExpanded);
+                if (!callSummariesExpanded && callSummaries.length === 0) {
+                  fetchCallSummaries();
+                }
+              }}
+              className="flex items-center justify-between w-full text-left"
+            >
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">📞 Recent Call Summaries</h3>
+                <p className="text-xs text-gray-500">Voice call activity for owner review</p>
+              </div>
+              <span className="text-gray-400 text-sm">
+                {callSummariesExpanded ? "▼" : "▶"}
+              </span>
+            </button>
+
+            {callSummariesExpanded && (
+              <div className="mt-4 space-y-3 max-h-80 overflow-y-auto">
+                {callSummariesLoading && (
+                  <div className="text-xs text-gray-400">Loading call summaries...</div>
+                )}
+                {!callSummariesLoading && callSummaries.length === 0 && (
+                  <div className="text-xs text-gray-400">No call summaries yet.</div>
+                )}
+                {callSummaries.map((summary) => (
+                  <div
+                    key={summary.id}
+                    className="bg-gray-50 rounded-xl p-3 border border-gray-100"
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <div>
+                        <span className="text-sm font-medium text-gray-900">
+                          {summary.customer_name || "Unknown Caller"}
+                        </span>
+                        <span className="text-xs text-gray-500 ml-2">
+                          {summary.customer_phone}
+                        </span>
+                      </div>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          summary.booking_status === "confirmed"
+                            ? "bg-green-100 text-green-700"
+                            : summary.booking_status === "follow_up"
+                            ? "bg-yellow-100 text-yellow-700"
+                            : "bg-gray-100 text-gray-600"
+                        }`}
+                      >
+                        {summary.booking_status === "confirmed"
+                          ? "✓ Confirmed"
+                          : summary.booking_status === "follow_up"
+                          ? "⚡ Follow-up"
+                          : "Not booked"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
+                      {summary.service && (
+                        <div>
+                          <span className="text-gray-400">Service:</span> {summary.service}
+                        </div>
+                      )}
+                      {summary.stylist && (
+                        <div>
+                          <span className="text-gray-400">Stylist:</span> {summary.stylist}
+                        </div>
+                      )}
+                      {summary.appointment_date && (
+                        <div>
+                          <span className="text-gray-400">Date:</span> {summary.appointment_date}
+                        </div>
+                      )}
+                      {summary.appointment_time && (
+                        <div>
+                          <span className="text-gray-400">Time:</span> {summary.appointment_time}
+                        </div>
+                      )}
+                    </div>
+                    {summary.key_notes && (
+                      <div className="mt-2 text-xs text-gray-500 italic">
+                        {summary.key_notes}
+                      </div>
+                    )}
+                    <div className="mt-2 text-[10px] text-gray-400">
+                      {new Date(summary.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                ))}
+                {callSummaries.length > 0 && (
+                  <button
+                    onClick={fetchCallSummaries}
+                    className="text-xs text-blue-600 hover:underline"
+                  >
+                    Refresh
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </section>
 

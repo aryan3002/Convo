@@ -35,6 +35,8 @@ from .voice import router as voice_router
 from .models import (
     Booking,
     BookingStatus,
+    CallSummary,
+    CallSummaryStatus,
     Customer,
     CustomerBookingStats,
     CustomerServicePreference,
@@ -887,11 +889,48 @@ async def ensure_identity_schema(conn) -> None:
             logger.warning("Schema update skipped for statement: %s (%s)", stmt, exc)
 
 
+async def ensure_call_summaries_table(conn) -> None:
+    """Create call_summaries table for owner call tracking."""
+    statements = [
+        """
+        DO $$ BEGIN
+            CREATE TYPE callsummarystatus AS ENUM ('confirmed', 'not_confirmed', 'follow_up');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS call_summaries (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            call_sid VARCHAR(64) NOT NULL UNIQUE,
+            customer_name VARCHAR(255),
+            customer_phone VARCHAR(20) NOT NULL,
+            service VARCHAR(255),
+            stylist VARCHAR(255),
+            appointment_date VARCHAR(20),
+            appointment_time VARCHAR(20),
+            booking_status callsummarystatus NOT NULL DEFAULT 'not_confirmed',
+            key_notes TEXT,
+            transcript TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_call_summaries_call_sid ON call_summaries (call_sid);",
+        "CREATE INDEX IF NOT EXISTS ix_call_summaries_created_at ON call_summaries (created_at DESC);",
+    ]
+    for stmt in statements:
+        try:
+            await conn.execute(text(stmt))
+        except Exception as exc:
+            logger.warning("Call summaries schema update skipped: %s", exc)
+
+
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_identity_schema(conn)
+        await ensure_call_summaries_table(conn)
         await conn.execute(
             text(
                 """
@@ -1155,8 +1194,55 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
             service_id = int(params.get("service_id") or 0)
             if not service_id and params.get("service_name"):
                 svc_name = str(params.get("service_name")).strip().lower()
-                result = await session.execute(select(Service).where(Service.name.ilike(f"%{svc_name}%")))
-                svc = result.scalar_one_or_none()
+                # Use better matching logic for gender-specific services
+                result = await session.execute(select(Service).order_by(Service.id))
+                all_services = result.scalars().all()
+                
+                # Try exact match first
+                for svc in all_services:
+                    if svc.name.lower() == svc_name:
+                        break
+                else:
+                    # Try fuzzy match with gender awareness
+                    normalized_input = re.sub(r"[^a-z0-9]+", " ", svc_name).strip()
+                    has_women = bool(re.search(r"\bwom[ae]n'?s?\b|\bfemale\b", normalized_input))
+                    has_men = bool(re.search(r"\bm[ae]n'?s?\b|\bmale\b", normalized_input))
+                    
+                    best_match = None
+                    best_score = 0
+                    
+                    for svc in all_services:
+                        svc_normalized = re.sub(r"[^a-z0-9]+", " ", svc.name.lower()).strip()
+                        service_has_women = bool(re.search(r"\bwom[ae]n'?s?\b", svc_normalized))
+                        service_has_men = bool(re.search(r"\bm[ae]n'?s?\b", svc_normalized))
+                        
+                        # Strict gender matching
+                        if has_women and service_has_men:
+                            continue
+                        if has_men and service_has_women:
+                            continue
+                        
+                        score = 0
+                        if svc_normalized in normalized_input or normalized_input in svc_normalized:
+                            score += 100
+                        
+                        # Word overlap
+                        input_words = set(normalized_input.split())
+                        service_words = set(svc_normalized.split())
+                        common = input_words.intersection(service_words)
+                        if common:
+                            score += len(common) * 20
+                        
+                        if has_women and service_has_women:
+                            score += 50
+                        if has_men and service_has_men:
+                            score += 50
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_match = svc
+                    
+                    svc = best_match if best_score >= 50 else None
             else:
                 svc = await fetch_service(session, service_id) if service_id else None
             if svc:
@@ -1329,12 +1415,66 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
         return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
     def match_service_in_text(text: str) -> Service | None:
+        """Match service from text with strict gender matching."""
         normalized = normalize_text(text)
+        
+        # Check for exact matches first (highest priority)
         for svc in service_list:
             svc_name = normalize_text(svc.name)
-            if svc_name and svc_name in normalized:
+            if svc_name == normalized:
                 return svc
-        return None
+        
+        # Check for gender-specific services with strict matching
+        has_women = bool(re.search(r"\bwom[ae]n'?s?\b|\bfemale\b|\blad(?:y|ies)\b", normalized))
+        has_men = bool(re.search(r"\bm[ae]n'?s?\b|\bmale\b|\bgentlem[ae]n\b", normalized))
+        
+        best_match = None
+        best_score = 0
+        
+        for svc in service_list:
+            svc_name = normalize_text(svc.name)
+            if not svc_name:
+                continue
+            
+            # Check if service is gender-specific
+            service_has_women = bool(re.search(r"\bwom[ae]n'?s?\b", svc_name))
+            service_has_men = bool(re.search(r"\bm[ae]n'?s?\b", svc_name))
+            
+            # STRICT RULE: If user specifies gender and service is gendered, they must match
+            if has_women and service_has_men:
+                continue  # User wants women's, service is men's
+            if has_men and service_has_women:
+                continue  # User wants men's, service is women's
+            
+            # Calculate match score
+            score = 0
+            
+            # Full service name is in user text
+            if svc_name in normalized:
+                score += 100
+            
+            # All words from service name appear in user text
+            service_words = set(svc_name.split())
+            user_words = set(normalized.split())
+            matching_words = service_words.intersection(user_words)
+            
+            if matching_words:
+                # Require significant word overlap
+                overlap_ratio = len(matching_words) / len(service_words)
+                score += int(overlap_ratio * 50)
+                
+                # Bonus for gender match
+                if has_women and service_has_women:
+                    score += 50
+                if has_men and service_has_men:
+                    score += 50
+            
+            if score > best_score:
+                best_score = score
+                best_match = svc
+        
+        # Only return if we have a confident match (score >= 50)
+        return best_match if best_score >= 50 else None
 
     def match_stylist_in_text(text: str) -> Stylist | None:
         normalized = normalize_text(text)
@@ -2799,7 +2939,66 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
         logger.exception(f"[OWNER_CHAT] Unexpected error: {e}")
         return OwnerChatResponse(reply="I couldn't complete that update. Please try again.", action=None)
 
-    return OwnerChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
+    # If there's a reply_override from action handling, use only that (don't duplicate with AI response)
+    final_reply = reply_override if reply_override else ai_response.reply
+    return OwnerChatResponse(reply=final_reply, action=ai_response.action, data=data)
+
+
+# ────────────────────────────────────────────────────────────────
+# Owner Call Summaries - Internal feature for voice call tracking
+# ────────────────────────────────────────────────────────────────
+
+
+class CallSummaryResponse(BaseModel):
+    """Response model for call summaries."""
+    id: str
+    call_sid: str
+    customer_name: str | None
+    customer_phone: str
+    service: str | None
+    stylist: str | None
+    appointment_date: str | None
+    appointment_time: str | None
+    booking_status: str
+    key_notes: str | None
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+
+@app.get("/owner/call-summaries", response_model=list[CallSummaryResponse])
+async def get_call_summaries(
+    limit: int = 20,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Get recent call summaries for the owner dashboard.
+    Returns the last N summaries sorted by newest first.
+    """
+    result = await session.execute(
+        select(CallSummary)
+        .order_by(CallSummary.created_at.desc())
+        .limit(limit)
+    )
+    summaries = result.scalars().all()
+    
+    return [
+        CallSummaryResponse(
+            id=str(s.id),
+            call_sid=s.call_sid,
+            customer_name=s.customer_name,
+            customer_phone=s.customer_phone,
+            service=s.service,
+            stylist=s.stylist,
+            appointment_date=s.appointment_date,
+            appointment_time=s.appointment_time,
+            booking_status=s.booking_status.value if s.booking_status else "not_confirmed",
+            key_notes=s.key_notes,
+            created_at=s.created_at.isoformat() if s.created_at else "",
+        )
+        for s in summaries
+    ]
 
 
 @app.post("/owner/promos", response_model=PromoResponse)

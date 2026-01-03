@@ -44,6 +44,7 @@ RULES:
 - For moving bookings, use reschedule_booking with from_time and to_time.
 - If required fields are missing, ask ONE short clarifying question.
 - Never invent data or confirm DB changes without an action.
+- When outputting an action, DO NOT include a confirmation message - the system will automatically confirm the action.
 - Supported availability_rule values: weekends_only, weekdays_only, weekday_evenings, none.
 - If the user says add/create/new service, use create_service (never update_service_price).
 - Use 24h time (HH:MM) and ISO dates (YYYY-MM-DD).
