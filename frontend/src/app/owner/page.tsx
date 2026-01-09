@@ -1,6 +1,40 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  MessageSquare,
+  Send,
+  Sparkles,
+  Calendar,
+  Clock,
+  User,
+  Users,
+  Scissors,
+  Tag,
+  Phone,
+  Mail,
+  ChevronDown,
+  ChevronRight,
+  X,
+  Plus,
+  Search,
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  Pause,
+  Play,
+  Trash2,
+  Gift,
+  Percent,
+  DollarSign,
+  AlertCircle,
+  Lock,
+  Unlock,
+  Shield,
+  CheckCircle,
+  XCircle,
+} from "lucide-react";
 
 type Role = "user" | "assistant" | "system";
 
@@ -123,6 +157,18 @@ type OwnerTimeOffEntry = {
   end_time: string;
   date: string;
   reason?: string | null;
+};
+
+type TimeOffRequestItem = {
+  id: number;
+  stylist_id: number;
+  start_date: string;
+  end_date: string;
+  reason: string | null;
+  status: string;
+  created_at: string;
+  reviewed_at: string | null;
+  reviewer: string | null;
 };
 
 type PromoDraft = {
@@ -257,6 +303,19 @@ export default function OwnerPage() {
   const [callSummariesLoading, setCallSummariesLoading] = useState(false);
   const [callSummariesExpanded, setCallSummariesExpanded] = useState(false);
 
+  // PIN Management
+  const [pinModalOpen, setPinModalOpen] = useState(false);
+  const [pinStylistId, setPinStylistId] = useState<number | null>(null);
+  const [pinStylistName, setPinStylistName] = useState("");
+  const [pinValue, setPinValue] = useState("");
+  const [pinLoading, setPinLoading] = useState(false);
+  const [pinStatuses, setPinStatuses] = useState<Record<number, { has_pin: boolean; pin_set_at: string | null }>>({});
+
+  // Time Off Requests (pending approval)
+  const [pendingTimeOffRequests, setPendingTimeOffRequests] = useState<TimeOffRequestItem[]>([]);
+  const [timeOffRequestsLoading, setTimeOffRequestsLoading] = useState(false);
+  const [timeOffReviewLoading, setTimeOffReviewLoading] = useState<number | null>(null);
+
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -313,6 +372,101 @@ export default function OwnerPage() {
       setCallSummaries([]);
     } finally {
       setCallSummariesLoading(false);
+    }
+  }
+
+  async function fetchPinStatus(stylistId: number) {
+    try {
+      const res = await fetch(`${API_BASE}/stylists/${stylistId}/pin-status`);
+      if (res.ok) {
+        const data = await res.json();
+        setPinStatuses((prev) => ({
+          ...prev,
+          [stylistId]: { has_pin: data.has_pin, pin_set_at: data.pin_set_at },
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to fetch PIN status:", err);
+    }
+  }
+
+  async function fetchAllPinStatuses() {
+    for (const stylist of stylists) {
+      await fetchPinStatus(stylist.id);
+    }
+  }
+
+  async function setPin(stylistId: number, pin: string) {
+    setPinLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/stylists/${stylistId}/pin`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      if (res.ok) {
+        await fetchPinStatus(stylistId);
+        setPinModalOpen(false);
+        setPinValue("");
+      }
+    } catch (err) {
+      console.error("Failed to set PIN:", err);
+    } finally {
+      setPinLoading(false);
+    }
+  }
+
+  async function removePin(stylistId: number) {
+    setPinLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/stylists/${stylistId}/pin`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        await fetchPinStatus(stylistId);
+        setPinModalOpen(false);
+      }
+    } catch (err) {
+      console.error("Failed to remove PIN:", err);
+    } finally {
+      setPinLoading(false);
+    }
+  }
+
+  async function fetchPendingTimeOffRequests() {
+    setTimeOffRequestsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/time-off-requests?status_filter=PENDING`);
+      if (res.ok) {
+        const data: TimeOffRequestItem[] = await res.json();
+        setPendingTimeOffRequests(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch time-off requests:", err);
+    } finally {
+      setTimeOffRequestsLoading(false);
+    }
+  }
+
+  async function reviewTimeOffRequest(requestId: number, action: "approve" | "reject") {
+    setTimeOffReviewLoading(requestId);
+    try {
+      const res = await fetch(`${API_BASE}/time-off-requests/${requestId}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reviewer: "Owner" }),
+      });
+      if (res.ok) {
+        await fetchPendingTimeOffRequests();
+        // Refresh schedule if approved (time off block created)
+        if (action === "approve") {
+          fetchSchedule();
+        }
+      }
+    } catch (err) {
+      console.error("Failed to review time-off request:", err);
+    } finally {
+      setTimeOffReviewLoading(null);
     }
   }
 
@@ -435,20 +589,29 @@ export default function OwnerPage() {
         if (data.stylists?.length) {
           setStylists(data.stylists);
         }
+      } else {
+        console.error("Schedule fetch failed:", res.status, res.statusText);
       }
+    } catch (error) {
+      console.error("Failed to fetch schedule:", error);
     } finally {
       setScheduleLoading(false);
     }
   }
 
   useEffect(() => {
-    fetchServices();
-    fetchSchedule();
+    if (typeof window !== 'undefined') {
+      fetchServices();
+      fetchSchedule();
+    }
   }, [scheduleDate]);
 
   useEffect(() => {
-    fetchPromos();
-    fetchCallSummaries();
+    if (typeof window !== 'undefined') {
+      fetchPromos();
+      fetchCallSummaries();
+      fetchPendingTimeOffRequests();
+    }
   }, []);
 
   useEffect(() => {
@@ -456,6 +619,12 @@ export default function OwnerPage() {
       fetchServiceBookingCounts();
     }
   }, [services]);
+
+  useEffect(() => {
+    if (stylists.length > 0) {
+      fetchAllPinStatuses();
+    }
+  }, [stylists]);
 
   async function sendMessage(text: string) {
     if (!text.trim() || isLoading) return;
@@ -989,21 +1158,55 @@ export default function OwnerPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
+    <div className="min-h-screen bg-[#0a0e1a] text-white relative">
+      {/* Background Effects */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
+        <motion.div
+          className="absolute w-[600px] h-[600px] rounded-full blur-[150px]"
+          style={{ background: "rgba(0, 212, 255, 0.08)", top: "-10%", left: "-10%" }}
+          animate={{ x: [0, 100, 50, 0], y: [0, -50, 30, 0] }}
+          transition={{ duration: 25, repeat: Infinity, ease: "linear" }}
+        />
+        <motion.div
+          className="absolute w-[500px] h-[500px] rounded-full blur-[150px]"
+          style={{ background: "rgba(168, 85, 247, 0.08)", top: "30%", right: "-5%" }}
+          animate={{ x: [0, -80, 40, 0], y: [0, 60, -30, 0] }}
+          transition={{ duration: 30, repeat: Infinity, ease: "linear" }}
+        />
+        <motion.div
+          className="absolute w-[400px] h-[400px] rounded-full blur-[150px]"
+          style={{ background: "rgba(236, 72, 153, 0.06)", bottom: "-5%", left: "30%" }}
+          animate={{ x: [0, 50, -30, 0], y: [0, -40, 60, 0] }}
+          transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+        />
+      </div>
+      {/* Grid Background */}
+      <div
+        className="fixed inset-0 pointer-events-none -z-20 opacity-30"
+        style={{
+          backgroundImage: "linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px)",
+          backgroundSize: "60px 60px",
+          maskImage: "radial-gradient(ellipse at center, black 20%, transparent 70%)",
+          WebkitMaskImage: "radial-gradient(ellipse at center, black 20%, transparent 70%)",
+        }}
+      />
       {selectedBooking && (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full animate-fadeIn relative">
+        <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 overlay">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="glass-strong rounded-2xl shadow-neon p-6 max-w-md w-full relative border border-white/10"
+          >
             <button
               onClick={() => setSelectedBooking(null)}
-              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-5 h-5" />
             </button>
             <div className="mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Booking details</h3>
-              <p className="text-xs text-gray-500">
+              <h3 className="text-lg font-semibold text-white">Booking details</h3>
+              <p className="text-xs text-gray-400">
                 {selectedBooking.secondary_service_name
                   ? `${selectedBooking.service_name} + ${selectedBooking.secondary_service_name}`
                   : selectedBooking.service_name}{" "}
@@ -1011,12 +1214,12 @@ export default function OwnerPage() {
               </p>
             </div>
             {selectedBooking.preferred_style_text && (
-              <p className="text-sm text-gray-700 whitespace-pre-wrap mb-4">
+              <p className="text-sm text-gray-300 whitespace-pre-wrap mb-4">
                 {selectedBooking.preferred_style_text}
               </p>
             )}
             {selectedBooking.preferred_style_image_url && (
-              <div className="rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
+              <div className="rounded-xl overflow-hidden border border-white/10 bg-black/30">
                 <img
                   src={selectedBooking.preferred_style_image_url}
                   alt="Preferred style"
@@ -1028,33 +1231,132 @@ export default function OwnerPage() {
               !selectedBooking.preferred_style_image_url && (
                 <p className="text-sm text-gray-500">No preferred style saved for this booking.</p>
               )}
-          </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* PIN Management Modal */}
+      {pinModalOpen && pinStylistId && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 overlay">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="glass-strong rounded-2xl shadow-neon p-6 max-w-sm w-full relative border border-white/10"
+          >
+            <button
+              onClick={() => {
+                setPinModalOpen(false);
+                setPinValue("");
+              }}
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="mb-4">
+              <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                <Shield className="w-5 h-5 text-[#00d4ff]" />
+                Employee PIN
+              </h3>
+              <p className="text-xs text-gray-400">{pinStylistName}</p>
+            </div>
+
+            {pinStatuses[pinStylistId]?.has_pin ? (
+              <div className="space-y-4">
+                <div className="glass rounded-xl p-4 border border-emerald-500/20">
+                  <div className="flex items-center gap-2 text-emerald-400 mb-2">
+                    <CheckCircle className="w-4 h-4" />
+                    <span className="text-sm font-medium">PIN is set</span>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    Set on {new Date(pinStatuses[pinStylistId].pin_set_at!).toLocaleDateString()}
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => removePin(pinStylistId)}
+                    disabled={pinLoading}
+                    className="flex-1 py-2 px-4 rounded-xl text-sm font-medium bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition-all disabled:opacity-50"
+                  >
+                    {pinLoading ? "Removing..." : "Remove PIN"}
+                  </button>
+                </div>
+                <div className="border-t border-white/10 pt-4">
+                  <p className="text-xs text-gray-400 mb-3">Or set a new PIN:</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={pinValue}
+                      onChange={(e) => setPinValue(e.target.value)}
+                      placeholder="New PIN (4-8 digits)"
+                      maxLength={8}
+                      className="flex-1 px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-gray-500 focus:outline-none focus:border-[#00d4ff]/50 text-center tracking-widest"
+                    />
+                    <button
+                      onClick={() => setPin(pinStylistId, pinValue)}
+                      disabled={pinLoading || pinValue.length < 4}
+                      className="px-4 py-2 rounded-xl text-sm font-medium bg-[#00d4ff]/20 text-[#00d4ff] border border-[#00d4ff]/30 hover:bg-[#00d4ff]/30 transition-all disabled:opacity-50"
+                    >
+                      Update
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <p className="text-sm text-gray-400">
+                  Set a 4-8 digit PIN so this employee can log in to the Employee Portal.
+                </p>
+                <input
+                  type="password"
+                  value={pinValue}
+                  onChange={(e) => setPinValue(e.target.value)}
+                  placeholder="Enter PIN (4-8 digits)"
+                  maxLength={8}
+                  className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-gray-500 focus:outline-none focus:border-[#00d4ff]/50 text-center text-xl tracking-widest"
+                />
+                <button
+                  onClick={() => setPin(pinStylistId, pinValue)}
+                  disabled={pinLoading || pinValue.length < 4}
+                  className="w-full py-3 px-4 rounded-xl text-sm font-medium bg-gradient-to-r from-[#00d4ff] to-[#00a8cc] text-black hover:shadow-lg hover:shadow-[#00d4ff]/25 transition-all disabled:opacity-50"
+                >
+                  {pinLoading ? "Setting PIN..." : "Set PIN"}
+                </button>
+              </div>
+            )}
+          </motion.div>
         </div>
       )}
 
       {serviceBookingsModalOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-2xl w-full animate-fadeIn relative max-h-[80vh] flex flex-col">
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 overlay">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="glass-strong rounded-2xl shadow-neon p-6 max-w-2xl w-full relative max-h-[80vh] flex flex-col border border-white/10"
+          >
             <button
               onClick={() => {
                 setServiceBookingsModalOpen(false);
                 setSelectedServiceBookings([]);
               }}
-              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-5 h-5" />
             </button>
             <div className="mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">{selectedServiceName}</h3>
-              <p className="text-xs text-gray-500">Upcoming bookings (next 7 days)</p>
+              <h3 className="text-lg font-semibold text-white">{selectedServiceName}</h3>
+              <p className="text-xs text-gray-400">Upcoming bookings (next 7 days)</p>
             </div>
-            <div className="flex-1 overflow-y-auto space-y-2">
+            <div className="flex-1 overflow-y-auto space-y-2 scrollbar-hide">
               {serviceBookingsLoading ? (
-                <div className="text-sm text-gray-400 text-center py-8">Loading...</div>
+                <div className="text-sm text-gray-500 text-center py-8">
+                  <div className="spinner mx-auto mb-2" />
+                  Loading...
+                </div>
               ) : selectedServiceBookings.length === 0 ? (
-                <div className="text-sm text-gray-400 text-center py-8">No bookings found</div>
+                <div className="text-sm text-gray-500 text-center py-8">No bookings found</div>
               ) : (
                 selectedServiceBookings.map((booking) => {
                   const startDate = new Date(booking.start_time);
@@ -1063,26 +1365,26 @@ export default function OwnerPage() {
                   const timeStr = `${startDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })} - ${endDate.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
                   
                   return (
-                    <div key={booking.id} className="border border-gray-100 rounded-xl p-3 hover:bg-gray-50 transition-colors">
+                    <div key={booking.id} className="glass rounded-xl p-3 hover:bg-white/5 transition-colors border border-white/5">
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1">
-                            <p className="text-sm font-medium text-gray-900">{booking.customer_name || "Guest"}</p>
+                            <p className="text-sm font-medium text-white">{booking.customer_name || "Guest"}</p>
                             <span className={`text-[10px] px-2 py-0.5 rounded-full ${
                               booking.status === "CONFIRMED"
-                                ? "bg-green-50 text-green-600"
-                                : "bg-yellow-50 text-yellow-600"
+                                ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                                : "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
                             }`}>
                               {booking.status}
                             </span>
                           </div>
-                          <p className="text-xs text-gray-600 mb-1">{dateStr} · {timeStr}</p>
+                          <p className="text-xs text-gray-400 mb-1">{dateStr} · {timeStr}</p>
                           <p className="text-xs text-gray-500">Stylist: {booking.stylist_name}</p>
                           {booking.customer_email && (
-                            <p className="text-xs text-gray-400 mt-1">{booking.customer_email}</p>
+                            <p className="text-xs text-gray-600 mt-1">{booking.customer_email}</p>
                           )}
                           {booking.customer_phone && (
-                            <p className="text-xs text-gray-400">{booking.customer_phone}</p>
+                            <p className="text-xs text-gray-600">{booking.customer_phone}</p>
                           )}
                         </div>
                       </div>
@@ -1091,29 +1393,37 @@ export default function OwnerPage() {
                 })
               )}
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
       {promoWizardOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
-          <div className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl border border-gray-100 p-6">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center overlay px-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            className="w-full max-w-2xl glass-strong rounded-2xl shadow-neon border border-white/10 p-6"
+          >
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-semibold text-gray-900">Add promotion</h3>
-                <p className="text-xs text-gray-500">Guided setup with structured options.</p>
+                <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                  <Gift className="w-5 h-5 text-[#00d4ff]" />
+                  Add promotion
+                </h3>
+                <p className="text-xs text-gray-400">Guided setup with structured options.</p>
               </div>
               <button
                 onClick={closePromoWizard}
-                className="text-gray-400 hover:text-gray-600 text-sm"
+                className="p-2 rounded-xl hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
               >
-                Close
+                <X className="w-5 h-5" />
               </button>
             </div>
 
             <div className="mt-6 space-y-4">
               {promoWizardStep === 0 && (
                 <div>
-                  <p className="text-sm font-medium text-gray-900 mb-3">Promotion type</p>
+                  <p className="text-sm font-medium text-white mb-3">Promotion type</p>
                   <div className="flex flex-wrap gap-2">
                     {PROMO_TYPES.map((option) => (
                       <button
@@ -1121,15 +1431,16 @@ export default function OwnerPage() {
                         onClick={() =>
                           setPromoDraft((prev) => ({ ...prev, type: option.value }))
                         }
-                        className={`px-4 py-2 rounded-full text-sm ${
+                        className={`px-4 py-2 rounded-full text-sm transition-all ${
                           promoDraft.type === option.value
-                            ? "bg-gray-900 text-white"
-                            : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                            ? "btn-neon"
+                            : "glass border border-white/10 text-gray-300 hover:bg-white/10 hover:text-white"
                         }`}
                       >
                         {option.label}
                       </button>
-                    ))}n                  </div>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -1137,19 +1448,19 @@ export default function OwnerPage() {
 
               {promoWizardStep === 1 && (
                 <div>
-                  <p className="text-sm font-medium text-gray-900 mb-3">Promotion copy</p>
+                  <p className="text-sm font-medium text-white mb-3">Promotion copy</p>
                   <div className="flex gap-2 mb-4">
                     {(["ai", "custom"] as const).map((mode) => (
                       <button
                         key={mode}
                         onClick={() => setPromoDraft((prev) => ({ ...prev, copy_mode: mode }))}
-                        className={`px-4 py-2 rounded-full text-sm ${
+                        className={`px-4 py-2 rounded-full text-sm transition-all ${
                           promoDraft.copy_mode === mode
-                            ? "bg-gray-900 text-white"
-                            : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                            ? "btn-neon"
+                            : "glass border border-white/10 text-gray-300 hover:bg-white/10"
                         }`}
                       >
-                        {mode === "ai" ? "AI generated" : "Write my own"}
+                        {mode === "ai" ? "✨ AI generated" : "✍️ Write my own"}
                       </button>
                     ))}
                   </div>
@@ -1159,7 +1470,7 @@ export default function OwnerPage() {
                       onChange={(e) =>
                         setPromoDraft((prev) => ({ ...prev, custom_copy: e.target.value }))
                       }
-                      className="w-full rounded-2xl border border-gray-200 p-3 text-sm focus:ring-2 focus:ring-gray-200"
+                      className="w-full rounded-xl input-glass p-3 text-sm"
                       rows={3}
                       placeholder="Enter the exact promotional line (placeholders like {service_name} are ok)."
                     />
@@ -1169,7 +1480,7 @@ export default function OwnerPage() {
 
               {promoWizardStep === 2 && (
                 <div>
-                  <p className="text-sm font-medium text-gray-900 mb-3">Discount details</p>
+                  <p className="text-sm font-medium text-white mb-3">Discount details</p>
                   <div className="flex flex-wrap gap-2 mb-4">
                     {PROMO_DISCOUNTS.map((option) => (
                       <button
@@ -1177,12 +1488,13 @@ export default function OwnerPage() {
                         onClick={() =>
                           setPromoDraft((prev) => ({ ...prev, discount_type: option.value }))
                         }
-                        className={`px-4 py-2 rounded-full text-sm ${
+                        className={`px-4 py-2 rounded-full text-sm transition-all flex items-center gap-2 ${
                           promoDraft.discount_type === option.value
-                            ? "bg-gray-900 text-white"
-                            : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                            ? "btn-neon"
+                            : "glass border border-white/10 text-gray-300 hover:bg-white/10"
                         }`}
                       >
+                        {option.value === "PERCENT" ? <Percent className="w-4 h-4" /> : <DollarSign className="w-4 h-4" />}
                         {option.label}
                       </button>
                     ))}
@@ -1198,11 +1510,11 @@ export default function OwnerPage() {
                             discount_value: e.target.value,
                           }))
                         }
-                        className="flex-1 rounded-full border border-gray-200 px-4 py-2 text-sm"
+                        className="flex-1 rounded-full input-glass px-4 py-2 text-sm"
                         placeholder={promoDraft.discount_type === "PERCENT" ? "Percent" : "Amount in USD"}
                         min={0}
                       />
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-gray-400">
                         {promoDraft.discount_type === "PERCENT" ? "%" : "USD"}
                       </span>
                     </div>
@@ -1214,7 +1526,7 @@ export default function OwnerPage() {
                       onChange={(e) =>
                         setPromoDraft((prev) => ({ ...prev, perk_description: e.target.value }))
                       }
-                      className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm"
+                      className="w-full rounded-full input-glass px-4 py-2 text-sm"
                       placeholder="Optional perk description (e.g., free beard trim)"
                     />
                   )}
@@ -1225,7 +1537,7 @@ export default function OwnerPage() {
                 <div className="space-y-4">
                   {promoDraft.type === "SERVICE_COMBO_PROMO" && (
                     <div>
-                      <p className="text-sm font-medium text-gray-900 mb-2">Service selection</p>
+                      <p className="text-sm font-medium text-white mb-2">Service selection</p>
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <select
                           value={promoDraft.service_id ?? ""}
@@ -1235,11 +1547,11 @@ export default function OwnerPage() {
                               service_id: e.target.value ? Number(e.target.value) : null,
                             }))
                           }
-                          className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm"
+                          className="w-full rounded-xl input-glass px-4 py-2 text-sm bg-transparent"
                         >
-                          <option value="">Primary service</option>
+                          <option value="" className="bg-[#0f1629]">Primary service</option>
                           {services.map((svc) => (
-                            <option key={svc.id} value={svc.id}>
+                            <option key={svc.id} value={svc.id} className="bg-[#0f1629]">
                               {svc.name}
                             </option>
                           ))}
@@ -1252,18 +1564,19 @@ export default function OwnerPage() {
                               combo_secondary_service_id: e.target.value ? Number(e.target.value) : null,
                             }))
                           }
-                          className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm"
+                          className="w-full rounded-xl input-glass px-4 py-2 text-sm bg-transparent"
                         >
-                          <option value="">Secondary service</option>
+                          <option value="" className="bg-[#0f1629]">Secondary service</option>
                           {services.map((svc) => (
-                            <option key={svc.id} value={svc.id}>
+                            <option key={svc.id} value={svc.id} className="bg-[#0f1629]">
                               {svc.name}
                             </option>
                           ))}
                         </select>
                       </div>
                       {services.length === 0 && (
-                        <p className="text-xs text-red-500 mt-2">
+                        <p className="text-xs text-red-400 mt-2 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" />
                           Add a service before creating a combo promotion.
                         </p>
                       )}
@@ -1272,57 +1585,57 @@ export default function OwnerPage() {
                   {promoDraft.type === "SEASONAL_PROMO" && (
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="text-xs text-gray-500">Start date</label>
+                        <label className="text-xs text-gray-400 mb-1 block">Start date</label>
                         <input
                           type="date"
                           value={promoDraft.start_at}
                           onChange={(e) =>
                             setPromoDraft((prev) => ({ ...prev, start_at: e.target.value }))
                           }
-                          className="w-full rounded-full border border-gray-200 px-3 py-2 text-sm"
+                          className="w-full rounded-xl input-glass px-3 py-2 text-sm"
                         />
                       </div>
                       <div>
-                        <label className="text-xs text-gray-500">End date</label>
+                        <label className="text-xs text-gray-400 mb-1 block">End date</label>
                         <input
                           type="date"
                           value={promoDraft.end_at}
                           onChange={(e) =>
                             setPromoDraft((prev) => ({ ...prev, end_at: e.target.value }))
                           }
-                          className="w-full rounded-full border border-gray-200 px-3 py-2 text-sm"
+                          className="w-full rounded-xl input-glass px-3 py-2 text-sm"
                         />
                       </div>
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="text-xs text-gray-500">Minimum spend (USD)</label>
+                      <label className="text-xs text-gray-400 mb-1 block">Minimum spend (USD)</label>
                       <input
                         type="number"
                         value={promoDraft.min_spend}
                         onChange={(e) =>
                           setPromoDraft((prev) => ({ ...prev, min_spend: e.target.value }))
                         }
-                        className="w-full rounded-full border border-gray-200 px-3 py-2 text-sm"
+                        className="w-full rounded-xl input-glass px-3 py-2 text-sm"
                         min={0}
                       />
                     </div>
                     <div>
-                      <label className="text-xs text-gray-500">Usage limit per customer</label>
+                      <label className="text-xs text-gray-400 mb-1 block">Usage limit per customer</label>
                       <input
                         type="number"
                         value={promoDraft.usage_limit}
                         onChange={(e) =>
                           setPromoDraft((prev) => ({ ...prev, usage_limit: e.target.value }))
                         }
-                        className="w-full rounded-full border border-gray-200 px-3 py-2 text-sm"
+                        className="w-full rounded-xl input-glass px-3 py-2 text-sm"
                         min={0}
                       />
                     </div>
                   </div>
                   <div>
-                    <label className="text-xs text-gray-500 mb-2 block">Valid days</label>
+                    <label className="text-xs text-gray-400 mb-2 block">Valid days</label>
                     <div className="flex flex-wrap gap-2">
                       {DAY_OPTIONS.map((day) => (
                         <button
@@ -1338,10 +1651,10 @@ export default function OwnerPage() {
                               };
                             })
                           }
-                          className={`px-3 py-1 rounded-full text-xs ${
+                          className={`px-3 py-1 rounded-full text-xs transition-all ${
                             promoDraft.valid_days.includes(day.value)
-                              ? "bg-gray-900 text-white"
-                              : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                              ? "bg-[#00d4ff] text-black font-medium"
+                              : "glass border border-white/10 text-gray-400 hover:bg-white/10"
                           }`}
                         >
                           {day.label}
@@ -1354,21 +1667,22 @@ export default function OwnerPage() {
 
               {promoWizardStep === 4 && (
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between glass rounded-xl p-4">
                     <div>
-                      <p className="text-sm font-medium text-gray-900">Activation</p>
-                      <p className="text-xs text-gray-500">Enable or pause the promotion.</p>
+                      <p className="text-sm font-medium text-white">Activation</p>
+                      <p className="text-xs text-gray-400">Enable or pause the promotion.</p>
                     </div>
                     <button
                       onClick={() =>
                         setPromoDraft((prev) => ({ ...prev, active: !prev.active }))
                       }
-                      className={`px-4 py-2 rounded-full text-sm ${
+                      className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
                         promoDraft.active
-                          ? "bg-green-600 text-white"
-                          : "bg-gray-100 text-gray-600"
+                          ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                          : "glass border border-white/10 text-gray-400"
                       }`}
                     >
+                      {promoDraft.active ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
                       {promoDraft.active ? "Active" : "Paused"}
                     </button>
                   </div>
@@ -1376,7 +1690,8 @@ export default function OwnerPage() {
               )}
 
               {promoWizardError && (
-                <div className="rounded-xl bg-red-50 border border-red-100 text-red-700 text-xs px-3 py-2">
+                <div className="rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs px-3 py-2 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />
                   {promoWizardError}
                 </div>
               )}
@@ -1386,69 +1701,98 @@ export default function OwnerPage() {
               <button
                 onClick={handlePromoBack}
                 disabled={promoWizardStep === 0}
-                className="px-4 py-2 rounded-full text-sm text-gray-600 border border-gray-200 disabled:opacity-50"
+                className="px-4 py-2 rounded-full text-sm glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2"
               >
+                <ArrowLeft className="w-4 h-4" />
                 Back
               </button>
               {promoWizardStep < 4 ? (
                 <button
                   onClick={handlePromoNext}
-                  className="px-5 py-2 rounded-full bg-gray-900 text-white text-sm"
+                  className="px-5 py-2 rounded-full btn-neon text-sm flex items-center gap-2"
                 >
                   Next
+                  <ArrowRight className="w-4 h-4" />
                 </button>
               ) : (
                 <button
                   onClick={handlePromoCreate}
                   disabled={promoSaving}
-                  className="px-5 py-2 rounded-full bg-blue-600 text-white text-sm disabled:opacity-60"
+                  className="px-5 py-2 rounded-full btn-neon text-sm disabled:opacity-60 flex items-center gap-2"
                 >
-                  {promoSaving ? "Saving..." : "Create promotion"}
+                  {promoSaving ? (
+                    <>
+                      <div className="spinner w-4 h-4" />
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4" />
+                      Create promotion
+                    </>
+                  )}
                 </button>
               )}
             </div>
-          </div>
+          </motion.div>
         </div>
       )}
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-100">
+      <header className="sticky top-0 z-50 glass border-b border-white/5">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900">Owner GPT</h1>
-            <p className="text-sm text-gray-500">Service management console</p>
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#00d4ff] to-[#a855f7] flex items-center justify-center shadow-glow-blue">
+              <MessageSquare className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold gradient-text">Owner GPT</h1>
+              <p className="text-xs text-gray-500">Service management console</p>
+            </div>
           </div>
-          <span className="text-xs px-3 py-1 rounded-full bg-gray-100 text-gray-600">
+          <span className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             Internal only
           </span>
         </div>
       </header>
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 grid lg:grid-cols-[1.2fr_0.8fr] gap-6">
-        <section className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-          <div className="space-y-4 max-h-96 overflow-y-auto">
-            {messages.map((msg) => (
-              <div
+        <section className="glass-card rounded-2xl p-6 border border-white/5">
+          <div className="space-y-4 max-h-96 overflow-y-auto scrollbar-hide">
+            {messages.map((msg, index) => (
+              <motion.div
                 key={msg.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.3, delay: index * 0.05 }}
                 className={`max-w-[80%] px-4 py-3 rounded-2xl text-sm ${
                   msg.role === "assistant"
-                    ? "bg-gray-100 text-gray-800"
-                    : "bg-gray-900 text-white ml-auto"
+                    ? "glass border border-white/5 text-gray-200"
+                    : "bg-gradient-to-r from-[#00d4ff] to-[#a855f7] text-white ml-auto shadow-neon"
                 }`}
               >
                 {msg.text}
-              </div>
+              </motion.div>
             ))}
             {isLoading && (
-              <div className="text-sm text-gray-400">Thinking...</div>
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <div className="spinner" />
+                Thinking...
+              </div>
             )}
             <div ref={bottomRef} />
           </div>
 
           <div className="mt-6">
-            <p className="text-xs text-gray-500 mb-3">Quick actions</p>
+            <p className="text-xs text-gray-500 mb-3 flex items-center gap-2">
+              <Sparkles className="w-3 h-3 text-[#00d4ff]" />
+              Quick actions
+            </p>
             <div className="flex flex-wrap gap-2">
               {quickActions.map((action) => (
-                <button
+                <motion.button
                   key={action}
+                  whileHover={{ scale: 1.02, y: -1 }}
+                  whileTap={{ scale: 0.98 }}
                   onClick={() => {
                     if (action === "Add promotions") {
                       openPromoWizard();
@@ -1456,24 +1800,26 @@ export default function OwnerPage() {
                       sendMessage(action);
                     }
                   }}
-                  className="px-3 py-2 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs transition-colors"
+                  className="px-3 py-2 rounded-full glass border border-white/10 hover:bg-white/10 text-gray-300 hover:text-white text-xs transition-all"
                 >
                   {action}
-                </button>
+                </motion.button>
               ))}
             </div>
             {suggestedChips.length > 0 && (
               <div className="mt-4">
-                <p className="text-xs text-gray-400 mb-2">Suggested</p>
+                <p className="text-xs text-gray-500 mb-2">Suggested</p>
                 <div className="flex flex-wrap gap-2">
                   {suggestedChips.map((chip) => (
-                    <button
+                    <motion.button
                       key={chip}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
                       onClick={() => sendMessage(chip)}
-                      className="px-3 py-2 rounded-full bg-blue-50 text-blue-700 text-xs hover:bg-blue-100 transition-colors"
+                      className="px-3 py-2 rounded-full bg-[#00d4ff]/10 text-[#00d4ff] text-xs hover:bg-[#00d4ff]/20 transition-all border border-[#00d4ff]/30"
                     >
                       {chip}
-                    </button>
+                    </motion.button>
                   ))}
                 </div>
               </div>
@@ -1488,18 +1834,21 @@ export default function OwnerPage() {
                 if (e.key === "Enter") sendMessage(inputValue);
               }}
               placeholder="Type an owner command..."
-              className="flex-1 px-4 py-3 rounded-full border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-200"
+              className="flex-1 px-4 py-3 rounded-full input-glass text-sm"
             />
-            <button
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               onClick={() => sendMessage(inputValue)}
-              className="px-5 py-3 rounded-full bg-gray-900 text-white text-sm font-medium hover:bg-gray-800 transition-colors"
+              className="px-5 py-3 rounded-full btn-neon text-sm font-medium flex items-center gap-2"
             >
+              <Send className="w-4 h-4" />
               Send
-            </button>
+            </motion.button>
           </div>
 
           {/* Call Summaries Section - Collapsible */}
-          <div className="mt-6 border-t border-gray-200 pt-4">
+          <div className="mt-6 border-t border-white/5 pt-4">
             <button
               onClick={() => {
                 setCallSummariesExpanded(!callSummariesExpanded);
@@ -1507,273 +1856,460 @@ export default function OwnerPage() {
                   fetchCallSummaries();
                 }
               }}
-              className="flex items-center justify-between w-full text-left"
+              className="flex items-center justify-between w-full text-left group"
             >
-              <div>
-                <h3 className="text-sm font-semibold text-gray-900">📞 Recent Call Summaries</h3>
-                <p className="text-xs text-gray-500">Voice call activity for owner review</p>
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-[#a855f7]/20 flex items-center justify-center">
+                  <Phone className="w-4 h-4 text-[#a855f7]" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Recent Call Summaries</h3>
+                  <p className="text-xs text-gray-500">Voice call activity for owner review</p>
+                </div>
               </div>
-              <span className="text-gray-400 text-sm">
-                {callSummariesExpanded ? "▼" : "▶"}
-              </span>
+              <motion.span
+                animate={{ rotate: callSummariesExpanded ? 90 : 0 }}
+                className="text-gray-500 group-hover:text-white transition-colors"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </motion.span>
             </button>
 
-            {callSummariesExpanded && (
-              <div className="mt-4 space-y-3 max-h-80 overflow-y-auto">
-                {callSummariesLoading && (
-                  <div className="text-xs text-gray-400">Loading call summaries...</div>
-                )}
-                {!callSummariesLoading && callSummaries.length === 0 && (
-                  <div className="text-xs text-gray-400">No call summaries yet.</div>
-                )}
-                {callSummaries.map((summary) => (
-                  <div
-                    key={summary.id}
-                    className="bg-gray-50 rounded-xl p-3 border border-gray-100"
-                  >
-                    <div className="flex justify-between items-start mb-2">
-                      <div>
-                        <span className="text-sm font-medium text-gray-900">
-                          {summary.customer_name || "Unknown Caller"}
-                        </span>
-                        <span className="text-xs text-gray-500 ml-2">
-                          {summary.customer_phone}
-                        </span>
-                      </div>
-                      <span
-                        className={`text-xs px-2 py-0.5 rounded-full ${
-                          summary.booking_status === "confirmed"
-                            ? "bg-green-100 text-green-700"
+            <AnimatePresence>
+              {callSummariesExpanded && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className="mt-4 space-y-3 max-h-80 overflow-y-auto scrollbar-hide"
+                >
+                  {callSummariesLoading && (
+                    <div className="text-xs text-gray-500 flex items-center gap-2">
+                      <div className="spinner w-4 h-4" />
+                      Loading call summaries...
+                    </div>
+                  )}
+                  {!callSummariesLoading && callSummaries.length === 0 && (
+                    <div className="text-xs text-gray-500">No call summaries yet.</div>
+                  )}
+                  {callSummaries.map((summary) => (
+                    <motion.div
+                      key={summary.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="glass rounded-xl p-3 border border-white/5"
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                          <span className="text-sm font-medium text-white">
+                            {summary.customer_name || "Unknown Caller"}
+                          </span>
+                          <span className="text-xs text-gray-500 ml-2">
+                            {summary.customer_phone}
+                          </span>
+                        </div>
+                        <span
+                          className={`text-xs px-2 py-0.5 rounded-full ${
+                            summary.booking_status === "confirmed"
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                              : summary.booking_status === "follow_up"
+                              ? "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
+                              : "glass border border-white/10 text-gray-400"
+                          }`}
+                        >
+                          {summary.booking_status === "confirmed"
+                            ? "✓ Confirmed"
                             : summary.booking_status === "follow_up"
-                            ? "bg-yellow-100 text-yellow-700"
-                            : "bg-gray-100 text-gray-600"
-                        }`}
-                      >
-                        {summary.booking_status === "confirmed"
-                          ? "✓ Confirmed"
-                          : summary.booking_status === "follow_up"
-                          ? "⚡ Follow-up"
-                          : "Not booked"}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
-                      {summary.service && (
-                        <div>
-                          <span className="text-gray-400">Service:</span> {summary.service}
-                        </div>
-                      )}
-                      {summary.stylist && (
-                        <div>
-                          <span className="text-gray-400">Stylist:</span> {summary.stylist}
-                        </div>
-                      )}
-                      {summary.appointment_date && (
-                        <div>
-                          <span className="text-gray-400">Date:</span> {summary.appointment_date}
-                        </div>
-                      )}
-                      {summary.appointment_time && (
-                        <div>
-                          <span className="text-gray-400">Time:</span> {summary.appointment_time}
-                        </div>
-                      )}
-                    </div>
-                    {summary.key_notes && (
-                      <div className="mt-2 text-xs text-gray-500 italic">
-                        {summary.key_notes}
+                            ? "⚡ Follow-up"
+                            : "Not booked"}
+                        </span>
                       </div>
-                    )}
-                    <div className="mt-2 text-[10px] text-gray-400">
-                      {new Date(summary.created_at).toLocaleString()}
-                    </div>
-                  </div>
-                ))}
-                {callSummaries.length > 0 && (
-                  <button
-                    onClick={fetchCallSummaries}
-                    className="text-xs text-blue-600 hover:underline"
-                  >
-                    Refresh
-                  </button>
-                )}
+                      <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
+                        {summary.service && (
+                          <div className="flex items-center gap-1">
+                            <Scissors className="w-3 h-3" />
+                            {summary.service}
+                          </div>
+                        )}
+                        {summary.stylist && (
+                          <div className="flex items-center gap-1">
+                            <User className="w-3 h-3" />
+                            {summary.stylist}
+                          </div>
+                        )}
+                        {summary.appointment_date && (
+                          <div className="flex items-center gap-1">
+                            <Calendar className="w-3 h-3" />
+                            {summary.appointment_date}
+                          </div>
+                        )}
+                        {summary.appointment_time && (
+                          <div className="flex items-center gap-1">
+                            <Clock className="w-3 h-3" />
+                            {summary.appointment_time}
+                          </div>
+                        )}
+                      </div>
+                      {summary.key_notes && (
+                        <div className="mt-2 text-xs text-gray-500 italic">
+                          {summary.key_notes}
+                        </div>
+                      )}
+                      <div className="mt-2 text-[10px] text-gray-600">
+                        {new Date(summary.created_at).toLocaleString()}
+                      </div>
+                    </motion.div>
+                  ))}
+                  {callSummaries.length > 0 && (
+                    <button
+                      onClick={fetchCallSummaries}
+                      className="text-xs text-[#00d4ff] hover:underline"
+                    >
+                      Refresh
+                    </button>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Time Off Requests Section */}
+          <div className="glass-card rounded-2xl p-4 border border-white/5">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-amber-400" />
+                Pending Time Off Requests
+              </h3>
+              <button
+                onClick={fetchPendingTimeOffRequests}
+                disabled={timeOffRequestsLoading}
+                className="text-xs text-gray-400 hover:text-[#00d4ff] transition-colors"
+              >
+                {timeOffRequestsLoading ? "Loading..." : "Refresh"}
+              </button>
+            </div>
+
+            {timeOffRequestsLoading && pendingTimeOffRequests.length === 0 ? (
+              <div className="text-xs text-gray-500 flex items-center gap-2">
+                <div className="spinner w-4 h-4" />
+                Loading...
+              </div>
+            ) : pendingTimeOffRequests.length === 0 ? (
+              <div className="text-xs text-gray-500 py-4 text-center">
+                No pending requests
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-64 overflow-y-auto scrollbar-hide">
+                {pendingTimeOffRequests.map((request) => {
+                  const stylist = stylists.find((s) => s.id === request.stylist_id);
+                  return (
+                    <motion.div
+                      key={request.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="glass rounded-xl p-3 border border-amber-500/20"
+                    >
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                          <span className="text-sm font-medium text-white">
+                            {stylist?.name || `Stylist #${request.stylist_id}`}
+                          </span>
+                          <span className="text-xs text-amber-400 ml-2 px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/30">
+                            Pending
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-xs text-gray-400 mb-2">
+                        <span className="flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          {new Date(request.start_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                          {request.start_date !== request.end_date && (
+                            <> - {new Date(request.end_date).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</>
+                          )}
+                        </span>
+                        {request.reason && (
+                          <p className="mt-1 text-gray-500 italic">{request.reason}</p>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => reviewTimeOffRequest(request.id, "approve")}
+                          disabled={timeOffReviewLoading === request.id}
+                          className="flex-1 py-1.5 px-3 rounded-lg text-xs font-medium bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 transition-all flex items-center justify-center gap-1 disabled:opacity-50"
+                        >
+                          <CheckCircle className="w-3 h-3" />
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => reviewTimeOffRequest(request.id, "reject")}
+                          disabled={timeOffReviewLoading === request.id}
+                          className="flex-1 py-1.5 px-3 rounded-lg text-xs font-medium bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/30 transition-all flex items-center justify-center gap-1 disabled:opacity-50"
+                        >
+                          <XCircle className="w-3 h-3" />
+                          Reject
+                        </button>
+                      </div>
+                    </motion.div>
+                  );
+                })}
               </div>
             )}
           </div>
         </section>
 
         <aside className="space-y-6">
-          <div className="flex gap-2">
+          <div className="flex gap-2 p-1 glass rounded-full">
             <button
               onClick={() => setRightView('services')}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+              className={`flex-1 px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center justify-center gap-2 ${
                 rightView === 'services'
-                  ? 'bg-gray-900 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  ? 'btn-neon'
+                  : 'text-gray-400 hover:text-white hover:bg-white/5'
               }`}
             >
+              <Scissors className="w-4 h-4" />
               Services
             </button>
             <button
               onClick={() => setRightView('stylists')}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+              className={`flex-1 px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center justify-center gap-2 ${
                 rightView === 'stylists'
-                  ? 'bg-gray-900 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  ? 'btn-neon'
+                  : 'text-gray-400 hover:text-white hover:bg-white/5'
               }`}
             >
+              <Users className="w-4 h-4" />
               Stylists
             </button>
             <button
               onClick={() => setRightView('promos')}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+              className={`flex-1 px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center justify-center gap-2 ${
                 rightView === 'promos'
-                  ? 'bg-gray-900 text-white'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  ? 'btn-neon'
+                  : 'text-gray-400 hover:text-white hover:bg-white/5'
               }`}
             >
-              Promotions
+              <Tag className="w-4 h-4" />
+              Promos
             </button>
           </div>
 
           {rightView === 'services' && (
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-              <h2 className="text-sm font-semibold text-gray-900 mb-2">Current services</h2>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card rounded-2xl p-6 border border-white/5"
+            >
+              <h2 className="text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                <Scissors className="w-4 h-4 text-[#00d4ff]" />
+                Current services
+              </h2>
               <p className="text-xs text-gray-500 mb-4">Live view from the database.</p>
               <div className="space-y-3">
                 {services.length === 0 && (
-                  <div className="text-xs text-gray-400">No services loaded yet.</div>
+                  <div className="text-xs text-gray-500">No services loaded yet.</div>
                 )}
                 {services.map((svc) => {
                   const count = serviceBookingCounts[svc.id] || 0;
                   return (
-                    <div key={svc.id} className="border border-gray-100 rounded-2xl p-3">
+                    <motion.div
+                      key={svc.id}
+                      whileHover={{ scale: 1.01 }}
+                      className="glass rounded-xl p-3 border border-white/5 hover:border-[#00d4ff]/30 transition-all"
+                    >
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-sm font-medium text-gray-900">{svc.name}</p>
-                          <p className="text-xs text-gray-500">
-                            {svc.duration_minutes} min · {formatMoney(svc.price_cents)}
+                          <p className="text-sm font-medium text-white">{svc.name}</p>
+                          <p className="text-xs text-gray-500 flex items-center gap-2 mt-1">
+                            <Clock className="w-3 h-3" />
+                            {svc.duration_minutes} min
+                            <span className="text-[#00d4ff]">·</span>
+                            <DollarSign className="w-3 h-3" />
+                            {formatMoney(svc.price_cents)}
                           </p>
                         </div>
                         <button
                           type="button"
                           onClick={() => count > 0 && fetchServiceBookings(svc.id, svc.name)}
                           disabled={count === 0}
-                          className={`text-[11px] px-2 py-1 rounded-full transition-colors ${
+                          className={`text-[11px] px-2 py-1 rounded-full transition-all ${
                             count > 0
-                              ? "bg-blue-50 text-blue-600 hover:bg-blue-100 cursor-pointer"
-                              : "bg-gray-100 text-gray-500 cursor-default"
+                              ? "bg-[#00d4ff]/10 text-[#00d4ff] hover:bg-[#00d4ff]/20 cursor-pointer border border-[#00d4ff]/30"
+                              : "glass border border-white/10 text-gray-600 cursor-default"
                           }`}
                         >
                           {count > 0 ? `${count} booking${count === 1 ? "" : "s"}` : "none"}
                         </button>
                       </div>
-                    </div>
+                    </motion.div>
                   );
                 })}
               </div>
-            </div>
+            </motion.div>
           )}
 
           {rightView === 'stylists' && (
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-              <h2 className="text-sm font-semibold text-gray-900 mb-2">Current stylists</h2>
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card rounded-2xl p-6 border border-white/5"
+            >
+              <h2 className="text-sm font-semibold text-white mb-2 flex items-center gap-2">
+                <Users className="w-4 h-4 text-[#a855f7]" />
+                Current stylists
+              </h2>
               <p className="text-xs text-gray-500 mb-4">Hours, specialties, and time off.</p>
               <div className="space-y-3">
                 {stylists.length === 0 && (
-                  <div className="text-xs text-gray-400">No stylists loaded yet.</div>
+                  <div className="text-xs text-gray-500">No stylists loaded yet.</div>
                 )}
               {stylists.map((stylist) => (
-                <div key={stylist.id} className="border border-gray-100 rounded-2xl p-3">
+                <motion.div
+                  key={stylist.id}
+                  whileHover={{ scale: 1.01 }}
+                  className="glass rounded-xl p-3 border border-white/5 hover:border-[#a855f7]/30 transition-all"
+                >
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-sm font-medium text-gray-900">{stylist.name}</p>
-                      <p className="text-xs text-gray-500">
+                      <p className="text-sm font-medium text-white">{stylist.name}</p>
+                      <p className="text-xs text-gray-500 flex items-center gap-1 mt-1">
+                        <Clock className="w-3 h-3" />
                         {stylist.work_start}–{stylist.work_end}
                       </p>
-                      <p className="text-xs text-gray-500">
+                      <p className="text-xs text-gray-500 mt-1">
                         {stylist.specialties.length > 0
                           ? stylist.specialties.join(", ")
                           : "No specialties"}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const next = timeOffOpenStylistId === stylist.id ? null : stylist.id;
-                        setTimeOffOpenStylistId(next);
-                        if (next) {
-                          fetchTimeOffForStylist(stylist.id);
-                        }
-                      }}
-                      className="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
-                    >
-                      {stylist.time_off_count} {stylist.time_off_count === 1 ? "day" : "days"} off
-                    </button>
-                  </div>
-                  {timeOffOpenStylistId === stylist.id && (
-                    <div className="mt-3 border border-gray-100 rounded-xl bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                      {timeOffLoading && !timeOffEntries[stylist.id] && (
-                        <div className="text-gray-400">Loading time off...</div>
-                      )}
-                      {!timeOffLoading && (timeOffEntries[stylist.id]?.length ?? 0) === 0 && (
-                        <div className="text-gray-400">No time off logged.</div>
-                      )}
-                      {timeOffEntries[stylist.id]?.length ? (
-                        <div className="space-y-2">
-                          {summarizeTimeOff(timeOffEntries[stylist.id]).map((entry) => (
-                            <div key={`${stylist.id}-${entry.date}`} className="flex items-start justify-between gap-3">
-                              <div>
-                                <div className="text-[11px] font-semibold text-gray-700">
-                                  {formatDateLabel(entry.date)}
-                                </div>
-                                <div className="text-[11px] text-gray-500">
-                                  {entry.blocks
-                                    .map(
-                                      (block) =>
-                                        `${formatTimeLabel(minutesToTimeValue(block.start))}–${formatTimeLabel(
-                                          minutesToTimeValue(block.end)
-                                        )}`
-                                    )
-                                    .join(", ")}
-                                </div>
-                              </div>
-                              <div className="text-[11px] font-semibold text-gray-700">
-                                {formatDuration(entry.totalMinutes)}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
+                    <div className="flex flex-col gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPinStylistId(stylist.id);
+                          setPinStylistName(stylist.name);
+                          setPinValue("");
+                          setPinModalOpen(true);
+                        }}
+                        className={`text-[11px] px-2 py-1 rounded-full flex items-center gap-1 transition-all ${
+                          pinStatuses[stylist.id]?.has_pin
+                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20"
+                            : "glass border border-white/10 text-gray-400 hover:bg-white/10 hover:text-white"
+                        }`}
+                      >
+                        {pinStatuses[stylist.id]?.has_pin ? (
+                          <>
+                            <Lock className="w-3 h-3" />
+                            PIN Set
+                          </>
+                        ) : (
+                          <>
+                            <Unlock className="w-3 h-3" />
+                            Set PIN
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = timeOffOpenStylistId === stylist.id ? null : stylist.id;
+                          setTimeOffOpenStylistId(next);
+                          if (next) {
+                            fetchTimeOffForStylist(stylist.id);
+                          }
+                        }}
+                        className="text-[11px] px-2 py-1 rounded-full glass border border-white/10 text-gray-400 hover:bg-white/10 hover:text-white transition-all"
+                      >
+                        {stylist.time_off_count} {stylist.time_off_count === 1 ? "day" : "days"} off
+                      </button>
                     </div>
-                  )}
-                </div>
+                  </div>
+                  <AnimatePresence>
+                    {timeOffOpenStylistId === stylist.id && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        className="mt-3 glass rounded-xl px-3 py-2 text-xs text-gray-400 border border-white/5"
+                      >
+                        {timeOffLoading && !timeOffEntries[stylist.id] && (
+                          <div className="flex items-center gap-2">
+                            <div className="spinner w-3 h-3" />
+                            Loading time off...
+                          </div>
+                        )}
+                        {!timeOffLoading && (timeOffEntries[stylist.id]?.length ?? 0) === 0 && (
+                          <div className="text-gray-500">No time off logged.</div>
+                        )}
+                        {timeOffEntries[stylist.id]?.length ? (
+                          <div className="space-y-2">
+                            {summarizeTimeOff(timeOffEntries[stylist.id]).map((entry) => (
+                              <div key={`${stylist.id}-${entry.date}`} className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div className="text-[11px] font-semibold text-white">
+                                    {formatDateLabel(entry.date)}
+                                  </div>
+                                  <div className="text-[11px] text-gray-500">
+                                    {entry.blocks
+                                      .map(
+                                        (block) =>
+                                          `${formatTimeLabel(minutesToTimeValue(block.start))}–${formatTimeLabel(
+                                            minutesToTimeValue(block.end)
+                                          )}`
+                                      )
+                                      .join(", ")}
+                                  </div>
+                                </div>
+                                <div className="text-[11px] font-semibold text-[#00d4ff]">
+                                  {formatDuration(entry.totalMinutes)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </motion.div>
               ))}
             </div>
-          </div>
+          </motion.div>
           )}
 
           {rightView === 'promos' && (
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card rounded-2xl p-6 border border-white/5"
+            >
               <div className="flex items-start justify-between gap-3 mb-4">
                 <div>
-                  <h2 className="text-sm font-semibold text-gray-900">Current promotions</h2>
+                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <Tag className="w-4 h-4 text-[#ec4899]" />
+                    Current promotions
+                  </h2>
                   <p className="text-xs text-gray-500">Live view from the database.</p>
                 </div>
-                <button
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
                   onClick={openPromoWizard}
-                  className="px-3 py-2 rounded-full bg-gray-900 text-white text-xs"
+                  className="px-3 py-2 rounded-full btn-neon text-xs flex items-center gap-1"
                 >
-                  Add promotion
-                </button>
+                  <Plus className="w-3 h-3" />
+                  Add
+                </motion.button>
               </div>
               <div className="space-y-3">
                 {promos.length === 0 && (
-                  <div className="text-xs text-gray-400">No promotions configured yet.</div>
+                  <div className="text-xs text-gray-500">No promotions configured yet.</div>
                 )}
                 {promos.map((promo) => (
-                  <div
+                  <motion.div
                     key={promo.id}
-                    className="border border-gray-100 rounded-2xl p-3 hover:border-gray-200 transition-colors"
+                    whileHover={{ scale: 1.01 }}
+                    className="glass rounded-xl p-3 border border-white/5 hover:border-[#ec4899]/30 transition-all cursor-pointer"
                     onClick={() =>
                       setPromoActionOpenId((prev) => (prev === promo.id ? null : promo.id))
                     }
@@ -1787,13 +2323,13 @@ export default function OwnerPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="text-sm font-medium text-gray-900">
+                        <p className="text-sm font-medium text-white">
                           {formatPromoType(promo.type)}
                         </p>
-                        <p className="text-xs text-gray-500">
+                        <p className="text-xs text-gray-400 mt-1">
                           {formatPromoDiscount(promo)} · {formatPromoTrigger(promo.trigger_point)}
                         </p>
-                        <p className="text-[11px] text-gray-400">
+                        <p className="text-[11px] text-gray-500 mt-1">
                           {formatPromoWindow(promo)}
                         </p>
                         {formatPromoServices(promo) && (
@@ -1801,50 +2337,67 @@ export default function OwnerPage() {
                             {formatPromoServices(promo)}
                           </p>
                         )}
-                        <p className="text-[11px] text-gray-400">Promo ID: {promo.id}</p>
+                        <p className="text-[11px] text-gray-600 mt-1">ID: {promo.id}</p>
                       </div>
                       <span
                         className={`text-[11px] px-2 py-1 rounded-full ${
                           promo.active
-                            ? "bg-green-100 text-green-700"
-                            : "bg-gray-100 text-gray-500"
+                            ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
+                            : "glass border border-white/10 text-gray-500"
                         }`}
                       >
                         {promo.active ? "Active" : "Paused"}
                       </span>
                     </div>
-                    {promoActionOpenId === promo.id && (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            togglePromoActive(promo);
-                          }}
-                          disabled={promoActionLoading}
-                          className="px-3 py-1 rounded-full text-xs bg-gray-900 text-white disabled:opacity-60"
+                    <AnimatePresence>
+                      {promoActionOpenId === promo.id && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: "auto", opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          className="mt-3 flex flex-wrap gap-2"
                         >
-                          {promo.active ? "Pause" : "Activate"}
-                        </button>
-                        <button
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            removePromo(promo.id);
-                          }}
-                          disabled={promoActionLoading}
-                          className="px-3 py-1 rounded-full text-xs bg-red-600 text-white disabled:opacity-60"
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                          <button
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              togglePromoActive(promo);
+                            }}
+                            disabled={promoActionLoading}
+                            className="px-3 py-1.5 rounded-full text-xs glass border border-white/10 hover:bg-white/10 text-white disabled:opacity-60 flex items-center gap-1 transition-all"
+                          >
+                            {promo.active ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                            {promo.active ? "Pause" : "Activate"}
+                          </button>
+                          <button
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              removePromo(promo.id);
+                            }}
+                            disabled={promoActionLoading}
+                            className="px-3 py-1.5 rounded-full text-xs bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 disabled:opacity-60 flex items-center gap-1 transition-all"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Remove
+                          </button>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </motion.div>
                 ))}
               </div>
-            </div>
+            </motion.div>
           )}
 
-          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
-            <h2 className="text-sm font-semibold text-gray-900 mb-2">Customer lookup</h2>
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            className="glass-card rounded-2xl p-6 border border-white/5"
+          >
+            <h2 className="text-sm font-semibold text-white mb-2 flex items-center gap-2">
+              <Search className="w-4 h-4 text-[#00d4ff]" />
+              Customer lookup
+            </h2>
             <p className="text-xs text-gray-500 mb-4">Quick profile by email or phone.</p>
             <div className="flex gap-2">
               <input
@@ -1852,25 +2405,40 @@ export default function OwnerPage() {
                 value={customerLookupIdentity}
                 onChange={(e) => setCustomerLookupIdentity(e.target.value)}
                 placeholder="Email or phone number"
-                className="flex-1 px-4 py-2 rounded-full border border-gray-200 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                className="flex-1 px-4 py-2 rounded-full input-glass text-xs"
                 onKeyDown={(e) => e.key === "Enter" && lookupCustomer()}
               />
-              <button
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={lookupCustomer}
                 disabled={!customerLookupIdentity.trim() || customerLookupLoading}
-                className="px-4 py-2 rounded-full bg-blue-600 text-white text-xs font-medium hover:bg-blue-500 transition-colors disabled:opacity-60"
+                className="px-4 py-2 rounded-full btn-neon text-xs font-medium disabled:opacity-60 flex items-center gap-1"
               >
-                {customerLookupLoading ? "Searching..." : "Search"}
-              </button>
+                {customerLookupLoading ? (
+                  <><div className="spinner w-3 h-3" /> Searching...</>
+                ) : (
+                  <><Search className="w-3 h-3" /> Search</>
+                )}
+              </motion.button>
             </div>
             {customerLookupError && (
-              <p className="mt-3 text-xs text-red-600">{customerLookupError}</p>
+              <p className="mt-3 text-xs text-red-400 flex items-center gap-1">
+                <AlertCircle className="w-3 h-3" />
+                {customerLookupError}
+              </p>
             )}
             {customerProfile && (
-              <div className="mt-4 rounded-2xl border border-gray-100 bg-gray-50/70 p-4 text-xs text-gray-700 space-y-2">
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-4 glass rounded-xl p-4 text-xs text-gray-300 space-y-2 border border-white/5"
+              >
                 <div className="flex justify-between">
-                  <span className="text-gray-500">Customer</span>
-                  <span className="font-medium">
+                  <span className="text-gray-500 flex items-center gap-1">
+                    <User className="w-3 h-3" /> Customer
+                  </span>
+                  <span className="font-medium text-white">
                     {customerProfile.name || customerProfile.email || customerProfile.phone || "Guest"}
                   </span>
                 </div>
@@ -1888,7 +2456,7 @@ export default function OwnerPage() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Average spend</span>
-                  <span className="font-medium">
+                  <span className="font-medium text-[#00d4ff]">
                     {(customerProfile.average_spend_cents / 100).toFixed(2)}
                   </span>
                 </div>
@@ -1898,20 +2466,28 @@ export default function OwnerPage() {
                     {customerProfile.total_bookings}
                   </span>
                 </div>
-              </div>
+              </motion.div>
             )}
-          </div>
+          </motion.div>
         </aside>
       </main>
 
       <section className="max-w-6xl mx-auto px-4 sm:px-6 pb-10">
-        <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.2 }}
+          className="glass-card rounded-2xl p-6 border border-white/5"
+        >
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <h2 className="text-sm font-semibold text-gray-900">Schedule</h2>
+              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-[#00d4ff]" />
+                Schedule
+              </h2>
               <p className="text-xs text-gray-500">
                 Drag a booking to reschedule or move across stylists. Time off shows in soft red,
-                confirmed appointments in deep blue.
+                confirmed appointments in neon blue.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -1920,81 +2496,90 @@ export default function OwnerPage() {
                 value={styleFilter}
                 onChange={(event) => setStyleFilter(event.target.value)}
                 placeholder="Filter by style"
-                className="px-3 py-2 rounded-full border border-gray-200 text-xs text-gray-600"
+                className="px-3 py-2 rounded-full input-glass text-xs"
               />
-              <button
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => {
                   const date = new Date(scheduleDate);
                   date.setDate(date.getDate() - 1);
                   setScheduleDate(date.toISOString().split("T")[0]);
                 }}
-                className="px-3 py-2 rounded-full border border-gray-200 text-xs text-gray-600"
+                className="px-3 py-2 rounded-full glass border border-white/10 text-xs text-gray-400 hover:text-white hover:bg-white/10 transition-all flex items-center"
               >
-                Prev
-              </button>
+                <ArrowLeft className="w-4 h-4" />
+              </motion.button>
               <input
                 type="date"
                 value={scheduleDate}
                 onChange={(e) => setScheduleDate(e.target.value)}
-                className="px-3 py-2 rounded-full border border-gray-200 text-xs text-gray-600"
+                className="px-3 py-2 rounded-full input-glass text-xs"
               />
-              <button
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => {
                   const date = new Date(scheduleDate);
                   date.setDate(date.getDate() + 1);
                   setScheduleDate(date.toISOString().split("T")[0]);
                 }}
-                className="px-3 py-2 rounded-full border border-gray-200 text-xs text-gray-600"
+                className="px-3 py-2 rounded-full glass border border-white/10 text-xs text-gray-400 hover:text-white hover:bg-white/10 transition-all flex items-center"
               >
-                Next
-              </button>
+                <ArrowRight className="w-4 h-4" />
+              </motion.button>
             </div>
           </div>
 
-          <div className="mt-6 overflow-auto">
+          <div className="mt-6 overflow-auto scrollbar-hide">
 
             {scheduleLoading && (
-              <div className="text-xs text-gray-400 mb-4">Loading schedule...</div>
+              <div className="text-xs text-gray-500 mb-4 flex items-center gap-2">
+                <div className="spinner w-4 h-4" />
+                Loading schedule...
+              </div>
             )}
             <div className="flex items-center gap-3 text-[11px] text-gray-500 mb-2">
               <span className="inline-flex items-center gap-1">
-                <span className="w-3 h-3 rounded-sm bg-red-100 border border-red-200" />
+                <span className="w-3 h-3 rounded-sm bg-red-500/20 border border-red-500/30" />
                 Out of office
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="w-3 h-3 rounded-sm bg-[#0b1c36]" />
+                <span className="w-3 h-3 rounded-sm bg-gradient-to-r from-[#00d4ff] to-[#a855f7]" />
                 Appointment
               </span>
             </div>
             <div
-              className="grid border border-gray-100 rounded-2xl overflow-hidden bg-gradient-to-b from-white to-gray-50"
+              className="grid border border-white/5 rounded-2xl overflow-hidden bg-[#0a0e1a]"
               style={{
                 minWidth: scheduleMinWidth,
                 gridTemplateColumns: `140px repeat(${scheduleStylists.length || 1}, minmax(180px, 1fr))`,
                 gridTemplateRows: `48px repeat(${slots.length}, ${ROW_HEIGHT}px)`,
               }}
             >
-              <div className="bg-gray-50 border-b border-gray-100 sticky left-0 z-30 text-xs font-medium text-gray-700 flex items-center justify-center" style={{ gridColumn: 1 }}>
+              <div className="glass border-b border-white/5 sticky left-0 z-30 text-xs font-medium text-gray-400 flex items-center justify-center" style={{ gridColumn: 1 }}>
+                <Clock className="w-3 h-3 mr-1" />
                 Time
               </div>
               {scheduleStylists.length === 0 && (
-                <div className="col-span-1 bg-gray-50 border-b border-gray-100 text-xs text-gray-400 flex items-center justify-center">
+                <div className="col-span-1 glass border-b border-white/5 text-xs text-gray-500 flex items-center justify-center">
                   No stylists
                 </div>
               )}
               {scheduleStylists.map((stylist, index) => (
                 <div
                   key={stylist.id}
-                  className="bg-gray-50 border-b border-gray-100 text-xs font-medium text-gray-700 flex items-center justify-center"
+                  className="glass border-b border-white/5 text-xs font-medium text-white flex items-center justify-center"
                   style={{ gridColumn: index + 2 }}
                 >
+                  <User className="w-3 h-3 mr-1 text-[#a855f7]" />
                   {stylist.name}
                 </div>
               ))}
 
               {slots.map((slot) => (
                 <React.Fragment key={slot}>
-                  <div className="border-t border-gray-100 text-[11px] text-gray-600 pr-2 flex items-start justify-end pt-2 bg-white font-semibold sticky left-0 z-20" style={{ gridColumn: 1 }}>
+                  <div className="border-t border-white/5 text-[11px] text-gray-500 pr-2 flex items-start justify-end pt-2 bg-[#0a0e1a] font-semibold sticky left-0 z-20" style={{ gridColumn: 1 }}>
                     {minutesToTimeLabel(slot)}
                   </div>
                   {scheduleStylists.map((stylist, index) => {
@@ -2018,7 +2603,7 @@ export default function OwnerPage() {
                       return (
                         <div
                           key={`${stylist.id}-${slot}-timeoff`}
-                          className="border-t border-gray-100 bg-red-50 text-red-700 text-[11px] flex items-center justify-center"
+                          className="border-t border-white/5 bg-red-500/10 text-red-400 text-[11px] flex items-center justify-center border-l border-red-500/20"
                           style={{ gridColumn: index + 2 }}
                         >
                           Time off
@@ -2031,11 +2616,11 @@ export default function OwnerPage() {
                     return (
                       <div
                         key={`${stylist.id}-${slot}`}
-                        className={`border-t border-gray-100 ${isWithinHours ? 'bg-white hover:bg-blue-50/30 transition-colors' : 'bg-gray-200'}`}
+                        className={`border-t border-white/5 ${isWithinHours ? 'bg-[#0a0e1a] hover:bg-[#00d4ff]/5 transition-colors' : 'bg-white/[0.02]'}`}
                         style={{ gridColumn: index + 2 }}
                         onDragOver={isWithinHours ? (event) => event.preventDefault() : undefined}
                         onDragEnter={isWithinHours ? (event) => {
-                          event.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.5)';
+                          event.currentTarget.style.backgroundColor = 'rgba(0, 212, 255, 0.2)';
                         } : undefined}
                         onDragLeave={isWithinHours ? (event) => {
                           event.currentTarget.style.backgroundColor = '';
@@ -2081,11 +2666,11 @@ export default function OwnerPage() {
                   <div
                     key={booking.id}
                     draggable={stylist.active}
-                    onDragStart={(event) => {
+                    onDragStart={(event: React.DragEvent<HTMLDivElement>) => {
                       const dragImage = document.createElement('div');
                       dragImage.style.width = '20px';
                       dragImage.style.height = '20px';
-                      dragImage.style.backgroundColor = '#0b1c36';
+                      dragImage.style.background = 'linear-gradient(135deg, #00d4ff, #a855f7)';
                       dragImage.style.borderRadius = '4px';
                       document.body.appendChild(dragImage);
                       event.dataTransfer.setDragImage(dragImage, 10, 10);
@@ -2093,7 +2678,7 @@ export default function OwnerPage() {
                       setTimeout(() => document.body.removeChild(dragImage), 0);
                     }}
                     onClick={() => setSelectedBooking(booking)}
-                    className={`bg-[#0b1c36] text-white text-xs rounded-2xl px-3 py-2 shadow-lg border border-blue-900/50 z-20 cursor-pointer active:cursor-grabbing ${
+                    className={`bg-gradient-to-r from-[#00d4ff]/20 to-[#a855f7]/20 backdrop-blur-sm text-white text-xs rounded-2xl px-3 py-2 shadow-lg shadow-[#00d4ff]/10 border border-[#00d4ff]/30 z-20 cursor-pointer active:cursor-grabbing hover:border-[#00d4ff]/50 hover:scale-[1.02] transition-all ${
                       normalizedFilter && !matchesStyle ? "opacity-30" : ""
                     }`}
                     style={{
@@ -2104,15 +2689,15 @@ export default function OwnerPage() {
                   >
                     <div className="flex justify-between items-start">
                       <div>
-                        <div className="font-semibold text-xs">
+                        <div className="font-semibold text-xs text-white">
                           {booking.secondary_service_name
                             ? `${booking.service_name} + ${booking.secondary_service_name}`
                             : booking.service_name}
                         </div>
-                        <div className="text-[10px] text-gray-100">
+                        <div className="text-[10px] text-gray-300">
                           {booking.start_time}–{booking.end_time}
                         </div>
-                        <div className="text-[10px] text-gray-100">
+                        <div className="text-[10px] text-gray-300">
                           {booking.customer_name || "Guest"}
                         </div>
                       </div>
@@ -2121,7 +2706,7 @@ export default function OwnerPage() {
                           event.stopPropagation();
                           cancelBooking(booking.id);
                         }}
-                        className="px-2 py-1 text-[9px] bg-red-600 text-white rounded hover:bg-red-700"
+                        className="px-2 py-1 text-[9px] bg-red-500/20 border border-red-500/30 text-red-400 rounded hover:bg-red-500/30 transition-colors"
                       >
                         Cancel
                       </button>
@@ -2131,7 +2716,7 @@ export default function OwnerPage() {
               })}
             </div>
           </div>
-        </div>
+        </motion.div>
       </section>
     </div>
   );

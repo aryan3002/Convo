@@ -1,13 +1,15 @@
+import hashlib
 import json
 import logging
 import re
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import List
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, HTTPException, Response, status, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Response, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select, text
@@ -33,6 +35,7 @@ from .emailer import send_booking_email_with_ics
 from .sms import send_sms
 from .voice import router as voice_router
 from .models import (
+    AppointmentStatus,
     Booking,
     BookingStatus,
     CallSummary,
@@ -52,6 +55,8 @@ from .models import (
     Stylist,
     StylistSpecialty,
     TimeOffBlock,
+    TimeOffRequest,
+    TimeOffRequestStatus,
 )
 from .seed import seed_initial_data
 
@@ -60,6 +65,61 @@ settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
 app.include_router(voice_router, prefix="/twilio", tags=["voice"])
 logger = logging.getLogger(__name__)
+
+
+# ────────────────────────────────────────────────────────────────
+# Employee PIN Authentication
+# ────────────────────────────────────────────────────────────────
+
+# In-memory session store: {token: {"stylist_id": int, "expires_at": datetime}}
+_employee_sessions: dict[str, dict] = {}
+EMPLOYEE_SESSION_TTL_HOURS = 12
+
+
+def hash_pin(pin: str) -> str:
+    """Hash a PIN using SHA-256."""
+    return hashlib.sha256(pin.encode()).hexdigest()
+
+
+def verify_pin(pin: str, pin_hash: str) -> bool:
+    """Verify a PIN against its hash."""
+    return hash_pin(pin) == pin_hash
+
+
+def create_employee_session(stylist_id: int) -> str:
+    """Create a new session token for an employee."""
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=EMPLOYEE_SESSION_TTL_HOURS)
+    _employee_sessions[token] = {
+        "stylist_id": stylist_id,
+        "expires_at": expires_at,
+    }
+    return token
+
+
+def get_employee_from_token(token: str) -> int | None:
+    """Get stylist_id from session token, or None if invalid/expired."""
+    session = _employee_sessions.get(token)
+    if not session:
+        return None
+    if datetime.now(timezone.utc) > session["expires_at"]:
+        del _employee_sessions[token]
+        return None
+    return session["stylist_id"]
+
+
+async def require_employee_auth(
+    authorization: str = None,
+    session: AsyncSession = Depends(get_session),
+) -> tuple[int, AsyncSession]:
+    """Dependency to require valid employee auth token. Returns (stylist_id, session)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    return stylist_id, session
 
 
 def get_local_now() -> datetime:
@@ -968,6 +1028,97 @@ async def on_startup():
                 """
                 ALTER TABLE IF EXISTS bookings
                 ADD COLUMN IF NOT EXISTS discount_cents INTEGER DEFAULT 0;
+                """
+            )
+        )
+        # Employee view migrations
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS stylists
+                ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255);
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS stylists
+                ADD COLUMN IF NOT EXISTS pin_set_at_utc TIMESTAMPTZ;
+                """
+            )
+        )
+        # Create AppointmentStatus type if not exists
+        await conn.execute(
+            text(
+                """
+                DO $$ BEGIN
+                    CREATE TYPE appointmentstatus AS ENUM ('SCHEDULED', 'IN_PROGRESS', 'RUNNING_LATE', 'COMPLETED', 'NO_SHOW');
+                EXCEPTION
+                    WHEN duplicate_object THEN null;
+                END $$;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS appointment_status appointmentstatus DEFAULT 'SCHEDULED';
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS appointment_status_updated_at_utc TIMESTAMPTZ;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS acknowledged_at_utc TIMESTAMPTZ;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE IF EXISTS bookings
+                ADD COLUMN IF NOT EXISTS internal_notes TEXT;
+                """
+            )
+        )
+        # Create TimeOffRequestStatus type if not exists
+        await conn.execute(
+            text(
+                """
+                DO $$ BEGIN
+                    CREATE TYPE timeoffrequeststatus AS ENUM ('PENDING', 'APPROVED', 'REJECTED');
+                EXCEPTION
+                    WHEN duplicate_object THEN null;
+                END $$;
+                """
+            )
+        )
+        # Create time_off_requests table
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS time_off_requests (
+                    id SERIAL PRIMARY KEY,
+                    stylist_id INTEGER NOT NULL REFERENCES stylists(id),
+                    start_at_utc TIMESTAMPTZ NOT NULL,
+                    end_at_utc TIMESTAMPTZ NOT NULL,
+                    reason TEXT,
+                    status timeoffrequeststatus NOT NULL DEFAULT 'PENDING',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    reviewed_at_utc TIMESTAMPTZ,
+                    reviewer VARCHAR(255)
+                );
                 """
             )
         )
@@ -4374,3 +4525,594 @@ async def get_bookings_by_service(service_id: int, session: AsyncSession = Depen
         ))
     
     return details
+
+
+# ────────────────────────────────────────────────────────────────
+# Employee View Endpoints
+# ────────────────────────────────────────────────────────────────
+
+class EmployeeLoginRequest(BaseModel):
+    stylist_id: int
+    pin: str
+
+
+class EmployeeLoginResponse(BaseModel):
+    token: str
+    stylist_id: int
+    stylist_name: str
+    expires_in_hours: int = EMPLOYEE_SESSION_TTL_HOURS
+
+
+class EmployeeScheduleBooking(BaseModel):
+    id: str
+    service_name: str
+    secondary_service_name: str | None = None
+    customer_name: str | None
+    customer_phone: str | None
+    start_time: str  # Local time string
+    end_time: str  # Local time string
+    start_at_utc: datetime
+    end_at_utc: datetime
+    appointment_status: str
+    acknowledged: bool
+    internal_notes: str | None = None
+
+
+class EmployeeScheduleResponse(BaseModel):
+    stylist_id: int
+    stylist_name: str
+    date: str
+    bookings: list[EmployeeScheduleBooking]
+
+
+class AcknowledgeBookingRequest(BaseModel):
+    booking_id: str
+
+
+class UpdateAppointmentStatusRequest(BaseModel):
+    booking_id: str
+    status: str  # SCHEDULED, IN_PROGRESS, RUNNING_LATE, COMPLETED, NO_SHOW
+
+
+class UpdateInternalNotesRequest(BaseModel):
+    booking_id: str
+    notes: str
+
+
+class TimeOffRequestCreate(BaseModel):
+    start_date: str  # YYYY-MM-DD
+    end_date: str  # YYYY-MM-DD
+    reason: str | None = None
+
+
+class TimeOffRequestResponse(BaseModel):
+    id: int
+    stylist_id: int
+    start_date: str
+    end_date: str
+    reason: str | None
+    status: str
+    created_at: datetime
+    reviewed_at: datetime | None = None
+    reviewer: str | None = None
+
+
+@app.post("/employee/login", response_model=EmployeeLoginResponse)
+async def employee_login(
+    req: EmployeeLoginRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Authenticate an employee using their PIN."""
+    stylist = await session.execute(
+        select(Stylist).where(Stylist.id == req.stylist_id)
+    )
+    stylist = stylist.scalar_one_or_none()
+    
+    if not stylist:
+        raise HTTPException(status_code=404, detail="Stylist not found")
+    
+    if not stylist.pin_hash:
+        raise HTTPException(status_code=400, detail="PIN not set for this stylist")
+    
+    if not verify_pin(req.pin, stylist.pin_hash):
+        raise HTTPException(status_code=401, detail="Invalid PIN")
+    
+    token = create_employee_session(stylist.id)
+    
+    return EmployeeLoginResponse(
+        token=token,
+        stylist_id=stylist.id,
+        stylist_name=stylist.name,
+    )
+
+
+@app.get("/employee/schedule", response_model=EmployeeScheduleResponse)
+async def get_employee_schedule(
+    date_str: str | None = None,
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Get the employee's schedule for a specific date (default: today)."""
+    # Validate auth
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    
+    # Get stylist
+    stylist_result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    stylist = stylist_result.scalar_one_or_none()
+    if not stylist:
+        raise HTTPException(status_code=404, detail="Stylist not found")
+    
+    tz = ZoneInfo(settings.chat_timezone)
+    
+    # Parse date or use today
+    if date_str:
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    else:
+        target_date = datetime.now(tz).date()
+    
+    # Get start and end of day in UTC
+    start_of_day = datetime.combine(target_date, time.min, tzinfo=tz)
+    end_of_day = datetime.combine(target_date, time.max, tzinfo=tz)
+    start_utc = start_of_day.astimezone(timezone.utc)
+    end_utc = end_of_day.astimezone(timezone.utc)
+    
+    # Fetch confirmed bookings for this stylist on this day
+    result = await session.execute(
+        select(Booking)
+        .where(
+            and_(
+                Booking.stylist_id == stylist_id,
+                Booking.start_at_utc >= start_utc,
+                Booking.start_at_utc <= end_utc,
+                Booking.status == BookingStatus.CONFIRMED,
+            )
+        )
+        .order_by(Booking.start_at_utc)
+    )
+    bookings = result.scalars().all()
+    
+    # Get service info
+    service_ids = set()
+    for b in bookings:
+        service_ids.add(b.service_id)
+        if b.secondary_service_id:
+            service_ids.add(b.secondary_service_id)
+    
+    services_map = {}
+    if service_ids:
+        svc_result = await session.execute(
+            select(Service).where(Service.id.in_(service_ids))
+        )
+        for svc in svc_result.scalars().all():
+            services_map[svc.id] = svc.name
+    
+    # Format response
+    schedule_bookings = []
+    for b in bookings:
+        local_start = b.start_at_utc.astimezone(tz)
+        local_end = b.end_at_utc.astimezone(tz)
+        
+        # Get appointment_status safely (may be None for old bookings)
+        appt_status = getattr(b, 'appointment_status', None)
+        if appt_status is None:
+            appt_status_str = "SCHEDULED"
+        else:
+            appt_status_str = appt_status.value if hasattr(appt_status, 'value') else str(appt_status)
+        
+        schedule_bookings.append(EmployeeScheduleBooking(
+            id=str(b.id),
+            service_name=services_map.get(b.service_id, "Unknown Service"),
+            secondary_service_name=services_map.get(b.secondary_service_id) if b.secondary_service_id else None,
+            customer_name=b.customer_name,
+            customer_phone=b.customer_phone,
+            start_time=local_start.strftime("%I:%M %p"),
+            end_time=local_end.strftime("%I:%M %p"),
+            start_at_utc=b.start_at_utc,
+            end_at_utc=b.end_at_utc,
+            appointment_status=appt_status_str,
+            acknowledged=b.acknowledged_at_utc is not None if hasattr(b, 'acknowledged_at_utc') else False,
+            internal_notes=getattr(b, 'internal_notes', None),
+        ))
+    
+    return EmployeeScheduleResponse(
+        stylist_id=stylist_id,
+        stylist_name=stylist.name,
+        date=target_date.isoformat(),
+        bookings=schedule_bookings,
+    )
+
+
+@app.post("/employee/acknowledge")
+async def acknowledge_booking(
+    req: AcknowledgeBookingRequest,
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Mark a booking as acknowledged by the employee."""
+    # Validate auth
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    
+    try:
+        booking_uuid = uuid.UUID(req.booking_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid booking ID format")
+    
+    result = await session.execute(
+        select(Booking).where(
+            and_(
+                Booking.id == booking_uuid,
+                Booking.stylist_id == stylist_id,
+            )
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    
+    booking.acknowledged_at_utc = datetime.now(timezone.utc)
+    await session.commit()
+    
+    return {"success": True, "acknowledged_at": booking.acknowledged_at_utc.isoformat()}
+
+
+@app.post("/employee/status")
+async def update_appointment_status(
+    req: UpdateAppointmentStatusRequest,
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Update the appointment status of a booking."""
+    # Validate auth
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    
+    # Validate status
+    valid_statuses = ["SCHEDULED", "IN_PROGRESS", "RUNNING_LATE", "COMPLETED", "NO_SHOW"]
+    if req.status not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}")
+    
+    try:
+        booking_uuid = uuid.UUID(req.booking_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid booking ID format")
+    
+    result = await session.execute(
+        select(Booking).where(
+            and_(
+                Booking.id == booking_uuid,
+                Booking.stylist_id == stylist_id,
+            )
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    
+    booking.appointment_status = AppointmentStatus(req.status)
+    booking.appointment_status_updated_at_utc = datetime.now(timezone.utc)
+    await session.commit()
+    
+    return {"success": True, "status": req.status}
+
+
+@app.post("/employee/notes")
+async def update_internal_notes(
+    req: UpdateInternalNotesRequest,
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Update the internal notes for a booking."""
+    # Validate auth
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    
+    try:
+        booking_uuid = uuid.UUID(req.booking_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid booking ID format")
+    
+    result = await session.execute(
+        select(Booking).where(
+            and_(
+                Booking.id == booking_uuid,
+                Booking.stylist_id == stylist_id,
+            )
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    
+    booking.internal_notes = req.notes
+    await session.commit()
+    
+    return {"success": True}
+
+
+@app.post("/employee/time-off", response_model=TimeOffRequestResponse)
+async def create_time_off_request(
+    req: TimeOffRequestCreate,
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Submit a time-off request."""
+    # Validate auth
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    
+    tz = ZoneInfo(settings.chat_timezone)
+    
+    try:
+        start_date = datetime.strptime(req.start_date, "%Y-%m-%d").date()
+        end_date = datetime.strptime(req.end_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    if end_date < start_date:
+        raise HTTPException(status_code=400, detail="End date must be after start date")
+    
+    # Convert to UTC (start of start day, end of end day)
+    start_utc = datetime.combine(start_date, time.min, tzinfo=tz).astimezone(timezone.utc)
+    end_utc = datetime.combine(end_date, time.max, tzinfo=tz).astimezone(timezone.utc)
+    
+    time_off_request = TimeOffRequest(
+        stylist_id=stylist_id,
+        start_at_utc=start_utc,
+        end_at_utc=end_utc,
+        reason=req.reason,
+        status=TimeOffRequestStatus.PENDING,
+    )
+    session.add(time_off_request)
+    await session.commit()
+    await session.refresh(time_off_request)
+    
+    return TimeOffRequestResponse(
+        id=time_off_request.id,
+        stylist_id=time_off_request.stylist_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        reason=time_off_request.reason,
+        status=time_off_request.status.value,
+        created_at=time_off_request.created_at,
+    )
+
+
+@app.get("/employee/time-off", response_model=list[TimeOffRequestResponse])
+async def get_my_time_off_requests(
+    authorization: str = Header(None),
+    session: AsyncSession = Depends(get_session),
+):
+    """Get all time-off requests for the current employee."""
+    # Validate auth
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    stylist_id = get_employee_from_token(token)
+    if stylist_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    
+    tz = ZoneInfo(settings.chat_timezone)
+    
+    result = await session.execute(
+        select(TimeOffRequest)
+        .where(TimeOffRequest.stylist_id == stylist_id)
+        .order_by(TimeOffRequest.created_at.desc())
+    )
+    requests = result.scalars().all()
+    
+    return [
+        TimeOffRequestResponse(
+            id=r.id,
+            stylist_id=r.stylist_id,
+            start_date=r.start_at_utc.astimezone(tz).date().isoformat(),
+            end_date=r.end_at_utc.astimezone(tz).date().isoformat(),
+            reason=r.reason,
+            status=r.status.value,
+            created_at=r.created_at,
+            reviewed_at=r.reviewed_at_utc,
+            reviewer=r.reviewer,
+        )
+        for r in requests
+    ]
+
+
+@app.get("/stylists-for-login")
+async def get_stylists_for_login(session: AsyncSession = Depends(get_session)):
+    """Get list of stylists available for employee login (those with PINs set)."""
+    result = await session.execute(
+        select(Stylist).where(Stylist.pin_hash.isnot(None)).order_by(Stylist.name)
+    )
+    stylists = result.scalars().all()
+    return [{"id": s.id, "name": s.name} for s in stylists]
+
+
+# ────────────────────────────────────────────────────────────────
+# Owner Endpoints for Employee Management
+# ────────────────────────────────────────────────────────────────
+
+class SetPinRequest(BaseModel):
+    pin: str = Field(..., min_length=4, max_length=8)
+
+
+@app.post("/stylists/{stylist_id}/pin")
+async def set_stylist_pin(
+    stylist_id: int,
+    req: SetPinRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Set or update a stylist's PIN (owner action)."""
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    stylist = result.scalar_one_or_none()
+    
+    if not stylist:
+        raise HTTPException(status_code=404, detail="Stylist not found")
+    
+    stylist.pin_hash = hash_pin(req.pin)
+    stylist.pin_set_at_utc = datetime.now(timezone.utc)
+    await session.commit()
+    
+    return {"success": True, "message": f"PIN set for {stylist.name}"}
+
+
+@app.delete("/stylists/{stylist_id}/pin")
+async def remove_stylist_pin(
+    stylist_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Remove a stylist's PIN (owner action)."""
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    stylist = result.scalar_one_or_none()
+    
+    if not stylist:
+        raise HTTPException(status_code=404, detail="Stylist not found")
+    
+    stylist.pin_hash = None
+    stylist.pin_set_at_utc = None
+    await session.commit()
+    
+    return {"success": True, "message": f"PIN removed for {stylist.name}"}
+
+
+@app.get("/stylists/{stylist_id}/pin-status")
+async def get_stylist_pin_status(
+    stylist_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Check if a stylist has a PIN set."""
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    stylist = result.scalar_one_or_none()
+    
+    if not stylist:
+        raise HTTPException(status_code=404, detail="Stylist not found")
+    
+    return {
+        "stylist_id": stylist_id,
+        "stylist_name": stylist.name,
+        "has_pin": stylist.pin_hash is not None,
+        "pin_set_at": stylist.pin_set_at_utc.isoformat() if stylist.pin_set_at_utc else None,
+    }
+
+
+@app.get("/time-off-requests", response_model=list[TimeOffRequestResponse])
+async def get_all_time_off_requests(
+    status_filter: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Get all time-off requests (owner view)."""
+    tz = ZoneInfo(settings.chat_timezone)
+    
+    query = select(TimeOffRequest).order_by(TimeOffRequest.created_at.desc())
+    
+    if status_filter:
+        try:
+            status_enum = TimeOffRequestStatus(status_filter)
+            query = query.where(TimeOffRequest.status == status_enum)
+        except ValueError:
+            pass  # Ignore invalid filter
+    
+    result = await session.execute(query)
+    requests = result.scalars().all()
+    
+    # Get stylist names
+    stylist_ids = set(r.stylist_id for r in requests)
+    stylists_map = {}
+    if stylist_ids:
+        stylists_result = await session.execute(
+            select(Stylist).where(Stylist.id.in_(stylist_ids))
+        )
+        for s in stylists_result.scalars().all():
+            stylists_map[s.id] = s.name
+    
+    return [
+        TimeOffRequestResponse(
+            id=r.id,
+            stylist_id=r.stylist_id,
+            start_date=r.start_at_utc.astimezone(tz).date().isoformat(),
+            end_date=r.end_at_utc.astimezone(tz).date().isoformat(),
+            reason=r.reason,
+            status=r.status.value,
+            created_at=r.created_at,
+            reviewed_at=r.reviewed_at_utc,
+            reviewer=r.reviewer,
+        )
+        for r in requests
+    ]
+
+
+class ReviewTimeOffRequest(BaseModel):
+    action: str  # "approve" or "reject"
+    reviewer: str | None = None
+
+
+@app.post("/time-off-requests/{request_id}/review")
+async def review_time_off_request(
+    request_id: int,
+    req: ReviewTimeOffRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Approve or reject a time-off request (owner action)."""
+    result = await session.execute(
+        select(TimeOffRequest).where(TimeOffRequest.id == request_id)
+    )
+    time_off = result.scalar_one_or_none()
+    
+    if not time_off:
+        raise HTTPException(status_code=404, detail="Time-off request not found")
+    
+    if time_off.status != TimeOffRequestStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Request has already been reviewed")
+    
+    if req.action not in ["approve", "reject"]:
+        raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
+    
+    tz = ZoneInfo(settings.chat_timezone)
+    
+    time_off.status = TimeOffRequestStatus.APPROVED if req.action == "approve" else TimeOffRequestStatus.REJECTED
+    time_off.reviewed_at_utc = datetime.now(timezone.utc)
+    time_off.reviewer = req.reviewer or "Owner"
+    
+    # If approved, create a TimeOffBlock
+    if req.action == "approve":
+        time_off_block = TimeOffBlock(
+            stylist_id=time_off.stylist_id,
+            start_at_utc=time_off.start_at_utc,
+            end_at_utc=time_off.end_at_utc,
+            reason=time_off.reason or "Approved time-off request",
+        )
+        session.add(time_off_block)
+    
+    await session.commit()
+    
+    return {
+        "success": True,
+        "status": time_off.status.value,
+        "message": f"Time-off request {'approved' if req.action == 'approve' else 'rejected'}",
+    }

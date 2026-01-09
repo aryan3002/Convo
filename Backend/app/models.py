@@ -28,6 +28,22 @@ class BookingStatus(str, Enum):
     EXPIRED = "EXPIRED"
 
 
+class AppointmentStatus(str, Enum):
+    """Operational status of an appointment (separate from BookingStatus)."""
+    SCHEDULED = "SCHEDULED"
+    IN_PROGRESS = "IN_PROGRESS"
+    RUNNING_LATE = "RUNNING_LATE"
+    COMPLETED = "COMPLETED"
+    NO_SHOW = "NO_SHOW"
+
+
+class TimeOffRequestStatus(str, Enum):
+    """Status of employee time-off requests."""
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+
 class CallSummaryStatus(str, Enum):
     """Status of the call outcome for owner summaries."""
     CONFIRMED = "confirmed"
@@ -69,6 +85,8 @@ class Stylist(Base):
     work_start: Mapped[time] = mapped_column(Time, nullable=False)
     work_end: Mapped[time] = mapped_column(Time, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    pin_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pin_set_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -101,6 +119,27 @@ class TimeOffBlock(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+
+class TimeOffRequest(Base):
+    """Employee-submitted time-off requests pending owner approval."""
+    __tablename__ = "time_off_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
+    start_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[TimeOffRequestStatus] = mapped_column(
+        PgEnum(TimeOffRequestStatus), nullable=False, default=TimeOffRequestStatus.PENDING,
+        server_default="PENDING"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    reviewed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewer: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class Booking(Base):
     __tablename__ = "bookings"
 
@@ -125,6 +164,18 @@ class Booking(Base):
     status: Mapped[BookingStatus] = mapped_column(PgEnum(BookingStatus), nullable=False)
     hold_expires_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sms_sent_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Employee view fields
+    appointment_status: Mapped[AppointmentStatus] = mapped_column(
+        PgEnum(AppointmentStatus), nullable=False, default=AppointmentStatus.SCHEDULED,
+        server_default="SCHEDULED"
+    )
+    appointment_status_updated_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    acknowledged_at_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    internal_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

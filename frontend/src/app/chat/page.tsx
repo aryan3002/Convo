@@ -1,6 +1,24 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { 
+  Send, 
+  X, 
+  Check, 
+  Calendar, 
+  Clock, 
+  User, 
+  Mail, 
+  DollarSign,
+  Sparkles,
+  MessageSquare,
+  ListChecks,
+  ChevronRight,
+  Image as ImageIcon,
+  FileText,
+  Loader2
+} from "lucide-react";
 
 type Role = "user" | "assistant" | "system";
 
@@ -1964,205 +1982,250 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-blue-50">
+    <div className="min-h-screen bg-[#0a0e1a] relative overflow-hidden">
+      {/* Animated Background */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 left-1/4 w-[600px] h-[600px] bg-[#00d4ff]/10 rounded-full blur-[120px] animate-float" />
+        <div className="absolute bottom-1/4 right-1/4 w-[500px] h-[500px] bg-[#a855f7]/10 rounded-full blur-[120px] animate-float" style={{ animationDelay: '-2s' }} />
+        <div className="absolute top-1/2 left-1/2 w-[400px] h-[400px] bg-[#ec4899]/5 rounded-full blur-[100px] animate-float" style={{ animationDelay: '-4s' }} />
+      </div>
+
       {/* Confirmation Popup */}
-      {showConfirmationPopup && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full animate-fadeIn relative">
-            {/* Close button */}
-            <button
-              onClick={dismissConfirmation}
-              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+      <AnimatePresence>
+        {showConfirmationPopup && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="glass-strong rounded-2xl shadow-2xl p-6 max-w-sm w-full relative border border-white/10"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-            
-            {/* Success icon */}
-            <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg className="w-7 h-7 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-            </div>
-            
-            <h2 className="text-xl font-semibold text-gray-900 text-center mb-1">Booking Confirmed!</h2>
-            <p className="text-sm text-gray-500 text-center mb-4">Confirmation sent to your email.</p>
-            
-            {/* Booking details */}
-            <div className="bg-gray-50 rounded-xl p-4 text-sm space-y-2 mb-4">
-              <div className="flex justify-between">
-                <span className="text-gray-500">Service</span>
-                <span className="font-medium text-gray-900">{combinedServiceLabel}</span>
+              {/* Close button */}
+              <button
+                onClick={dismissConfirmation}
+                className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full glass hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              
+              {/* Success icon */}
+              <div className="w-14 h-14 bg-gradient-to-br from-emerald-500/20 to-emerald-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-emerald-500/30">
+                <Check className="w-7 h-7 text-emerald-400" />
               </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Date</span>
-                <span className="font-medium text-gray-900">{formatDateLabel(dateStr)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Time</span>
-                <span className="font-medium text-gray-900">
-                  {selectedSlot && formatTime(selectedSlot.start_time)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Stylist</span>
-                <span className="font-medium text-gray-900">{selectedSlot?.stylist_name}</span>
-              </div>
-              <div className="border-t border-gray-200 pt-2 flex justify-between">
-                <span className="text-gray-500">Subtotal</span>
-                <span className="font-medium text-gray-900">
-                  {formatMoney(basePriceCents)}
-                </span>
-              </div>
-              {(promoTotals.discountCents > 0 || (appliedPromo && (appliedPromo.type !== "SERVICE_COMBO_PROMO" || comboAccepted))) && (
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-500">Promotion</span>
-                  <span className="font-medium text-green-700">
-                    {promoTotals.discountCents > 0
-                      ? `- ${formatMoney(promoTotals.discountCents)}`
-                      : "Applied"}
+              
+              <h2 className="text-xl font-semibold text-white text-center mb-1">Booking Confirmed!</h2>
+              <p className="text-sm text-gray-400 text-center mb-4">Confirmation sent to your email.</p>
+              
+              {/* Booking details */}
+              <div className="glass rounded-xl p-4 text-sm space-y-2 mb-4 border border-white/5">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Service</span>
+                  <span className="font-medium text-white">{combinedServiceLabel}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Date</span>
+                  <span className="font-medium text-white">{formatDateLabel(dateStr)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Time</span>
+                  <span className="font-medium text-white">
+                    {selectedSlot && formatTime(selectedSlot.start_time)}
                   </span>
                 </div>
-              )}
-              <div className="border-t border-gray-200 pt-2 flex justify-between">
-                <span className="text-gray-500">Total</span>
-                <span className="font-semibold text-gray-900">
-                  {selectedService && formatMoney(promoTotals.totalCents)}
-                </span>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Stylist</span>
+                  <span className="font-medium text-white">{selectedSlot?.stylist_name}</span>
+                </div>
+                <div className="border-t border-white/10 pt-2 flex justify-between">
+                  <span className="text-gray-500">Subtotal</span>
+                  <span className="font-medium text-white">
+                    {formatMoney(basePriceCents)}
+                  </span>
+                </div>
+                {(promoTotals.discountCents > 0 || (appliedPromo && (appliedPromo.type !== "SERVICE_COMBO_PROMO" || comboAccepted))) && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Promotion</span>
+                    <span className="font-medium text-emerald-400">
+                      {promoTotals.discountCents > 0
+                        ? `- ${formatMoney(promoTotals.discountCents)}`
+                        : "Applied"}
+                    </span>
+                  </div>
+                )}
+                <div className="border-t border-white/10 pt-2 flex justify-between">
+                  <span className="text-gray-500">Total</span>
+                  <span className="font-semibold text-[#00d4ff]">
+                    {selectedService && formatMoney(promoTotals.totalCents)}
+                  </span>
+                </div>
               </div>
-            </div>
-            
-            <button
-              onClick={bookAnotherAndDismiss}
-              className="w-full py-2.5 text-blue-600 hover:text-blue-700 font-medium text-sm hover:bg-blue-50 rounded-lg transition-colors"
-            >
-              Book another appointment
-            </button>
-          </div>
-        </div>
-      )}
+              
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={bookAnotherAndDismiss}
+                className="w-full py-2.5 text-[#00d4ff] hover:text-white font-medium text-sm glass hover:bg-white/10 rounded-xl transition-colors border border-[#00d4ff]/30"
+              >
+                Book another appointment
+              </motion.button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {selectedTrackBooking && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/30 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-md w-full animate-fadeIn relative">
-            <button
-              onClick={() => setSelectedTrackBooking(null)}
-              className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+      <AnimatePresence>
+        {selectedTrackBooking && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="glass-strong rounded-2xl shadow-2xl p-6 max-w-md w-full relative border border-white/10"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-            <div className="mb-4">
-              <h3 className="text-lg font-semibold text-gray-900">Preferred style</h3>
-              <p className="text-xs text-gray-500">
-                {selectedTrackBooking.secondary_service_name
-                  ? `${selectedTrackBooking.service_name} + ${selectedTrackBooking.secondary_service_name}`
-                  : selectedTrackBooking.service_name}{" "}
-                · {formatTime(selectedTrackBooking.start_time)}
-              </p>
-            </div>
-            {selectedTrackBooking.preferred_style_text && (
-              <p className="text-sm text-gray-700 whitespace-pre-wrap mb-4">
-                {selectedTrackBooking.preferred_style_text}
-              </p>
-            )}
-            {selectedTrackBooking.preferred_style_image_url && (
-              <div className="rounded-xl overflow-hidden border border-gray-200 bg-gray-50">
-                <img
-                  src={selectedTrackBooking.preferred_style_image_url}
-                  alt="Preferred style"
-                  className="w-full max-h-64 object-cover"
-                />
+              <button
+                onClick={() => setSelectedTrackBooking(null)}
+                className="absolute top-3 right-3 w-8 h-8 flex items-center justify-center rounded-full glass hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              <div className="mb-4">
+                <h3 className="text-lg font-semibold text-white">Preferred style</h3>
+                <p className="text-xs text-gray-500">
+                  {selectedTrackBooking.secondary_service_name
+                    ? `${selectedTrackBooking.service_name} + ${selectedTrackBooking.secondary_service_name}`
+                    : selectedTrackBooking.service_name}{" "}
+                  · {formatTime(selectedTrackBooking.start_time)}
+                </p>
               </div>
-            )}
-            {!selectedTrackBooking.preferred_style_text &&
-              !selectedTrackBooking.preferred_style_image_url && (
-                <p className="text-sm text-gray-500">No preferred style saved for this booking.</p>
+              {selectedTrackBooking.preferred_style_text && (
+                <p className="text-sm text-gray-300 whitespace-pre-wrap mb-4">
+                  {selectedTrackBooking.preferred_style_text}
+                </p>
               )}
-          </div>
-        </div>
-      )}
+              {selectedTrackBooking.preferred_style_image_url && (
+                <div className="rounded-xl overflow-hidden border border-white/10 glass">
+                  <img
+                    src={selectedTrackBooking.preferred_style_image_url}
+                    alt="Preferred style"
+                    className="w-full max-h-64 object-cover"
+                  />
+                </div>
+              )}
+              {!selectedTrackBooking.preferred_style_text &&
+                !selectedTrackBooking.preferred_style_image_url && (
+                  <p className="text-sm text-gray-500">No preferred style saved for this booking.</p>
+                )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Header */}
-      <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-100">
+      <header className="sticky top-0 z-50 glass-strong border-b border-white/5">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold text-gray-900">Bishops Tempe</h1>
+              <h1 className="text-xl font-semibold text-transparent bg-clip-text bg-gradient-to-r from-[#00d4ff] via-[#a855f7] to-[#ec4899]">
+                Bishops Tempe
+              </h1>
               <p className="text-sm text-gray-500">Premium Hair Studio</p>
             </div>
             <div className="flex items-center gap-3">
               <a
                 href="/owner"
-                className="px-4 py-2 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+                className="px-4 py-2 text-sm font-medium text-gray-400 hover:text-white glass hover:bg-white/10 rounded-full transition-all border border-white/5"
               >
                 Owner
               </a>
-              <div className="flex items-center gap-2 bg-gray-100 rounded-full p-1">
-                <button
+              <div className="flex items-center gap-1 glass rounded-full p-1 border border-white/5">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
                   onClick={() => setMode("chat")}
-                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
                     mode === "chat"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
+                      ? "bg-gradient-to-r from-[#00d4ff] to-[#a855f7] text-white shadow-lg shadow-[#00d4ff]/20"
+                      : "text-gray-400 hover:text-white"
                   }`}
                 >
+                  <MessageSquare className="w-4 h-4" />
                   AI Assistant
-                </button>
-                <button
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
                   onClick={() => setMode("track")}
-                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  className={`px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
                     mode === "track"
-                      ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-600 hover:text-gray-900"
+                      ? "bg-gradient-to-r from-[#00d4ff] to-[#a855f7] text-white shadow-lg shadow-[#00d4ff]/20"
+                      : "text-gray-400 hover:text-white"
                   }`}
                 >
+                  <ListChecks className="w-4 h-4" />
                   Bookings
-                </button>
+                </motion.button>
               </div>
             </div>
           </div>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-8 relative z-10">
         {mode === "chat" && (
           /* ==================== CHAT MODE ==================== */
           <div className="max-w-5xl mx-auto space-y-6">
             {/* Chat Container */}
-            <div className="bg-white rounded-3xl shadow-xl overflow-hidden">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card rounded-3xl shadow-xl overflow-hidden border border-white/5"
+            >
               {/* Chat Messages */}
-              <div className="h-[60vh] overflow-y-auto p-6">
+              <div className="h-[60vh] overflow-y-auto p-6 scrollbar-hide">
                 <div className="space-y-4">
                   {messages.map((m, i) => (
-                    <div
+                    <motion.div
                       key={m.id}
-                      className={`flex ${m.role === "user" ? "justify-end" : "justify-start"} animate-slideUp`}
-                      style={{ animationDelay: `${Math.min(i, 5) * 50}ms` }}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: Math.min(i, 5) * 0.05 }}
+                      className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
                     >
                       <div
                         className={`max-w-[80%] px-5 py-3 rounded-2xl ${
                           m.role === "user"
-                            ? "bg-gray-800 text-white rounded-br-md"
-                            : "bg-gray-100 text-gray-800 rounded-bl-md"
+                            ? "bg-gradient-to-r from-[#00d4ff] to-[#a855f7] text-white rounded-br-md shadow-lg shadow-[#00d4ff]/20"
+                            : "glass text-gray-200 rounded-bl-md border border-white/5"
                         }`}
                       >
                         <p className="text-[15px] leading-relaxed">{m.text}</p>
                       </div>
-                    </div>
+                    </motion.div>
                   ))}
                   {isLoading && (
-                    <div className="flex justify-start animate-slideUp">
-                      <div className="bg-gray-100 px-5 py-3 rounded-2xl rounded-bl-md">
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex justify-start"
+                    >
+                      <div className="glass px-5 py-3 rounded-2xl rounded-bl-md border border-white/5">
                         <div className="flex gap-1">
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                          <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                          <span className="w-2 h-2 bg-[#00d4ff] rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                          <span className="w-2 h-2 bg-[#a855f7] rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                          <span className="w-2 h-2 bg-[#ec4899] rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
                         </div>
                       </div>
-                    </div>
+                    </motion.div>
                   )}
                   <div ref={bottomRef} />
                 </div>
@@ -2171,16 +2234,21 @@ export default function ChatPage() {
               {/* Guardrailed controls */}
               {stage === "SELECT_SERVICE" && services.length > 0 && (
                 <div className="px-6 pb-4">
-                  <p className="text-xs text-gray-500 mb-3">Choose a service:</p>
+                  <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-[#00d4ff]" />
+                    Choose a service:
+                  </p>
                   <div className="flex flex-wrap gap-2">
                     {services.map((svc) => (
-                      <button
+                      <motion.button
                         key={svc.id}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                         onClick={() => onSelectService(svc)}
-                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                        className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#00d4ff]/30"
                       >
                         {svc.name}
-                      </button>
+                      </motion.button>
                     ))}
                   </div>
                 </div>
@@ -2188,105 +2256,134 @@ export default function ChatPage() {
 
               {stage === "PREFERRED_STYLE" && selectedService && (
                 <div className="px-6 pb-4">
-                  <p className="text-xs text-gray-500 mb-3">
+                  <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-[#a855f7]" />
                     Preferred style for {selectedService.name}?
                   </p>
                   <div className="flex flex-wrap gap-2">
                     {hasPreferredStyleData(lastPreferredStyle) && (
-                      <button
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                         onClick={() => applySameAsLastTime()}
-                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                        className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#a855f7]/30"
                       >
                         Same as last time
-                      </button>
+                      </motion.button>
                     )}
-                    <button
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                       onClick={() => {
                         setStyleMode("text");
                         setStyleDraftText("");
                         setStyleDraftImageUrl(null);
                       }}
-                      className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                      className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#00d4ff]/30 flex items-center gap-1"
                     >
+                      <FileText className="w-3 h-3" />
                       Type it
-                    </button>
-                    <button
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                       onClick={() => styleFileInputRef.current?.click()}
                       disabled={styleUploading}
-                      className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors disabled:opacity-60"
+                      className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#ec4899]/30 disabled:opacity-60 flex items-center gap-1"
                     >
+                      {styleUploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <ImageIcon className="w-3 h-3" />}
                       {styleUploading ? "Uploading..." : "Add image"}
-                    </button>
-                    <button
+                    </motion.button>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                       onClick={() => skipPreferredStyle()}
-                      className="px-4 py-2 bg-gray-800 text-white text-sm rounded-full transition-colors"
+                      className="px-4 py-2 btn-neon text-sm rounded-full"
                     >
                       Skip
-                    </button>
+                    </motion.button>
                   </div>
 
-                  {styleMode !== "idle" && (
-                    <div className="mt-4 rounded-2xl border border-gray-100 bg-gray-50/70 p-4 space-y-3">
-                      {styleDraftImageUrl && (
-                        <div className="rounded-xl overflow-hidden border border-gray-200 bg-white">
-                          <img
-                            src={styleDraftImageUrl}
-                            alt="Preferred style"
-                            className="w-full max-h-48 object-cover"
-                          />
+                  <AnimatePresence>
+                    {styleMode !== "idle" && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="mt-4 rounded-2xl glass p-4 space-y-3 border border-white/10"
+                      >
+                        {styleDraftImageUrl && (
+                          <div className="rounded-xl overflow-hidden border border-white/10 glass">
+                            <img
+                              src={styleDraftImageUrl}
+                              alt="Preferred style"
+                              className="w-full max-h-48 object-cover"
+                            />
+                          </div>
+                        )}
+                        <textarea
+                          value={styleDraftText}
+                          onChange={(event) => setStyleDraftText(event.target.value)}
+                          placeholder="Describe your preferred style (optional if you uploaded an image)."
+                          className="w-full min-h-[90px] rounded-xl input-glass px-3 py-2 text-sm"
+                        />
+                        <div className="flex flex-wrap gap-2">
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() =>
+                              savePreferredStyle({
+                                text: styleDraftText,
+                                image_url: styleDraftImageUrl ?? undefined,
+                              })
+                            }
+                            disabled={styleSaving}
+                            className="px-4 py-2 btn-neon text-sm rounded-full disabled:opacity-60"
+                          >
+                            {styleSaving ? "Saving..." : "Save preference"}
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => {
+                              setStyleMode("idle");
+                              setStyleDraftText("");
+                              setStyleDraftImageUrl(null);
+                            }}
+                            className="px-4 py-2 glass text-gray-400 hover:text-white text-sm rounded-full border border-white/10 hover:bg-white/10 transition-all"
+                          >
+                            Cancel
+                          </motion.button>
                         </div>
-                      )}
-                      <textarea
-                        value={styleDraftText}
-                        onChange={(event) => setStyleDraftText(event.target.value)}
-                        placeholder="Describe your preferred style (optional if you uploaded an image)."
-                        className="w-full min-h-[90px] rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-gray-200"
-                      />
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          onClick={() =>
-                            savePreferredStyle({
-                              text: styleDraftText,
-                              image_url: styleDraftImageUrl ?? undefined,
-                            })
-                          }
-                          disabled={styleSaving}
-                          className="px-4 py-2 bg-gray-800 text-white text-sm rounded-full disabled:opacity-60"
-                        >
-                          {styleSaving ? "Saving..." : "Save preference"}
-                        </button>
-                        <button
-                          onClick={() => {
-                            setStyleMode("idle");
-                            setStyleDraftText("");
-                            setStyleDraftImageUrl(null);
-                          }}
-                          className="px-4 py-2 bg-white text-gray-600 text-sm rounded-full border border-gray-200"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                      {styleError && (
-                        <p className="text-xs text-red-600">{styleError}</p>
-                      )}
-                    </div>
-                  )}
+                        {styleError && (
+                          <p className="text-xs text-red-400">{styleError}</p>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                   {styleMode === "idle" && styleError && (
-                    <p className="mt-3 text-xs text-red-600">{styleError}</p>
+                    <p className="mt-3 text-xs text-red-400">{styleError}</p>
                   )}
 
                   {appliedPromo?.type === "SERVICE_COMBO_PROMO" &&
                     comboOtherService &&
                     comboChoice === "pending" && (
-                      <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
-                        <p className="text-sm text-blue-900 font-medium">
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mt-4 rounded-2xl glass p-4 border border-[#00d4ff]/20"
+                      >
+                        <p className="text-sm text-white font-medium flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-[#00d4ff]" />
                           Bundle this with {comboOtherService.name} for the combo offer?
                         </p>
-                        <p className="text-xs text-blue-700 mt-1">
+                        <p className="text-xs text-gray-400 mt-1">
                           You can add it now or skip the combo.
                         </p>
                         <div className="mt-3 flex flex-wrap gap-2">
-                          <button
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={() => {
                               if (comboOtherServiceId) {
                                 setComboServiceId(comboOtherServiceId);
@@ -2296,25 +2393,28 @@ export default function ChatPage() {
                                 );
                               }
                             }}
-                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-full"
+                            className="px-4 py-2 btn-neon text-sm rounded-full"
                           >
                             Add {comboOtherService.name}
-                          </button>
-                          <button
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={() => {
                               setComboChoice("declined");
                               setComboServiceId(null);
                               appendAssistantMessage("No problem, we'll keep just the main service.");
                             }}
-                            className="px-4 py-2 bg-white text-blue-700 text-sm rounded-full border border-blue-200"
+                            className="px-4 py-2 glass text-gray-400 hover:text-white text-sm rounded-full border border-white/10 hover:bg-white/10 transition-all"
                           >
                             No thanks
-                          </button>
+                          </motion.button>
                         </div>
-                      </div>
+                      </motion.div>
                     )}
                   {comboChoice === "accepted" && comboOtherService && (
-                    <p className="mt-3 text-xs text-green-700">
+                    <p className="mt-3 text-xs text-emerald-400 flex items-center gap-1">
+                      <Check className="w-3 h-3" />
                       Combo added: {comboOtherService.name}.
                     </p>
                   )}
@@ -2337,16 +2437,26 @@ export default function ChatPage() {
 
               {stage === "SELECT_DATE" && selectedService && (
                 <div className="px-6 pb-4">
-                  <p className="text-xs text-gray-500 mb-3">Pick a date:</p>
+                  <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-[#00d4ff]" />
+                    Pick a date:
+                  </p>
                   {appliedPromo?.type === "SERVICE_COMBO_PROMO" &&
                     comboOtherService &&
                     comboChoice === "pending" && (
-                      <div className="mb-4 rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
-                        <p className="text-sm text-blue-900 font-medium">
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mb-4 rounded-2xl glass p-4 border border-[#00d4ff]/20"
+                      >
+                        <p className="text-sm text-white font-medium flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-[#00d4ff]" />
                           Bundle this with {comboOtherService.name} for the combo offer?
                         </p>
                         <div className="mt-3 flex flex-wrap gap-2">
-                          <button
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={() => {
                               if (comboOtherServiceId) {
                                 setComboServiceId(comboOtherServiceId);
@@ -2356,32 +2466,36 @@ export default function ChatPage() {
                                 );
                               }
                             }}
-                            className="px-4 py-2 bg-blue-600 text-white text-sm rounded-full"
+                            className="px-4 py-2 btn-neon text-sm rounded-full"
                           >
                             Add {comboOtherService.name}
-                          </button>
-                          <button
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
                             onClick={() => {
                               setComboChoice("declined");
                               setComboServiceId(null);
                               appendAssistantMessage("No problem, we'll keep just the main service.");
                             }}
-                            className="px-4 py-2 bg-white text-blue-700 text-sm rounded-full border border-blue-200"
+                            className="px-4 py-2 glass text-gray-400 hover:text-white text-sm rounded-full border border-white/10 hover:bg-white/10 transition-all"
                           >
                             No thanks
-                          </button>
+                          </motion.button>
                         </div>
-                      </div>
+                      </motion.div>
                     )}
                   <div className="flex flex-wrap gap-2">
                     {dateOptions.map((opt) => (
-                      <button
+                      <motion.button
                         key={opt.value}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                         onClick={() => onSelectDate(opt.value)}
-                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                        className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#00d4ff]/30"
                       >
                         {opt.label}
-                      </button>
+                      </motion.button>
                     ))}
                   </div>
                 </div>
@@ -2389,17 +2503,22 @@ export default function ChatPage() {
 
               {stage === "SELECT_SLOT" && slots.length > 0 && (
                 <div className="px-6 pb-4">
-                  <p className="text-xs text-gray-500 mb-3">Pick a time:</p>
-                  <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto">
+                  <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
+                    <Clock className="w-3 h-3 text-[#a855f7]" />
+                    Pick a time:
+                  </p>
+                  <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto scrollbar-hide">
                     {/* Show unique times only */}
                     {Array.from(new Set(slots.map((s) => formatTime(s.start_time)))).map((timeStr) => (
-                      <button
+                      <motion.button
                         key={timeStr}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                         onClick={() => onSelectTime(timeStr)}
-                        className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                        className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#a855f7]/30"
                       >
                         {timeStr}
-                      </button>
+                      </motion.button>
                     ))}
                   </div>
                 </div>
@@ -2407,18 +2526,23 @@ export default function ChatPage() {
 
               {stage === "SELECT_STYLIST" && selectedTime && (
                 <div className="px-6 pb-4">
-                  <p className="text-xs text-gray-500 mb-3">Choose a stylist for {selectedTime}:</p>
+                  <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
+                    <User className="w-3 h-3 text-[#ec4899]" />
+                    Choose a stylist for {selectedTime}:
+                  </p>
                   <div className="flex flex-wrap gap-2">
                     {slots
                       .filter((s) => formatTime(s.start_time) === selectedTime)
                       .map((slot) => (
-                        <button
+                        <motion.button
                           key={slot.stylist_id}
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
                           onClick={() => onSelectStylist(slot.stylist_id, slot.stylist_name)}
-                          className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm rounded-full transition-colors"
+                          className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#ec4899]/30"
                         >
                           {slot.stylist_name}
-                        </button>
+                        </motion.button>
                       ))}
                   </div>
                 </div>
@@ -2426,18 +2550,20 @@ export default function ChatPage() {
 
               {stage === "CONFIRMING" && hold && !confirmed && (
                 <div className="px-6 pb-4">
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
                     onClick={() => confirmBooking()}
                     disabled={confirmLoading}
-                    className="w-full py-3 bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white rounded-xl font-semibold transition-all"
+                    className="w-full py-3 btn-neon rounded-xl font-semibold disabled:opacity-60 transition-all"
                   >
                     {confirmLoading ? "Confirming..." : "Confirm booking"}
-                  </button>
+                  </motion.button>
                 </div>
               )}
 
               {/* Chat Input */}
-              <div className="border-t border-gray-100 p-4">
+              <div className="border-t border-white/5 p-4 glass">
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
@@ -2450,64 +2576,77 @@ export default function ChatPage() {
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     placeholder="Type your message..."
-                    className="flex-1 px-5 py-3 bg-gray-100 rounded-full text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:bg-white transition-all"
+                    className="flex-1 px-5 py-3 input-glass rounded-full text-sm transition-all"
                     disabled={isLoading}
                   />
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
                     type="submit"
                     disabled={!inputValue.trim() || isLoading}
-                    className="px-6 py-3 bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white rounded-full font-medium transition-all disabled:cursor-not-allowed"
+                    className="px-6 py-3 btn-neon rounded-full font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                    </svg>
-                  </button>
+                    <Send className="w-5 h-5" />
+                  </motion.button>
                 </form>
               </div>
-            </div>
+            </motion.div>
 
             {/* Booking Status - only show when we have collected info */}
             {(customerName || customerEmail || hold) && (
-              <div className="mt-4 bg-white/70 backdrop-blur rounded-2xl shadow p-4 border border-gray-100">
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-4 glass rounded-2xl shadow p-4 border border-white/5"
+              >
                 <div className="flex items-center gap-3">
                   <div className="flex-1">
-                    <p className="text-sm font-medium text-gray-900">Booking Status</p>
-                    <div className="flex flex-wrap gap-3 mt-1 text-xs text-gray-600">
-                      {customerName && <span>👤 {customerName}</span>}
-                      {customerEmail && <span>✉️ {customerEmail}</span>}
-                      {hold && <span className="text-green-600 font-medium">✓ Slot held</span>}
-                      {confirmed && <span className="text-green-600 font-medium">✓ Confirmed!</span>}
+                    <p className="text-sm font-medium text-white">Booking Status</p>
+                    <div className="flex flex-wrap gap-3 mt-1 text-xs text-gray-400">
+                      {customerName && <span className="flex items-center gap-1"><User className="w-3 h-3" /> {customerName}</span>}
+                      {customerEmail && <span className="flex items-center gap-1"><Mail className="w-3 h-3" /> {customerEmail}</span>}
+                      {hold && <span className="text-emerald-400 font-medium flex items-center gap-1"><Check className="w-3 h-3" /> Slot held</span>}
+                      {confirmed && <span className="text-emerald-400 font-medium flex items-center gap-1"><Check className="w-3 h-3" /> Confirmed!</span>}
                     </div>
                   </div>
                   {hold && !confirmed && (
-                    <button
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                       onClick={() => confirmBooking()}
                       disabled={confirmLoading}
-                      className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white text-sm rounded-lg font-medium transition-all"
+                      className="px-4 py-2 btn-neon text-sm rounded-lg font-medium disabled:opacity-60 transition-all"
                     >
                       {confirmLoading ? "..." : "Confirm"}
-                    </button>
+                    </motion.button>
                   )}
                 </div>
-              </div>
+              </motion.div>
             )}
 
 
 
             {(selectedSlot || hold) && (
-              <div className="bg-white rounded-3xl shadow-xl p-6">
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">Booking summary</h3>
-                <div className="space-y-3 text-sm text-gray-700">
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="glass-card rounded-3xl shadow-xl p-6 border border-white/5"
+              >
+                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-[#00d4ff]" />
+                  Booking summary
+                </h3>
+                <div className="space-y-3 text-sm text-gray-300">
                   <div className="flex justify-between">
                     <span className="text-gray-500">Service</span>
-                    <span className="font-medium text-gray-900">
+                    <span className="font-medium text-white">
                       {combinedServiceLabel || "Select a service"}
                     </span>
                   </div>
                   {selectedService && (
                     <div className="flex justify-between">
                       <span className="text-gray-500">Subtotal</span>
-                      <span className="font-medium text-gray-800">
+                      <span className="font-medium text-white">
                         {formatMoney(basePriceCents)}
                       </span>
                     </div>
@@ -2517,7 +2656,7 @@ export default function ChatPage() {
                     (appliedPromo.type !== "SERVICE_COMBO_PROMO" || comboAccepted) && (
                     <div className="flex justify-between">
                       <span className="text-gray-500">Promotion</span>
-                      <span className="font-medium text-green-700">
+                      <span className="font-medium text-emerald-400">
                         {promoTotals.discountCents > 0
                           ? `- ${formatMoney(promoTotals.discountCents)}`
                           : "Applied"}
@@ -2527,7 +2666,7 @@ export default function ChatPage() {
                   {selectedService && (
                     <div className="flex justify-between">
                       <span className="text-gray-500">Total</span>
-                      <span className="font-semibold text-gray-800">
+                      <span className="font-semibold text-[#00d4ff]">
                         {formatMoney(promoTotals.totalCents)}
                       </span>
                     </div>
@@ -2536,59 +2675,62 @@ export default function ChatPage() {
                     <>
                       <div className="flex justify-between">
                         <span className="text-gray-500">Date</span>
-                        <span className="font-medium text-gray-900">{formatDateLabel(dateStr)}</span>
+                        <span className="font-medium text-white">{formatDateLabel(dateStr)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-500">Time</span>
-                        <span className="font-medium text-gray-900">{formatTime(selectedSlot.start_time)}</span>
+                        <span className="font-medium text-white">{formatTime(selectedSlot.start_time)}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-500">Stylist</span>
-                        <span className="font-medium text-gray-900">{selectedSlot.stylist_name}</span>
+                        <span className="font-medium text-white">{selectedSlot.stylist_name}</span>
                       </div>
                     </>
                   )}
                   {hold && (
-                    <div className="flex items-center gap-2 text-green-700 bg-green-50 border border-green-200 rounded-xl px-3 py-2">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
+                    <div className="flex items-center gap-2 text-emerald-400 glass border border-emerald-500/20 rounded-xl px-3 py-2">
+                      <Check className="w-4 h-4" />
                       <span>Slot reserved for 5 minutes. Confirm to lock it in.</span>
                     </div>
                   )}
                 </div>
 
                 {hold && !confirmed && (
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
                     onClick={() => confirmBooking()}
                     disabled={confirmLoading}
-                    className="mt-4 w-full py-4 bg-gray-700 hover:bg-gray-800 disabled:bg-gray-300 text-white rounded-xl font-semibold transition-all"
+                    className="mt-4 w-full py-4 btn-neon rounded-xl font-semibold disabled:opacity-60 transition-all"
                   >
                     {confirmLoading ? "Confirming..." : "Confirm booking"}
-                  </button>
+                  </motion.button>
                 )}
-              </div>
+              </motion.div>
             )}
 
-            <p className="text-center text-gray-400 text-sm">
+            <p className="text-center text-gray-500 text-sm flex items-center justify-center gap-2">
+              <Sparkles className="w-4 h-4 text-[#00d4ff]" />
               Powered by AI • Available 24/7
             </p>
           </div>
         )}
 
         {mode === "track" && (
-          <div className="max-w-3xl mx-auto">
-            <div className="bg-white rounded-3xl shadow-xl p-8">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="max-w-3xl mx-auto"
+          >
+            <div className="glass-card rounded-3xl shadow-xl p-8 border border-white/5">
               <div className="flex items-center justify-between gap-4 mb-6">
                 <div>
-                  <p className="text-sm uppercase tracking-wide text-gray-600 font-semibold">Track</p>
-                  <h2 className="text-2xl font-semibold text-gray-900">Find your bookings</h2>
+                  <p className="text-sm uppercase tracking-wide text-[#00d4ff] font-semibold">Track</p>
+                  <h2 className="text-2xl font-semibold text-white">Find your bookings</h2>
                   <p className="text-sm text-gray-500">Enter your email or phone number to see status and details.</p>
                 </div>
-                <div className="hidden sm:block w-12 h-12 rounded-2xl bg-gray-100 text-gray-600 flex items-center justify-center">
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-9 4h4" />
-                  </svg>
+                <div className="hidden sm:flex w-12 h-12 rounded-2xl glass text-[#a855f7] items-center justify-center border border-white/10">
+                  <Calendar className="w-6 h-6" />
                 </div>
               </div>
 
@@ -2604,21 +2746,27 @@ export default function ChatPage() {
                   value={trackIdentity}
                   onChange={(e) => setTrackIdentity(e.target.value)}
                   placeholder="Email or phone number"
-                  className="flex-1 px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-gray-400"
+                  className="flex-1 px-4 py-3 input-glass rounded-xl"
                 />
-                <button
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
                   type="submit"
-                  className="px-5 py-3 bg-gray-700 hover:bg-gray-800 text-white rounded-xl font-semibold transition disabled:bg-gray-300 disabled:cursor-not-allowed"
+                  className="px-5 py-3 btn-neon rounded-xl font-semibold transition disabled:opacity-60 disabled:cursor-not-allowed"
                   disabled={trackLoading || !trackIdentity.trim()}
                 >
                   {trackLoading ? "Checking..." : "View bookings"}
-                </button>
+                </motion.button>
               </form>
 
               {trackError && (
-                <div className="mt-4 p-3 rounded-xl bg-red-50 text-red-700 text-sm border border-red-100">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mt-4 p-3 rounded-xl bg-red-500/10 text-red-400 text-sm border border-red-500/20"
+                >
                   {trackError}
-                </div>
+                </motion.div>
               )}
 
               <div className="mt-6 space-y-4">
@@ -2628,61 +2776,58 @@ export default function ChatPage() {
                       b.preferred_style_image_url
                   );
                   return (
-                    <div
+                    <motion.div
                       key={b.booking_id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      whileHover={{ scale: 1.01 }}
                       onClick={() => {
                         if (hasStyle) setSelectedTrackBooking(b);
                       }}
-                      className={`border border-gray-100 rounded-2xl p-5 bg-gray-50/60 ${
-                        hasStyle ? "cursor-pointer hover:border-blue-200" : ""
-                      }`}
+                      className={`glass rounded-2xl p-5 border border-white/5 ${
+                        hasStyle ? "cursor-pointer hover:border-[#00d4ff]/30" : ""
+                      } transition-all`}
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <p className="text-sm text-gray-500">{new Date(b.start_time).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</p>
-                          <h3 className="text-lg font-semibold text-gray-900">
+                          <h3 className="text-lg font-semibold text-white">
                             {b.secondary_service_name
                               ? `${b.service_name} + ${b.secondary_service_name}`
                               : b.service_name}
                           </h3>
-                          <p className="text-sm text-gray-600">With {b.stylist_name}</p>
+                          <p className="text-sm text-gray-400">With {b.stylist_name}</p>
                         </div>
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-semibold ${
                             b.status === "CONFIRMED"
-                              ? "bg-green-100 text-green-700"
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
                               : b.status === "HOLD"
-                              ? "bg-amber-100 text-amber-700"
-                              : "bg-gray-200 text-gray-700"
+                              ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                              : "glass border border-white/10 text-gray-400"
                           }`}
                         >
                           {b.status}
                         </span>
                       </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-gray-600">
+                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-gray-400">
                         <div className="flex items-center gap-2">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10m-9 4h4" />
-                          </svg>
+                          <Clock className="w-4 h-4" />
                           {formatTime(b.start_time)} - {formatTime(b.end_time)}
                         </div>
                         <div className="flex items-center gap-2">
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                          </svg>
+                          <User className="w-4 h-4" />
                           {b.customer_name || "Guest"}
                         </div>
                         {b.total_price_cents != null && (
                           <div className="flex items-center gap-2">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
+                            <DollarSign className="w-4 h-4" />
                             {b.discount_cents && b.discount_cents > 0 ? (
                               <span>
-                                <span className="line-through text-gray-400 mr-1">
+                                <span className="line-through text-gray-600 mr-1">
                                   {formatMoney((b.service_price_cents || 0) + (b.secondary_service_price_cents || 0))}
                                 </span>
-                                <span className="text-green-700 font-medium">
+                                <span className="text-emerald-400 font-medium">
                                   {formatMoney(b.total_price_cents)}
                                 </span>
                               </span>
@@ -2693,17 +2838,20 @@ export default function ChatPage() {
                         )}
                       </div>
                       {hasStyle && (
-                        <button
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
                           onClick={(event) => {
                             event.stopPropagation();
                             setSelectedTrackBooking(b);
                           }}
-                          className="mt-4 inline-flex items-center gap-2 text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-100 px-3 py-2 rounded-full"
+                          className="mt-4 inline-flex items-center gap-2 text-xs font-semibold text-[#00d4ff] glass border border-[#00d4ff]/30 px-3 py-2 rounded-full hover:bg-[#00d4ff]/10 transition-all"
                         >
+                          <ChevronRight className="w-3 h-3" />
                           View preferred style
-                        </button>
+                        </motion.button>
                       )}
-                    </div>
+                    </motion.div>
                   );
                 })}
 
@@ -2712,43 +2860,25 @@ export default function ChatPage() {
                 )}
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-gray-100 mt-16">
+      <footer className="border-t border-white/5 mt-16 relative z-10">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
             <p className="text-gray-500 text-sm">
               © 2025 Bishops Tempe. All rights reserved.
             </p>
             <div className="flex items-center gap-6 text-sm text-gray-500">
-              <a href="#" className="hover:text-gray-900 transition-colors">Privacy</a>
-              <a href="#" className="hover:text-gray-900 transition-colors">Terms</a>
-              <a href="#" className="hover:text-gray-900 transition-colors">Contact</a>
+              <a href="#" className="hover:text-[#00d4ff] transition-colors">Privacy</a>
+              <a href="#" className="hover:text-[#00d4ff] transition-colors">Terms</a>
+              <a href="#" className="hover:text-[#00d4ff] transition-colors">Contact</a>
             </div>
           </div>
         </div>
       </footer>
-
-      {/* Global Styles */}
-      <style jsx global>{`
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
-        }
-        @keyframes slideUp {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-fadeIn {
-          animation: fadeIn 0.4s ease-out;
-        }
-        .animate-slideUp {
-          animation: slideUp 0.3s ease-out both;
-        }
-      `}</style>
     </div>
   );
 }
