@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Response, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5116,3 +5116,399 @@ async def review_time_off_request(
         "status": time_off.status.value,
         "message": f"Time-off request {'approved' if req.action == 'approve' else 'rejected'}",
     }
+
+
+# ────────────────────────────────────────────────────────────────
+# Owner Analytics Endpoints
+# ────────────────────────────────────────────────────────────────
+
+class ServiceAnalytics(BaseModel):
+    service_id: int
+    service_name: str
+    bookings: int
+    completed: int
+    no_shows: int
+    no_show_rate: float
+    estimated_revenue_cents: int
+
+
+class StylistAnalytics(BaseModel):
+    stylist_id: int
+    stylist_name: str
+    bookings: int
+    completed: int
+    no_shows: int
+    acknowledgement_rate: float
+
+
+class TimeOfDayDistribution(BaseModel):
+    morning: int  # 6am-12pm
+    afternoon: int  # 12pm-5pm
+    evening: int  # 5pm-9pm
+
+
+class AnalyticsSummary(BaseModel):
+    range_days: int
+    start_date: str
+    end_date: str
+    bookings_total: int
+    completed_count: int
+    no_show_count: int
+    cancellation_count: int
+    no_show_rate: float
+    estimated_revenue_cents: int
+    by_service: list[ServiceAnalytics]
+    by_stylist: list[StylistAnalytics]
+    time_distribution: TimeOfDayDistribution
+    # Comparison vs previous period
+    prev_bookings_total: int
+    bookings_delta: float
+    prev_no_show_rate: float
+    no_show_rate_delta: float
+
+
+@app.get("/owner/analytics/summary", response_model=AnalyticsSummary)
+async def get_analytics_summary(
+    range: str = "7d",
+    session: AsyncSession = Depends(get_session),
+):
+    """Get analytics summary for the specified time range."""
+    tz = ZoneInfo(settings.chat_timezone)
+    now = datetime.now(tz)
+    
+    # Parse range
+    if range == "30d":
+        days = 30
+    else:
+        days = 7
+    
+    end_date = now.date()
+    start_date = end_date - timedelta(days=days)
+    prev_start_date = start_date - timedelta(days=days)
+    prev_end_date = start_date - timedelta(days=1)
+    
+    # Convert to UTC for queries
+    start_utc = datetime.combine(start_date, time.min, tzinfo=tz).astimezone(timezone.utc)
+    end_utc = datetime.combine(end_date, time.max, tzinfo=tz).astimezone(timezone.utc)
+    prev_start_utc = datetime.combine(prev_start_date, time.min, tzinfo=tz).astimezone(timezone.utc)
+    prev_end_utc = datetime.combine(prev_end_date, time.max, tzinfo=tz).astimezone(timezone.utc)
+    
+    # Get current period bookings
+    result = await session.execute(
+        select(Booking).where(
+            and_(
+                Booking.start_at_utc >= start_utc,
+                Booking.start_at_utc <= end_utc,
+                Booking.status == BookingStatus.CONFIRMED,
+            )
+        )
+    )
+    bookings = result.scalars().all()
+    
+    # Get previous period bookings
+    prev_result = await session.execute(
+        select(Booking).where(
+            and_(
+                Booking.start_at_utc >= prev_start_utc,
+                Booking.start_at_utc <= prev_end_utc,
+                Booking.status == BookingStatus.CONFIRMED,
+            )
+        )
+    )
+    prev_bookings = prev_result.scalars().all()
+    
+    # Get services and stylists for names
+    services_result = await session.execute(select(Service))
+    services_map = {s.id: s for s in services_result.scalars().all()}
+    
+    stylists_result = await session.execute(select(Stylist))
+    stylists_map = {s.id: s for s in stylists_result.scalars().all()}
+    
+    # Compute metrics
+    bookings_total = len(bookings)
+    completed_count = sum(1 for b in bookings if getattr(b, 'appointment_status', None) == AppointmentStatus.COMPLETED)
+    no_show_count = sum(1 for b in bookings if getattr(b, 'appointment_status', None) == AppointmentStatus.NO_SHOW)
+    # Cancellation: bookings that were deleted (we can only track expired holds)
+    cancellation_count = 0  # We don't track cancellations in current schema
+    
+    no_show_rate = (no_show_count / bookings_total * 100) if bookings_total > 0 else 0
+    
+    # Estimated revenue from completed bookings
+    estimated_revenue_cents = 0
+    for b in bookings:
+        if getattr(b, 'appointment_status', None) == AppointmentStatus.COMPLETED:
+            svc = services_map.get(b.service_id)
+            if svc:
+                estimated_revenue_cents += svc.price_cents
+                if b.secondary_service_id:
+                    sec_svc = services_map.get(b.secondary_service_id)
+                    if sec_svc:
+                        estimated_revenue_cents += sec_svc.price_cents
+                # Subtract discount
+                estimated_revenue_cents -= (b.discount_cents or 0)
+    
+    # By service breakdown
+    service_stats: dict[int, dict] = {}
+    for b in bookings:
+        sid = b.service_id
+        if sid not in service_stats:
+            svc = services_map.get(sid)
+            service_stats[sid] = {
+                "service_id": sid,
+                "service_name": svc.name if svc else f"Service #{sid}",
+                "bookings": 0,
+                "completed": 0,
+                "no_shows": 0,
+                "revenue": 0,
+            }
+        service_stats[sid]["bookings"] += 1
+        if getattr(b, 'appointment_status', None) == AppointmentStatus.COMPLETED:
+            service_stats[sid]["completed"] += 1
+            svc = services_map.get(sid)
+            if svc:
+                service_stats[sid]["revenue"] += svc.price_cents - (b.discount_cents or 0)
+        if getattr(b, 'appointment_status', None) == AppointmentStatus.NO_SHOW:
+            service_stats[sid]["no_shows"] += 1
+    
+    by_service = [
+        ServiceAnalytics(
+            service_id=s["service_id"],
+            service_name=s["service_name"],
+            bookings=s["bookings"],
+            completed=s["completed"],
+            no_shows=s["no_shows"],
+            no_show_rate=(s["no_shows"] / s["bookings"] * 100) if s["bookings"] > 0 else 0,
+            estimated_revenue_cents=s["revenue"],
+        )
+        for s in service_stats.values()
+    ]
+    
+    # By stylist breakdown
+    stylist_stats: dict[int, dict] = {}
+    for b in bookings:
+        sid = b.stylist_id
+        if sid not in stylist_stats:
+            sty = stylists_map.get(sid)
+            stylist_stats[sid] = {
+                "stylist_id": sid,
+                "stylist_name": sty.name if sty else f"Stylist #{sid}",
+                "bookings": 0,
+                "completed": 0,
+                "no_shows": 0,
+                "acknowledged": 0,
+            }
+        stylist_stats[sid]["bookings"] += 1
+        if getattr(b, 'appointment_status', None) == AppointmentStatus.COMPLETED:
+            stylist_stats[sid]["completed"] += 1
+        if getattr(b, 'appointment_status', None) == AppointmentStatus.NO_SHOW:
+            stylist_stats[sid]["no_shows"] += 1
+        if getattr(b, 'acknowledged_at_utc', None) is not None:
+            stylist_stats[sid]["acknowledged"] += 1
+    
+    by_stylist = [
+        StylistAnalytics(
+            stylist_id=s["stylist_id"],
+            stylist_name=s["stylist_name"],
+            bookings=s["bookings"],
+            completed=s["completed"],
+            no_shows=s["no_shows"],
+            acknowledgement_rate=(s["acknowledged"] / s["bookings"] * 100) if s["bookings"] > 0 else 0,
+        )
+        for s in stylist_stats.values()
+    ]
+    
+    # Time of day distribution
+    morning = afternoon = evening = 0
+    for b in bookings:
+        local_time = b.start_at_utc.astimezone(tz)
+        hour = local_time.hour
+        if 6 <= hour < 12:
+            morning += 1
+        elif 12 <= hour < 17:
+            afternoon += 1
+        elif 17 <= hour < 21:
+            evening += 1
+        else:
+            morning += 1  # Early morning goes to morning
+    
+    time_distribution = TimeOfDayDistribution(
+        morning=morning,
+        afternoon=afternoon,
+        evening=evening,
+    )
+    
+    # Previous period comparison
+    prev_bookings_total = len(prev_bookings)
+    prev_no_show_count = sum(1 for b in prev_bookings if getattr(b, 'appointment_status', None) == AppointmentStatus.NO_SHOW)
+    prev_no_show_rate = (prev_no_show_count / prev_bookings_total * 100) if prev_bookings_total > 0 else 0
+    
+    bookings_delta = ((bookings_total - prev_bookings_total) / prev_bookings_total * 100) if prev_bookings_total > 0 else 0
+    no_show_rate_delta = no_show_rate - prev_no_show_rate
+    
+    return AnalyticsSummary(
+        range_days=days,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        bookings_total=bookings_total,
+        completed_count=completed_count,
+        no_show_count=no_show_count,
+        cancellation_count=cancellation_count,
+        no_show_rate=round(no_show_rate, 1),
+        estimated_revenue_cents=estimated_revenue_cents,
+        by_service=by_service,
+        by_stylist=by_stylist,
+        time_distribution=time_distribution,
+        prev_bookings_total=prev_bookings_total,
+        bookings_delta=round(bookings_delta, 1),
+        prev_no_show_rate=round(prev_no_show_rate, 1),
+        no_show_rate_delta=round(no_show_rate_delta, 1),
+    )
+
+
+# AI Insights models
+class Anomaly(BaseModel):
+    metric: str
+    direction: str  # "increase" | "decrease"
+    value: str
+    likely_causes: list[str]
+    confidence: str  # "low" | "medium" | "high"
+    
+    @field_validator('value', mode='before')
+    @classmethod
+    def convert_value_to_string(cls, v):
+        """Convert numeric values to strings"""
+        if isinstance(v, (int, float)):
+            return str(v)
+        return str(v) if v is not None else ""
+
+
+class Insight(BaseModel):
+    title: str
+    explanation: str
+    supporting_data: list[str]
+    confidence: str  # "low" | "medium" | "high"
+
+
+class Recommendation(BaseModel):
+    action: str
+    expected_impact: str
+    risk: str  # "low" | "medium" | "high"
+    requires_owner_confirmation: bool = True
+
+
+class AIInsightsResponse(BaseModel):
+    executive_summary: list[str]
+    anomalies: list[Anomaly]
+    insights: list[Insight]
+    recommendations: list[Recommendation]
+    questions_for_owner: list[str]
+
+
+class BusinessContext(BaseModel):
+    business_type: str = "salon"  # "barber_shop" | "salon" | "clinic"
+    has_deposits: bool = False
+    has_reminders: bool = True
+
+
+class InsightsRequest(BaseModel):
+    analytics: dict
+    business_context: BusinessContext
+
+
+@app.post("/owner/analytics/insights", response_model=AIInsightsResponse)
+async def generate_analytics_insights(req: InsightsRequest):
+    """Generate AI-powered insights from analytics data using GPT-4o mini."""
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+    
+    system_prompt = """You are an AI business analyst for a small service business.
+You analyze booking performance and staff operations.
+You ONLY reason from provided data.
+If data is insufficient, say so.
+You NEVER invent customer intent or pricing reasons."""
+    
+    user_prompt = f"""Analyze the following booking analytics.
+
+Rules:
+- Use only the provided data
+- Do not hallucinate causes
+- Recommendations must be safe and reversible
+- Output STRICT JSON only
+
+Analytics:
+{json.dumps(req.analytics, indent=2)}
+
+Business context:
+{json.dumps(req.business_context.model_dump(), indent=2)}
+
+Return JSON in this EXACT shape:
+
+{{
+  "executive_summary": ["string"],
+  "anomalies": [
+    {{
+      "metric": "string",
+      "direction": "increase | decrease",
+      "value": "string or number",
+      "likely_causes": ["string"],
+      "confidence": "low | medium | high"
+    }}
+  ],
+  "insights": [
+    {{
+      "title": "string",
+      "explanation": "string",
+      "supporting_data": ["string"],
+      "confidence": "low | medium | high"
+    }}
+  ],
+  "recommendations": [
+    {{
+      "action": "string",
+      "expected_impact": "string",
+      "risk": "low | medium | high",
+      "requires_owner_confirmation": true
+    }}
+  ],
+  "questions_for_owner": ["string"]
+}}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "temperature": 0.3,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            
+            return AIInsightsResponse(
+                executive_summary=parsed.get("executive_summary", []),
+                anomalies=[Anomaly(**a) for a in parsed.get("anomalies", [])],
+                insights=[Insight(**i) for i in parsed.get("insights", [])],
+                recommendations=[Recommendation(**r) for r in parsed.get("recommendations", [])],
+                questions_for_owner=parsed.get("questions_for_owner", []),
+            )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"OpenAI API error: {e}")
+        raise HTTPException(status_code=500, detail=f"AI service error: {e.response.text}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse AI response: {e}")
+        raise HTTPException(status_code=500, detail="Failed to parse AI response")
+    except Exception as e:
+        logger.error(f"Insights generation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
