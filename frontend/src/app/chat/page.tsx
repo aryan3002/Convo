@@ -258,6 +258,11 @@ export default function ChatPage() {
   const [customerName, setCustomerName] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  
+  // Dynamic chips from LLM (e.g., ["Yes", "No"] for date confirmation)
+  const [suggestedChips, setSuggestedChips] = useState<string[] | null>(null);
+  // Store tentative date for "Yes" confirmation
+  const [tentativeDate, setTentativeDate] = useState<string | null>(null);
   const [preferredStyle, setPreferredStyle] = useState<PreferredStyle | null>(null);
   const [lastPreferredStyle, setLastPreferredStyle] = useState<PreferredStyle | null>(null);
   const [preferredStyleComplete, setPreferredStyleComplete] = useState(false);
@@ -797,6 +802,7 @@ export default function ChatPage() {
       customer_name: customerName || undefined,
       customer_email: customerEmail || undefined,
       customer_phone: customerPhone || undefined,
+      tentative_date: tentativeDate || undefined,
       held_slot: hold
         ? {
             booking_id: hold.booking_id,
@@ -1336,6 +1342,9 @@ export default function ChatPage() {
       setCustomerName(extractedName);
     }
 
+    // Clear dynamic chips when user sends a message
+    setSuggestedChips(null);
+    
     setInputValue("");
     const userMsg: Message = { id: uid(), role: "user", text };
     setMessages((prev) => [...prev, userMsg]);
@@ -1544,6 +1553,13 @@ export default function ChatPage() {
         const data: ChatAPIResponse = await res.json();
         appendAssistantMessage(data.reply);
 
+        // Handle dynamic chips from API
+        if (data.chips && data.chips.length > 0) {
+          setSuggestedChips(data.chips);
+        } else {
+          setSuggestedChips(null);
+        }
+
         // Capture email if the bot repeats it back in its reply.
         handleEmailFromChat(data.reply);
 
@@ -1554,6 +1570,7 @@ export default function ChatPage() {
         throw new Error("API error");
       }
     } catch {
+      setSuggestedChips(null);
       setMessages((prev) => [
         ...prev,
         {
@@ -1702,6 +1719,13 @@ export default function ChatPage() {
       }
       case "skip_preferred_style": {
         await skipPreferredStyle();
+        break;
+      }
+      case "confirm_date": {
+        // Store tentative date for confirmation
+        if (params.tentative_date) {
+          setTentativeDate(params.tentative_date as string);
+        }
         break;
       }
       default:
@@ -1924,6 +1948,8 @@ export default function ChatPage() {
     setAppliedPromo(null);
     setComboServiceId(null);
     setComboChoice(null);
+    setSuggestedChips(null);
+    setTentativeDate(null);
   }
 
   // Generate next 7 days for date selection
@@ -2435,7 +2461,32 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {stage === "SELECT_DATE" && selectedService && (
+              {/* Dynamic chips from LLM - takes priority over static stage chips */}
+              {suggestedChips && suggestedChips.length > 0 && (
+                <div className="px-6 pb-4">
+                  <div className="flex flex-wrap gap-2">
+                    {suggestedChips.map((chip) => (
+                      <motion.button
+                        key={chip}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => {
+                          setSuggestedChips(null);
+                          if (chip.toLowerCase() === "no") {
+                            setTentativeDate(null);
+                          }
+                          sendMessage(chip);
+                        }}
+                        className="px-4 py-2 glass hover:bg-white/10 text-gray-300 hover:text-white text-sm rounded-full transition-all border border-white/10 hover:border-[#00d4ff]/30"
+                      >
+                        {chip}
+                      </motion.button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {stage === "SELECT_DATE" && selectedService && !suggestedChips && (
                 <div className="px-6 pb-4">
                   <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
                     <Calendar className="w-3 h-3 text-[#00d4ff]" />
@@ -2501,7 +2552,7 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {stage === "SELECT_SLOT" && slots.length > 0 && (
+              {stage === "SELECT_SLOT" && slots.length > 0 && !suggestedChips && (
                 <div className="px-6 pb-4">
                   <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
                     <Clock className="w-3 h-3 text-[#a855f7]" />
@@ -2524,7 +2575,7 @@ export default function ChatPage() {
                 </div>
               )}
 
-              {stage === "SELECT_STYLIST" && selectedTime && (
+              {stage === "SELECT_STYLIST" && selectedTime && !suggestedChips && (
                 <div className="px-6 pb-4">
                   <p className="text-xs text-gray-500 mb-3 flex items-center gap-1">
                     <User className="w-3 h-3 text-[#ec4899]" />

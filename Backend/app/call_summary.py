@@ -3,6 +3,9 @@ Call Summary Generator - Internal owner feature for voice call tracking.
 
 Uses GPT-4o-mini for factual extraction and summarization.
 No creative writing, no speculation, no conversational tone.
+
+After generating a summary, automatically ingests the transcript and summary
+into the vector store for semantic search by Owner GPT.
 """
 
 import logging
@@ -14,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .models import CallSummary, CallSummaryStatus
+from .vector_search import ingest_call_transcript, ingest_call_summary
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -115,6 +119,46 @@ async def generate_call_summary(
         await db.refresh(call_summary)
         
         logger.info(f"Saved call summary {call_summary.id} for call {call_sid}")
+        
+        # ────────────────────────────────────────────────────────────────
+        # Ingest into vector store for semantic search
+        # ────────────────────────────────────────────────────────────────
+        try:
+            # Default shop_id = 1 (single-shop for now, matches voice.py SHOP_ID)
+            shop_id = session_data.get("shop_id", 1)
+            customer_id = session_data.get("customer_id")
+            stylist_id = session_data.get("stylist_id")
+            booking_id = session_data.get("held_booking_id")
+            
+            # Ingest the full transcript
+            if transcript and len(transcript.strip()) >= 50:
+                await ingest_call_transcript(
+                    session=db,
+                    shop_id=shop_id,
+                    call_id=call_summary.id,
+                    transcript=transcript,
+                    booking_id=booking_id,
+                    customer_id=customer_id,
+                    stylist_id=stylist_id,
+                )
+            
+            # Ingest the key notes summary if available
+            if call_summary.key_notes:
+                await ingest_call_summary(
+                    session=db,
+                    shop_id=shop_id,
+                    call_id=call_summary.id,
+                    summary_text=call_summary.key_notes,
+                    booking_id=booking_id,
+                    customer_id=customer_id,
+                    stylist_id=stylist_id,
+                )
+            
+            logger.info(f"Ingested call {call_summary.id} into vector store")
+        except Exception as ve:
+            # Don't fail the whole summary if vector ingestion fails
+            logger.warning(f"Failed to ingest call {call_summary.id} into vector store: {ve}")
+        
         return call_summary
         
     except Exception as e:

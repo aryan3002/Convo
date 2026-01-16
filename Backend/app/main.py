@@ -3152,6 +3152,553 @@ async def get_call_summaries(
     ]
 
 
+# ────────────────────────────────────────────────────────────────
+# Vector Search Endpoints - Semantic search over call transcripts
+# ────────────────────────────────────────────────────────────────
+
+class VectorSearchRequest(BaseModel):
+    """Enhanced semantic search request with comprehensive filters."""
+    query: str = Field(..., min_length=3, max_length=500, description="Natural language search query")
+    limit: int = Field(default=10, ge=1, le=50, description="Maximum results to return")
+    source_types: list[str] | None = Field(default=None, description="Filter by source types: call_transcript, call_summary, booking_note")
+    customer_id: int | None = Field(default=None, description="Filter by customer ID")
+    stylist_id: int | None = Field(default=None, description="Filter by stylist ID")
+    min_similarity: float = Field(default=0.3, ge=0.0, le=1.0, description="Minimum similarity threshold")
+    date_from: str | None = Field(default=None, description="Start date filter (YYYY-MM-DD)")
+    date_to: str | None = Field(default=None, description="End date filter (YYYY-MM-DD)")
+
+
+class VectorSearchResult(BaseModel):
+    """Search result with full metadata for citations."""
+    id: str
+    source_type: str
+    source_id: str
+    booking_id: str | None = None
+    call_id: str | None = None
+    chunk_index: int
+    content: str
+    customer_id: int | None
+    stylist_id: int | None
+    created_at: str
+    similarity: float
+
+
+class VectorSearchResponse(BaseModel):
+    results: list[VectorSearchResult]
+    query: str
+    total: int
+
+
+@app.post("/owner/search", response_model=VectorSearchResponse)
+async def semantic_search_calls(
+    payload: VectorSearchRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Semantic search over call transcripts, summaries, and booking notes.
+    Uses pgvector for similarity search with OpenAI embeddings.
+    
+    Supports filters:
+    - source_types: call_transcript, call_summary, booking_note
+    - date_from/date_to: Date range (YYYY-MM-DD)
+    - customer_id: Filter by customer
+    - stylist_id: Filter by stylist
+    - min_similarity: Minimum relevance threshold (0.0-1.0)
+    
+    Returns chunks with full metadata for citation purposes.
+    """
+    from .rag import search_chunks_with_filters
+    from .vector_search import SourceType
+    from datetime import datetime
+    
+    shop = await get_default_shop(session)
+    
+    # Convert source_types strings to enum if provided
+    source_type_enums = None
+    if payload.source_types:
+        try:
+            source_type_enums = [SourceType(st) for st in payload.source_types]
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid source_type. Must be one of: {[e.value for e in SourceType]}"
+            )
+    
+    # Parse date filters
+    date_from = None
+    date_to = None
+    try:
+        if payload.date_from:
+            date_from = datetime.strptime(payload.date_from, "%Y-%m-%d").date()
+        if payload.date_to:
+            date_to = datetime.strptime(payload.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    try:
+        results = await search_chunks_with_filters(
+            session=session,
+            shop_id=shop.id,
+            query=payload.query,
+            limit=payload.limit,
+            source_types=source_type_enums,
+            customer_id=payload.customer_id,
+            stylist_id=payload.stylist_id,
+            min_similarity=payload.min_similarity,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        
+        return VectorSearchResponse(
+            results=[
+                VectorSearchResult(
+                    id=str(r.id),
+                    source_type=r.source_type,
+                    source_id=str(r.source_id) if r.source_id else "",
+                    booking_id=str(r.booking_id) if r.booking_id else None,
+                    call_id=str(r.call_id) if r.call_id else None,
+                    chunk_index=r.chunk_index,
+                    content=r.content,
+                    customer_id=r.customer_id,
+                    stylist_id=r.stylist_id,
+                    created_at=r.created_at.isoformat() if r.created_at else "",
+                    similarity=round(r.similarity, 4),
+                )
+                for r in results
+            ],
+            query=payload.query,
+            total=len(results),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Vector search error: {e}")
+        raise HTTPException(status_code=500, detail="Search failed")
+
+
+# ────────────────────────────────────────────────────────────────
+# RAG Endpoint - Grounded answers with citations
+# ────────────────────────────────────────────────────────────────
+
+class AskRequest(BaseModel):
+    """Request for RAG-powered Q&A with citations."""
+    question: str = Field(..., min_length=3, max_length=1000, description="Natural language question")
+    limit: int = Field(default=5, ge=1, le=20, description="Max chunks to retrieve for context")
+    min_similarity: float = Field(default=0.35, ge=0.0, le=1.0, description="Minimum similarity threshold")
+    
+    # Optional filters
+    source_types: list[str] | None = Field(default=None, description="Filter by: call_transcript, call_summary, booking_note")
+    date_from: str | None = Field(default=None, description="Start date (YYYY-MM-DD)")
+    date_to: str | None = Field(default=None, description="End date (YYYY-MM-DD)")
+    stylist_id: int | None = Field(default=None, description="Filter by stylist")
+    customer_id: int | None = Field(default=None, description="Filter by customer")
+
+
+class AskSource(BaseModel):
+    """A cited source in the RAG response."""
+    chunk_id: str
+    source_type: str
+    source_id: str
+    booking_id: str | None = None
+    call_id: str | None = None
+    excerpt: str = Field(..., description="Truncated content excerpt")
+    similarity: float
+    created_at: str
+
+
+class AskResponse(BaseModel):
+    """RAG response with grounded answer and citations."""
+    answer: str = Field(..., description="LLM-generated answer grounded in sources")
+    sources: list[AskSource] = Field(..., description="Cited sources with excerpts")
+    has_sufficient_evidence: bool = Field(..., description="True if answer is well-supported")
+    query: str
+    chunks_retrieved: int
+    chunks_above_threshold: int
+
+
+@app.post("/owner/ask", response_model=AskResponse)
+async def ask_with_rag(
+    payload: AskRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Answer questions using RAG (Retrieval-Augmented Generation) with explicit citations.
+    
+    This endpoint:
+    1. Embeds the question and retrieves relevant chunks
+    2. Applies similarity threshold filtering
+    3. Passes context to LLM with strict grounding instructions
+    4. Returns answer with cited sources
+    
+    Guardrails:
+    - If no chunks above threshold: Returns "No relevant data found"
+    - LLM must cite sources using [Source N] notation
+    - If LLM cannot cite sources, a refusal message is returned
+    - Answer is capped at 5-7 sentences
+    
+    Example:
+        POST /owner/ask
+        {
+            "question": "What did customers complain about this week?",
+            "date_from": "2026-01-08",
+            "date_to": "2026-01-15",
+            "limit": 5
+        }
+    
+    Response:
+        {
+            "answer": "Based on the call transcripts, customers mentioned... [Source 1]",
+            "sources": [{"chunk_id": "...", "excerpt": "...", ...}],
+            "has_sufficient_evidence": true,
+            ...
+        }
+    """
+    from .rag import ask_with_citations
+    from .vector_search import SourceType
+    from datetime import datetime
+    
+    shop = await get_default_shop(session)
+    
+    # Convert source_types
+    source_type_enums = None
+    if payload.source_types:
+        try:
+            source_type_enums = [SourceType(st) for st in payload.source_types]
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid source_type. Must be one of: {[e.value for e in SourceType]}"
+            )
+    
+    # Parse dates
+    date_from = None
+    date_to = None
+    try:
+        if payload.date_from:
+            date_from = datetime.strptime(payload.date_from, "%Y-%m-%d").date()
+        if payload.date_to:
+            date_to = datetime.strptime(payload.date_to, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    try:
+        result = await ask_with_citations(
+            session=session,
+            shop_id=shop.id,
+            question=payload.question,
+            limit=payload.limit,
+            min_similarity=payload.min_similarity,
+            source_types=source_type_enums,
+            date_from=date_from,
+            date_to=date_to,
+            stylist_id=payload.stylist_id,
+            customer_id=payload.customer_id,
+        )
+        
+        return AskResponse(
+            answer=result.answer,
+            sources=[
+                AskSource(
+                    chunk_id=s.chunk_id,
+                    source_type=s.source_type,
+                    source_id=s.source_id,
+                    booking_id=s.booking_id,
+                    call_id=s.call_id,
+                    excerpt=s.excerpt,
+                    similarity=s.similarity,
+                    created_at=s.created_at,
+                )
+                for s in result.sources
+            ],
+            has_sufficient_evidence=result.has_sufficient_evidence,
+            query=result.query,
+            chunks_retrieved=result.chunks_retrieved,
+            chunks_above_threshold=result.chunks_above_threshold,
+        )
+    except Exception as e:
+        logger.exception(f"RAG error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate answer")
+
+
+# ────────────────────────────────────────────────────────────────
+# Enhanced RAG with Quality Improvements
+# ────────────────────────────────────────────────────────────────
+
+class EnhancedAskRequest(BaseModel):
+    """Enhanced RAG request with quality control options."""
+    question: str = Field(..., min_length=3, max_length=1000)
+    limit: int = Field(default=5, ge=1, le=20)
+    min_similarity: float = Field(default=0.35, ge=0.0, le=1.0)
+    
+    # Filters
+    source_types: list[str] | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    stylist_id: int | None = None
+    customer_id: int | None = None
+    
+    # Enhancement toggles (all default to True)
+    enable_query_rewrite: bool = True
+    enable_hybrid_search: bool = True
+    enable_reranking: bool = True
+    enable_deduplication: bool = True
+    enable_cache: bool = True
+
+
+class EnhancedAskResponse(BaseModel):
+    """Enhanced response with metrics."""
+    answer: str
+    sources: list[AskSource]
+    has_sufficient_evidence: bool
+    query: str
+    chunks_retrieved: int
+    chunks_above_threshold: int
+    
+    # Enhanced fields
+    rewritten_query: str | None = None
+    cache_hit: bool = False
+    latency_ms: dict[str, float] = Field(default_factory=dict)
+
+
+@app.post("/owner/ask/enhanced", response_model=EnhancedAskResponse)
+async def enhanced_ask_with_rag(
+    payload: EnhancedAskRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Enhanced RAG endpoint with quality improvements:
+    
+    - Query rewriting: Optimizes questions for better retrieval
+    - Hybrid search: Combines vector + full-text search
+    - Reranking: Reorders chunks by keyword relevance
+    - Deduplication: Removes near-identical chunks
+    - Caching: Short TTL cache for repeated questions
+    
+    All enhancements can be toggled via request parameters.
+    Includes latency breakdown for observability.
+    """
+    from .rag_enhanced import enhanced_ask_with_citations, RAGConfig
+    from .vector_search import SourceType
+    from datetime import datetime
+    
+    shop = await get_default_shop(session)
+    
+    # Build config from request
+    config = RAGConfig(
+        enable_query_rewrite=payload.enable_query_rewrite,
+        enable_hybrid_search=payload.enable_hybrid_search,
+        enable_reranking=payload.enable_reranking,
+        enable_deduplication=payload.enable_deduplication,
+        enable_cache=payload.enable_cache,
+    )
+    
+    # Convert source_types
+    source_type_enums = None
+    if payload.source_types:
+        try:
+            source_type_enums = [SourceType(st) for st in payload.source_types]
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid source_type. Must be one of: {[e.value for e in SourceType]}"
+            )
+    
+    # Parse dates
+    date_from = None
+    date_to = None
+    try:
+        if payload.date_from:
+            date_from = datetime.strptime(payload.date_from, "%Y-%m-%d")
+        if payload.date_to:
+            date_to = datetime.strptime(payload.date_to, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    try:
+        result, metrics = await enhanced_ask_with_citations(
+            session=session,
+            shop_id=shop.id,
+            question=payload.question,
+            limit=payload.limit,
+            min_similarity=payload.min_similarity,
+            source_types=source_type_enums,
+            date_from=date_from,
+            date_to=date_to,
+            stylist_id=payload.stylist_id,
+            customer_id=payload.customer_id,
+            config=config,
+        )
+        
+        return EnhancedAskResponse(
+            answer=result.answer,
+            sources=[
+                AskSource(
+                    chunk_id=s.chunk_id,
+                    source_type=s.source_type,
+                    source_id=s.source_id,
+                    booking_id=s.booking_id,
+                    call_id=s.call_id,
+                    excerpt=s.excerpt,
+                    similarity=s.similarity,
+                    created_at=s.created_at,
+                )
+                for s in result.sources
+            ],
+            has_sufficient_evidence=result.has_sufficient_evidence,
+            query=result.query,
+            chunks_retrieved=result.chunks_retrieved,
+            chunks_above_threshold=result.chunks_above_threshold,
+            rewritten_query=metrics.rewritten_query,
+            cache_hit=metrics.cache_hit,
+            latency_ms={
+                "query_rewrite": round(metrics.query_rewrite_ms, 1),
+                "embedding": round(metrics.embedding_ms, 1),
+                "retrieval": round(metrics.retrieval_ms, 1),
+                "reranking": round(metrics.reranking_ms, 1),
+                "llm": round(metrics.llm_ms, 1),
+                "total": round(metrics.total_ms, 1),
+            },
+        )
+    except Exception as e:
+        logger.exception(f"Enhanced RAG error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate answer")
+
+
+# ────────────────────────────────────────────────────────────────
+# RAG Metrics Endpoint
+# ────────────────────────────────────────────────────────────────
+
+class RAGMetricsResponse(BaseModel):
+    """Aggregated RAG metrics for observability."""
+    total_requests: int
+    period_hours: int
+    evidence_rate: float | None = None
+    cache_hit_rate: float | None = None
+    avg_chunks_retrieved: float | None = None
+    avg_total_latency_ms: float | None = None
+    avg_retrieval_latency_ms: float | None = None
+    avg_llm_latency_ms: float | None = None
+    top_query_patterns: list[dict] = Field(default_factory=list)
+
+
+@app.get("/owner/rag-metrics", response_model=RAGMetricsResponse)
+async def get_rag_metrics(
+    hours: int = 24,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Get aggregated RAG metrics for observability.
+    
+    Returns:
+    - evidence_rate: % of questions with sufficient evidence
+    - cache_hit_rate: % of requests served from cache
+    - avg_chunks_retrieved: Average chunks above threshold
+    - latency breakdown: retrieval, LLM, total
+    - top_query_patterns: Most common question patterns
+    """
+    from .rag_enhanced import get_metrics_summary
+    
+    shop = await get_default_shop(session)
+    summary = get_metrics_summary(shop_id=shop.id, hours=hours)
+    
+    return RAGMetricsResponse(**summary)
+
+
+# ────────────────────────────────────────────────────────────────
+# Suggested Prompts Endpoint
+# ────────────────────────────────────────────────────────────────
+
+class SuggestedPromptsResponse(BaseModel):
+    prompts: list[str]
+
+
+@app.get("/owner/suggested-prompts", response_model=SuggestedPromptsResponse)
+async def get_suggested_prompts():
+    """
+    Get suggested prompts for the Owner Ask UI.
+    These are curated questions that work well with the RAG system.
+    """
+    prompts = [
+        "Summarize today's calls",
+        "Any no-show patterns this week?",
+        "What services are customers asking about?",
+        "Any complaints about wait times?",
+        "Which stylist got the most bookings?",
+        "Did anyone ask about pricing?",
+        "Show me customer feedback from this week",
+        "Any requests for specific services?",
+    ]
+    return SuggestedPromptsResponse(prompts=prompts)
+
+
+class IngestCallRequest(BaseModel):
+    call_id: str = Field(..., description="Call summary UUID to ingest")
+
+
+class IngestResponse(BaseModel):
+    success: bool
+    chunks_ingested: int
+    message: str
+
+
+@app.post("/owner/ingest-call", response_model=IngestResponse)
+async def ingest_call_to_vector_store(
+    payload: IngestCallRequest,
+    session: AsyncSession = Depends(get_session)
+):
+    """
+    Manually trigger ingestion of a call summary's transcript into the vector store.
+    Useful for backfilling existing call summaries.
+    """
+    from .vector_search import ingest_call_transcript, ingest_call_summary
+    
+    shop = await get_default_shop(session)
+    
+    try:
+        call_uuid = uuid.UUID(payload.call_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid call_id format")
+    
+    # Fetch the call summary
+    result = await session.execute(
+        select(CallSummary).where(CallSummary.id == call_uuid)
+    )
+    call_summary = result.scalar_one_or_none()
+    
+    if not call_summary:
+        raise HTTPException(status_code=404, detail="Call summary not found")
+    
+    chunks_ingested = 0
+    
+    try:
+        # Ingest transcript if available
+        if call_summary.transcript and len(call_summary.transcript.strip()) >= 50:
+            chunks_ingested += await ingest_call_transcript(
+                session=session,
+                shop_id=shop.id,
+                call_id=call_summary.id,
+                transcript=call_summary.transcript,
+            )
+        
+        # Ingest key notes if available
+        if call_summary.key_notes:
+            chunks_ingested += await ingest_call_summary(
+                session=session,
+                shop_id=shop.id,
+                call_id=call_summary.id,
+                summary_text=call_summary.key_notes,
+            )
+        
+        return IngestResponse(
+            success=True,
+            chunks_ingested=chunks_ingested,
+            message=f"Successfully ingested {chunks_ingested} chunks from call {payload.call_id}",
+        )
+    except Exception as e:
+        logger.exception(f"Ingestion error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
+
+
 @app.post("/owner/promos", response_model=PromoResponse)
 async def create_promo(
     payload: PromoCreateRequest, session: AsyncSession = Depends(get_session)

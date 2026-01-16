@@ -43,7 +43,9 @@ import {
   Sun,
   Sunset,
   Moon,
+  HelpCircle,
 } from "lucide-react";
+import AskConvo from "@/components/AskConvo";
 
 type Role = "user" | "assistant" | "system";
 
@@ -334,7 +336,7 @@ export default function OwnerPage() {
   const [services, setServices] = useState<OwnerService[]>([]);
   const [stylists, setStylists] = useState<OwnerStylist[]>([]);
   const [promos, setPromos] = useState<OwnerPromo[]>([]);
-  const [rightView, setRightView] = useState<'services' | 'stylists' | 'promos' | 'analytics'>('services');
+  const [rightView, setRightView] = useState<'services' | 'stylists' | 'promos' | 'analytics' | 'ask'>('services');
   const [schedule, setSchedule] = useState<OwnerSchedule | null>(null);
   const [scheduleDate, setScheduleDate] = useState(() => {
     const today = new Date();
@@ -2251,6 +2253,17 @@ export default function OwnerPage() {
               <BarChart3 className="w-4 h-4" />
               Analytics
             </button>
+            <button
+              onClick={() => setRightView('ask')}
+              className={`flex-1 px-4 py-2 rounded-full text-sm font-medium transition-all flex items-center justify-center gap-2 ${
+                rightView === 'ask'
+                  ? 'btn-neon'
+                  : 'text-gray-400 hover:text-white hover:bg-white/5'
+              }`}
+            >
+              <HelpCircle className="w-4 h-4" />
+              Ask
+            </button>
           </div>
 
           {rightView === 'services' && (
@@ -2936,6 +2949,26 @@ export default function OwnerPage() {
               ) : (
                 <p className="text-xs text-gray-500 text-center py-8">No data available for the selected period.</p>
               )}
+            </motion.div>
+          )}
+
+          {/* Ask Convo Tab Content */}
+          {rightView === 'ask' && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="glass-card rounded-2xl border border-white/5 h-[600px] overflow-hidden"
+            >
+              <AskConvo 
+                apiBase={API_BASE}
+                onSourceClick={(source) => {
+                  // Navigate to call details if call_id is present
+                  if (source.call_id) {
+                    console.log("Navigate to call:", source.call_id);
+                    // Could expand call summaries or open a modal here
+                  }
+                }}
+              />
             </motion.div>
           )}
         </aside>

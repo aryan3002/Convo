@@ -1,5 +1,6 @@
 """
 Owner GPT module for managing services via structured actions.
+Includes semantic search over call transcripts and booking notes.
 """
 import json
 import re
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .models import Service, ServiceRule, Stylist, StylistSpecialty
+from .vector_search import get_context_for_query, search_similar_chunks
 
 settings = get_settings()
 
@@ -52,12 +54,15 @@ RULES:
 - If the user gives a time range like "from 12pm-9pm", map it to work_start/work_end or time off.
 - For customer history or preferences, use get_customer_profile or list_customers_by_stylist.
 - Promotions require structured fields. Ask one short clarification at a time if anything is missing.
+- For questions about past calls, customer feedback, or conversations, use search_calls to find relevant transcripts.
 
 SERVICES:
 {services}
 
 STYLISTS:
 {stylists}
+
+{call_context}
 
 PROMO TYPES:
 - FIRST_USER_PROMO
@@ -97,6 +102,7 @@ Actions:
 - remove_time_off: {{"stylist_name": "<name>", "date": "YYYY-MM-DD"}}  (start_time/end_time optional; removes all time off for that date if not specified)
 - get_customer_profile: {{"email": "name@example.com"}}
 - list_customers_by_stylist: {{"stylist_name": "<name>"}}
+- search_calls: {{"query": "<natural language question about calls>"}}  (searches call transcripts and summaries semantically)
 - create_promo: {{"type": "<PROMO_TYPE>", "trigger_point": "<TRIGGER_POINT>", "discount_type": "<DISCOUNT_TYPE>", "discount_value": <int>, "service_id": <id|null>, "constraints_json": {{"min_spend_cents": 2000, "valid_days_of_week":[0,1,2], "usage_limit_per_customer": 1}}, "custom_copy": "<optional>", "start_at": "YYYY-MM-DD", "end_at": "YYYY-MM-DD", "active": true, "priority": 0}}
 - update_promo: {{"promo_id": <id>, "trigger_point": "<TRIGGER_POINT>", "active": false}}
 - delete_promo: {{"promo_id": <id>}}
@@ -212,10 +218,50 @@ ALLOWED_ACTIONS = {
     "remove_time_off",
     "get_customer_profile",
     "list_customers_by_stylist",
+    "search_calls",
     "create_promo",
     "update_promo",
     "delete_promo",
 }
+
+# Default shop ID (single-tenant for now)
+DEFAULT_SHOP_ID = 1
+
+
+async def get_call_context_for_query(user_query: str, session: AsyncSession) -> str:
+    """
+    Check if the user query might benefit from call transcript context.
+    If so, fetch relevant chunks from the vector store.
+    """
+    # Keywords that suggest the user wants info from past calls
+    call_keywords = [
+        "call", "calls", "transcript", "conversation", "said", "mentioned",
+        "complaint", "feedback", "customer said", "asked about", "requested",
+        "why did", "what did", "how many", "issue", "problem"
+    ]
+    
+    query_lower = user_query.lower()
+    needs_context = any(kw in query_lower for kw in call_keywords)
+    
+    if not needs_context:
+        return ""
+    
+    try:
+        context = await get_context_for_query(
+            session=session,
+            shop_id=DEFAULT_SHOP_ID,
+            query=user_query,
+            max_tokens=1500,  # Leave room for other context
+            limit=5,
+        )
+        if context:
+            return f"RELEVANT CALL CONTEXT:\n{context}"
+    except Exception as e:
+        # Don't fail the chat if vector search fails
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to fetch call context: {e}")
+    
+    return ""
 
 
 async def owner_chat_with_ai(messages: list[OwnerChatMessage], session: AsyncSession) -> OwnerChatResponse:
@@ -229,9 +275,22 @@ async def owner_chat_with_ai(messages: list[OwnerChatMessage], session: AsyncSes
     stylists_text = await get_stylists_context(session)
     tz = ZoneInfo(settings.chat_timezone)
     today = datetime.now(tz).strftime("%Y-%m-%d")
+    
+    # Get relevant call context if the user query suggests it
+    last_user_message = ""
+    for msg in reversed(messages):
+        if msg.role == "user":
+            last_user_message = msg.content
+            break
+    
+    call_context = ""
+    if last_user_message:
+        call_context = await get_call_context_for_query(last_user_message, session)
+    
     system_prompt = SYSTEM_PROMPT.format(
         services=services_text,
         stylists=stylists_text,
+        call_context=call_context,
         today=today,
         timezone=settings.chat_timezone,
     )

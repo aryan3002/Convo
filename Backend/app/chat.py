@@ -44,6 +44,7 @@ class ChatResponse(BaseModel):
     reply: str
     action: dict | None = None  # Actions for frontend to execute
     data: dict | None = None  # Tool results (services, slots, hold, confirm)
+    chips: list[str] | None = None  # Dynamic chips for user to tap (e.g., ["Yes", "No"])
 
 
 CHAT_PROMPT = """You are a friendly booking assistant for Bishops Tempe hair salon in Tempe, Arizona.
@@ -73,7 +74,7 @@ CRITICAL RULES:
 - If user mentions a date, use fetch_availability and say: "Here are a few good options. Tap one to continue."
 - If user tries to type a time, ask them to tap a time option.
 - Before holding: collect name AND (email OR phone) from user.
-- Follow the CURRENT STAGE and do not skip steps.
+- FAST-PATH: If user provides ALL required details (service + date + time + stylist + name + email), skip ahead and immediately call hold_slot without re-asking.
 - After a service is selected, ask about preferred style before asking for a date.
 - Prefer tool calls; do not invent availability or confirmation.
 - UI SELECTIONS:
@@ -208,21 +209,33 @@ VOICE_STAGE_PROMPTS = {
     "DONE": "You are all set. Anything else I can help with?",
 }
 
-def parse_action_from_response(response: str) -> tuple[str, dict | None]:
-    """Extract action JSON from response text."""
+def parse_action_from_response(response: str) -> tuple[str, dict | None, list[str] | None]:
+    """Extract action JSON and chips from response text."""
     import re
     
     action = None
+    chips = None
     clean_response = response
+    
+    # Look for [CHIPS: [...]] pattern
+    chips_pattern = r'\[CHIPS:\s*(\[[^\]]*\])\]'
+    chips_match = re.search(chips_pattern, response, re.DOTALL)
+    if chips_match:
+        try:
+            chips = json.loads(chips_match.group(1))
+            clean_response = clean_response[:chips_match.start()] + clean_response[chips_match.end():]
+            clean_response = clean_response.strip()
+        except json.JSONDecodeError:
+            pass
     
     # Look for [ACTION: {...}] pattern - use greedy match for nested braces
     action_pattern = r'\[ACTION:\s*(\{[^[\]]*\})\]'
-    match = re.search(action_pattern, response, re.DOTALL)
+    match = re.search(action_pattern, clean_response, re.DOTALL)
     
     if not match:
         # Try alternative pattern with nested braces
         action_pattern = r'\[ACTION:\s*(\{.*\})\]'
-        match = re.search(action_pattern, response, re.DOTALL)
+        match = re.search(action_pattern, clean_response, re.DOTALL)
     
     if match:
         try:
@@ -238,12 +251,12 @@ def parse_action_from_response(response: str) -> tuple[str, dict | None]:
                 else:
                     action = raw_action
             
-            clean_response = response[:match.start()].strip()
+            clean_response = clean_response[:match.start()].strip()
         except json.JSONDecodeError:
             # If JSON parsing fails, just strip the action text anyway
-            clean_response = re.sub(r'\[ACTION:.*?\]\]?', '', response, flags=re.DOTALL).strip()
+            clean_response = re.sub(r'\[ACTION:.*?\]\]?', '', clean_response, flags=re.DOTALL).strip()
     
-    return clean_response, action
+    return clean_response, action, chips
 
 
 def normalize_stage(value: Any) -> str:
@@ -251,6 +264,14 @@ def normalize_stage(value: Any) -> str:
         return "CAPTURE_EMAIL"
     text = str(value).strip().upper()
     return text if text in ALLOWED_STAGES else "CAPTURE_EMAIL"
+
+
+def _get_ordinal_suffix(day: int) -> str:
+    """Get ordinal suffix for day number (1st, 2nd, 3rd, 4th, etc.)."""
+    if 10 <= day % 100 <= 20:
+        return "th"
+    else:
+        return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
 
 def shorten_reply(text: str) -> str:
@@ -266,6 +287,18 @@ def shorten_reply(text: str) -> str:
 
 def format_cents(value: int) -> str:
     return f"${value / 100:.2f}"
+
+
+def extract_phone_from_messages(messages: list[ChatMessage]) -> str:
+    """Extract phone number from messages."""
+    for msg in reversed(messages):
+        if msg.role != "user":
+            continue
+        # Match phone patterns: (123) 456-7890, 123-456-7890, 1234567890, +1...
+        match = re.search(r"(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})", msg.content)
+        if match:
+            return match.group(0).strip()
+    return ""
 
 
 def extract_email_from_messages(messages: list[ChatMessage]) -> str:
@@ -293,6 +326,159 @@ def extract_name_from_messages(messages: list[ChatMessage]) -> str:
             if match:
                 return match.group(1).strip()
     return ""
+
+
+def extract_service_name_from_text(text: str, services_list: list[str]) -> str | None:
+    """Extract service name from user text by fuzzy matching."""
+    if not text or not services_list:
+        return None
+    lowered = text.lower()
+    for service_name in services_list:
+        if service_name.lower() in lowered:
+            return service_name
+    return None
+
+
+def extract_day_only_from_text(text: str) -> int | None:
+    """Extract just the day number from text (e.g., '22nd' -> 22) for confirmation."""
+    if not text:
+        return None
+    lowered = text.lower()
+    
+    # Look for standalone day numbers like "22nd", "20th", "5th" without month context
+    # Use word boundaries to avoid matching dates like "16th January"
+    match = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\b", lowered)
+    if match:
+        day = int(match.group(1))
+        # Only return if it's a valid day (1-31) and there's no month in the text
+        if 1 <= day <= 31:
+            # Check if there's a month name nearby (avoid false positives)
+            months_pattern = r"(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)"
+            if not re.search(months_pattern, lowered):
+                return day
+    return None
+
+
+def extract_date_from_text(text: str, tz: ZoneInfo) -> str | None:
+    """Extract date from text, returning YYYY-MM-DD format."""
+    if not text:
+        return None
+    lowered = text.lower()
+    now = datetime.now(tz)
+    
+    # Today/tomorrow
+    if "today" in lowered:
+        return now.strftime("%Y-%m-%d")
+    if "tomorrow" in lowered:
+        return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    # Day of week (whole word match to avoid false positives like "friday" in "16th January")
+    days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    for i, day in enumerate(days):
+        if re.search(rf"\b{day}\b", lowered):
+            current_dow = now.weekday()
+            days_ahead = (i - current_dow) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            return (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    
+    # Explicit date patterns: "March 15", "15th", "16th January", etc.
+    months = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12
+    }
+    
+    # "16th January" or "January 16th" patterns (match day before checking month-day patterns)
+    for month_name, month_num in months.items():
+        # Try "16th January" pattern first (number before month)
+        match = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?{month_name}\b", lowered)
+        if match:
+            day = int(match.group(1))
+            year = now.year
+            try:
+                target = datetime(year, month_num, day, tzinfo=tz)
+                if target.date() < now.date():
+                    target = datetime(year + 1, month_num, day, tzinfo=tz)
+                return target.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        
+        # Try "January 16th" pattern (month before number)
+        match = re.search(rf"\b{month_name}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", lowered)
+        if match:
+            day = int(match.group(1))
+            year = now.year
+            try:
+                target = datetime(year, month_num, day, tzinfo=tz)
+                if target.date() < now.date():
+                    target = datetime(year + 1, month_num, day, tzinfo=tz)
+                return target.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+    
+    # YYYY-MM-DD format
+    match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if match:
+        try:
+            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            target = datetime(year, month, day, tzinfo=tz)
+            return target.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    
+    return None
+
+
+def extract_time_from_text(text: str) -> str | None:
+    """Extract time from text, returning HH:MM format (24-hour)."""
+    if not text:
+        return None
+    lowered = text.lower()
+    
+    # "3pm", "3 pm", "3:30pm", "4:00 pm"
+    match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)", lowered)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        period = match.group(3)
+        
+        if "p" in period and hour != 12:
+            hour += 12
+        elif "a" in period and hour == 12:
+            hour = 0
+        
+        return f"{hour:02d}:{minute:02d}"
+    
+    # "3 o'clock"
+    match = re.search(r"(\d{1,2})\s*o'?clock", lowered)
+    if match:
+        hour = int(match.group(1))
+        if 1 <= hour <= 7:
+            hour += 12
+        return f"{hour:02d}:00"
+    
+    return None
+
+
+def extract_stylist_from_text(text: str) -> tuple[int | None, str | None]:
+    """Extract stylist from text, returning (stylist_id, stylist_name)."""
+    if not text:
+        return None, None
+    lowered = text.lower()
+    
+    # Known stylists mapping
+    stylists = {
+        "alex": (1, "Alex"),
+        "jamie": (2, "Jamie"),
+        "sanskar": (3, "Sanskar"),
+    }
+    
+    for name, (stylist_id, display_name) in stylists.items():
+        if name in lowered:
+            return stylist_id, display_name
+    
+    return None, None
 
 
 async def find_service_by_name(session: AsyncSession, name: str) -> Service | None:
@@ -365,16 +551,39 @@ async def chat_with_ai(
     if not customer_email:
         customer_email = extract_email_from_messages(messages)
     
+    # Also extract phone from messages
+    customer_phone = None
+    if context and context.get("customer_phone"):
+        customer_phone = str(context.get("customer_phone") or "").strip()
+    if not customer_phone:
+        customer_phone = extract_phone_from_messages(messages)
+    
     customer_name = None
     if context and context.get("customer_name"):
         customer_name = str(context.get("customer_name") or "").strip()
     if not customer_name:
         customer_name = extract_name_from_messages(messages)
+    
+    # If we have email or phone but no name, try to look up from customer memory
+    looked_up_name = None
+    if (customer_email or customer_phone) and not customer_name:
+        customer_ctx = await get_customer_context(session, customer_email, customer_phone)
+        if customer_ctx and customer_ctx.get("name"):
+            looked_up_name = customer_ctx.get("name")
+            customer_name = looked_up_name
 
     # During CAPTURE_EMAIL stage, if we have one but not the other, ask for both
     if stage == "CAPTURE_EMAIL":
         has_email = bool(customer_email)
         has_name = bool(customer_name)
+        
+        # If we looked up name from email/phone, greet them and move on
+        if has_email and looked_up_name:
+            return ChatResponse(
+                reply=f"Welcome back, {looked_up_name}! What service would you like to book?",
+                action={"type": "show_services", "params": {}},
+            )
+        
         if not has_email or not has_name:
             if has_email and not has_name:
                 return ChatResponse(
@@ -417,6 +626,100 @@ async def chat_with_ai(
                     action={
                         "type": "select_service",
                         "params": {"service_id": service.id, "service_name": service.name},
+                    },
+                )
+    
+    # Check for "Yes" confirmation to a date disambiguation question
+    if last_user_text and context and context.get("tentative_date"):
+        affirmative = re.search(r"\b(yes|yeah|yep|yup|correct|right|sure|ok|okay|confirm|that'?s? right)\b", last_user_text.lower())
+        if affirmative:
+            tentative_date = context.get("tentative_date")
+            service_id = context.get("selected_service_id") or context.get("service_id")
+            # User confirmed the date - proceed to fetch availability
+            return ChatResponse(
+                reply="Here are a few good options. Tap one to continue.",
+                action={
+                    "type": "fetch_availability",
+                    "params": {"date": tentative_date, "service_id": service_id},
+                },
+                chips=None,  # Clear chips after confirmation
+            )
+        # Check for negative response
+        negative = re.search(r"\b(no|nope|nah|wrong|not right|different|another)\b", last_user_text.lower())
+        if negative:
+            return ChatResponse(
+                reply="No problem. Please provide the full date with month (e.g., January 22).",
+                action=None,
+                chips=None,
+            )
+    
+    # Check for day-only date input (e.g., "22nd", "5th") - needs confirmation regardless of other context
+    if last_user_text:
+        tz = ZoneInfo(settings.chat_timezone)
+        potential_full_date = extract_date_from_text(last_user_text, tz)
+        
+        # Only check day-only if we didn't extract a full date
+        if not potential_full_date:
+            day_only = extract_day_only_from_text(last_user_text)
+            if day_only:
+                local_now = get_local_now()
+                current_month = local_now.month
+                current_year = local_now.year
+                try:
+                    tentative_date = datetime(current_year, current_month, day_only, tzinfo=tz)
+                    if tentative_date.date() < local_now.date():
+                        if current_month == 12:
+                            tentative_date = datetime(current_year + 1, 1, day_only, tzinfo=tz)
+                        else:
+                            tentative_date = datetime(current_year, current_month + 1, day_only, tzinfo=tz)
+                    
+                    month_name = tentative_date.strftime("%B")
+                    suffix = _get_ordinal_suffix(day_only)
+                    formatted_date = tentative_date.strftime("%Y-%m-%d")
+                    
+                    return ChatResponse(
+                        reply=f"Did you mean {day_only}{suffix} {month_name}?",
+                        action={
+                            "type": "confirm_date",
+                            "params": {"tentative_date": formatted_date},
+                        },
+                        chips=["Yes", "No"],
+                    )
+                except ValueError:
+                    pass
+    
+    # FAST-PATH: Check if user provided all booking details in current message
+    # Extract from last user message if we have name and email already
+    if customer_name and customer_email and last_user_text:
+        # Get list of services for matching
+        services_result = await session.execute(select(Service).order_by(Service.id))
+        all_services = services_result.scalars().all()
+        service_names = [s.name for s in all_services]
+        
+        # Extract details from user text
+        tz = ZoneInfo(settings.chat_timezone)
+        extracted_service_name = extract_service_name_from_text(last_user_text, service_names)
+        extracted_date = extract_date_from_text(last_user_text, tz)
+        extracted_time = extract_time_from_text(last_user_text)
+        extracted_stylist_id, extracted_stylist_name = extract_stylist_from_text(last_user_text)
+        
+        # If we have all the details, bypass normal flow and hold slot immediately
+        if extracted_service_name and extracted_date and extracted_time and extracted_stylist_id:
+            service = await find_service_by_name(session, extracted_service_name)
+            if service:
+                return ChatResponse(
+                    reply=f"Holding {extracted_time} on {extracted_date} with {extracted_stylist_name}. Tap confirm to finalize.",
+                    action={
+                        "type": "hold_slot",
+                        "params": {
+                            "service_id": service.id,
+                            "stylist_id": extracted_stylist_id,
+                            "date": extracted_date,
+                            "start_time": extracted_time,
+                            "customer_name": customer_name,
+                            "customer_email": customer_email,
+                            "customer_phone": "",
+                        },
                     },
                 )
 
@@ -532,7 +835,7 @@ async def chat_with_ai(
         )
         
         ai_response = response.choices[0].message.content or ""
-        clean_response, action = parse_action_from_response(ai_response)
+        clean_response, action, chips = parse_action_from_response(ai_response)
 
         allowed = ALLOWED_ACTIONS.get(stage, set())
         if action and action.get("type") not in allowed:
@@ -563,7 +866,7 @@ async def chat_with_ai(
         if stage == "SELECT_SLOT" and (time_pattern.search(reply) or count_pattern.search(reply)):
             reply = stage_prompts_to_use.get("SELECT_SLOT", "Here are a few good options.")
 
-        return ChatResponse(reply=reply, action=action)
+        return ChatResponse(reply=reply, action=action, chips=chips)
         
     except Exception as e:
         import traceback
