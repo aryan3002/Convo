@@ -34,6 +34,7 @@ from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, ow
 from .emailer import send_booking_email_with_ics
 from .sms import send_sms
 from .voice import router as voice_router
+from .public_booking import router as public_booking_router
 from .models import (
     AppointmentStatus,
     Booking,
@@ -64,6 +65,7 @@ from .seed import seed_initial_data
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
 app.include_router(voice_router, prefix="/twilio", tags=["voice"])
+app.include_router(public_booking_router)  # ChatGPT Custom GPT public booking API
 logger = logging.getLogger(__name__)
 
 

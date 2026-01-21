@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     twilio_auth_token: str | None = Field(default=None, alias="TWILIO_AUTH_TOKEN")
     twilio_from_number: str | None = Field(default=None, alias="TWILIO_FROM_NUMBER")
     twilio_verify_signature: bool = Field(default=False, alias="TWILIO_VERIFY_SIGNATURE")
+    # ChatGPT Custom GPT Public Booking API Key
+    public_booking_api_key: str = Field(
+        default="convo-public-booking-key-2024",
+        alias="PUBLIC_BOOKING_API_KEY",
+        description="API key for ChatGPT Custom GPT public booking endpoints"
+    )
 
     model_config = SettingsConfigDict(env_file=(".env", "Backend/.env", "backend/.env"), extra="ignore")
 

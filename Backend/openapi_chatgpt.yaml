@@ -1,0 +1,719 @@
+openapi: 3.0.3
+info:
+  title: ConvoAI Booking API
+  description: |
+    Public booking API for ConvoAI Services. This API allows customers to book appointments
+    directly through ChatGPT Custom GPT integration.
+    
+    ## Booking Flow
+    1. Get business info and available services
+    2. Check availability for desired date/service
+    3. Create a booking QUOTE (does NOT create booking)
+    4. CONFIRM the quote to create the actual booking
+    
+    **IMPORTANT**: The quote→confirm flow is mandatory. Quotes expire in 10 minutes.
+    
+    ## Authentication
+    All endpoints require an API key passed in the `X-API-Key` header.
+  version: 1.0.0
+  contact:
+    name: ConvoAI Support
+    email: support@convoai.com
+
+servers:
+  - url: https://your-backend-domain.com
+    description: Production server
+  - url: http://localhost:8000
+    description: Development server
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /public/business:
+    get:
+      operationId: getBusinessInfo
+      summary: Get business information
+      description: |
+        Returns business name, timezone, working hours, and open days.
+        Use this to understand when the business is available for bookings.
+      responses:
+        '200':
+          description: Business information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BusinessInfo'
+              example:
+                business_name: "Bishops Tempe"
+                timezone: "America/Phoenix"
+                working_hours_start: "09:00"
+                working_hours_end: "17:00"
+                working_days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+                address: "Tempe, Arizona"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /public/services:
+    get:
+      operationId: listServices
+      summary: List available services
+      description: |
+        Returns all services available for booking with their IDs, names, durations, and prices.
+        Use the service `id` when checking availability or creating quotes.
+      responses:
+        '200':
+          description: List of services
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Service'
+              example:
+                - id: 1
+                  name: "Men's Haircut"
+                  duration_minutes: 30
+                  price_cents: 3500
+                  price_display: "$35.00"
+                - id: 2
+                  name: "Women's Haircut"
+                  duration_minutes: 45
+                  price_cents: 5500
+                  price_display: "$55.00"
+                - id: 3
+                  name: "Beard Trim"
+                  duration_minutes: 15
+                  price_cents: 2000
+                  price_display: "$20.00"
+                - id: 4
+                  name: "Hair Color"
+                  duration_minutes: 90
+                  price_cents: 12000
+                  price_display: "$120.00"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /public/stylists:
+    get:
+      operationId: listStylists
+      summary: List available stylists
+      description: |
+        Returns all active stylists who can perform services.
+        Use the stylist `id` when creating booking quotes.
+      responses:
+        '200':
+          description: List of stylists
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Stylist'
+              example:
+                - id: 1
+                  name: "Alex"
+                  available: true
+                - id: 2
+                  name: "Jamie"
+                  available: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /public/availability:
+    get:
+      operationId: checkAvailability
+      summary: Check available time slots
+      description: |
+        Check available appointment slots for a specific service on a specific date.
+        Optionally filter by stylist.
+        
+        Returns a list of available time slots with stylist information.
+        Use the `start_time` (in HH:MM format) and `stylist_id` when creating a quote.
+      parameters:
+        - name: service_id
+          in: query
+          required: true
+          description: The ID of the service to book
+          schema:
+            type: integer
+          example: 1
+        - name: date
+          in: query
+          required: true
+          description: Date to check availability (YYYY-MM-DD format)
+          schema:
+            type: string
+            format: date
+          example: "2026-01-22"
+        - name: stylist_id
+          in: query
+          required: false
+          description: Optional stylist ID to filter availability
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Available slots
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailabilityResponse'
+              example:
+                date: "2026-01-22"
+                service_name: "Men's Haircut"
+                slots:
+                  - stylist_id: 1
+                    stylist_name: "Alex"
+                    start_time: "2026-01-22T18:00:00+00:00"
+                    end_time: "2026-01-22T18:30:00+00:00"
+                    start_time_local: "11:00 AM"
+                    date_local: "January 22, 2026"
+                  - stylist_id: 2
+                    stylist_name: "Jamie"
+                    start_time: "2026-01-22T19:00:00+00:00"
+                    end_time: "2026-01-22T19:30:00+00:00"
+                    start_time_local: "12:00 PM"
+                    date_local: "January 22, 2026"
+                message: "Found 2 available slot(s) for Men's Haircut."
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /public/booking/quote:
+    post:
+      operationId: createBookingQuote
+      summary: Create a booking quote
+      description: |
+        Creates a booking QUOTE for review. This does NOT create an actual booking.
+        
+        **IMPORTANT**: 
+        - The quote must be confirmed using `/public/booking/confirm` to create the actual booking
+        - Quotes expire in 10 minutes
+        - Either `customer_email` OR `customer_phone` is required
+        
+        Returns a `quote_token` that must be used to confirm the booking.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteRequest'
+            example:
+              service_id: 1
+              stylist_id: 1
+              date: "2026-01-22"
+              start_time: "11:00"
+              customer_name: "John Smith"
+              customer_email: "john@example.com"
+              customer_phone: "+1-555-123-4567"
+      responses:
+        '200':
+          description: Quote created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteResponse'
+              example:
+                quote_token: "abc123xyz789..."
+                expires_at: "2026-01-20T20:10:00+00:00"
+                service_name: "Men's Haircut"
+                stylist_name: "Alex"
+                date_local: "Wednesday, January 22, 2026"
+                start_time_local: "11:00 AM"
+                end_time_local: "11:30 AM"
+                duration_minutes: 30
+                price_cents: 3500
+                price_display: "$35.00"
+                customer_name: "John Smith"
+                customer_contact: "jo***@example.com"
+                message: "Quote created for Men's Haircut with Alex on Wednesday, January 22, 2026 at 11:00 AM. Please confirm within 10 minutes to complete your booking."
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /public/booking/confirm:
+    post:
+      operationId: confirmBooking
+      summary: Confirm a booking quote
+      description: |
+        Confirms a booking quote and creates the actual booking.
+        
+        **IMPORTANT**:
+        - Requires the `quote_token` from the quote response
+        - This is idempotent - calling multiple times after success returns the same booking
+        - If the slot was taken between quote and confirm, returns 409 Conflict
+        
+        On success, returns the booking ID and confirmation details.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmRequest'
+            example:
+              quote_token: "abc123xyz789..."
+      responses:
+        '200':
+          description: Booking confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmResponse'
+              example:
+                booking_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                status: "CONFIRMED"
+                service_name: "Men's Haircut"
+                stylist_name: "Alex"
+                date_local: "Wednesday, January 22, 2026"
+                start_time_local: "11:00 AM"
+                end_time_local: "11:30 AM"
+                customer_name: "John Smith"
+                message: "Your booking is confirmed! Men's Haircut with Alex on Wednesday, January 22, 2026 at 11:00 AM. Booking ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Quote not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Quote not found or expired. Please create a new quote."
+        '409':
+          description: Slot no longer available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Sorry, this slot was just taken by another customer. Please choose a different time."
+
+  /public/booking/{booking_id}:
+    get:
+      operationId: getBookingDetails
+      summary: Get booking details
+      description: |
+        Retrieve details of an existing booking by its ID.
+        Use this to verify booking status or show confirmation details.
+      parameters:
+        - name: booking_id
+          in: path
+          required: true
+          description: The booking UUID
+          schema:
+            type: string
+            format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      responses:
+        '200':
+          description: Booking details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingDetails'
+              example:
+                booking_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                status: "CONFIRMED"
+                service_name: "Men's Haircut"
+                stylist_name: "Alex"
+                date_local: "Wednesday, January 22, 2026"
+                start_time_local: "11:00 AM"
+                end_time_local: "11:30 AM"
+                customer_name: "John Smith"
+                price_display: "$35.00"
+                created_at: "2026-01-20T20:00:00+00:00"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
+
+  schemas:
+    BusinessInfo:
+      type: object
+      required:
+        - business_name
+        - timezone
+        - working_hours_start
+        - working_hours_end
+        - working_days
+      properties:
+        business_name:
+          type: string
+          description: Name of the business
+        timezone:
+          type: string
+          description: Business timezone (IANA format)
+        working_hours_start:
+          type: string
+          description: Opening time (HH:MM)
+        working_hours_end:
+          type: string
+          description: Closing time (HH:MM)
+        working_days:
+          type: array
+          items:
+            type: string
+          description: Days the business is open
+        address:
+          type: string
+          nullable: true
+          description: Business address
+        phone:
+          type: string
+          nullable: true
+          description: Business phone number
+
+    Service:
+      type: object
+      required:
+        - id
+        - name
+        - duration_minutes
+        - price_cents
+        - price_display
+      properties:
+        id:
+          type: integer
+          description: Unique service ID
+        name:
+          type: string
+          description: Service name
+        duration_minutes:
+          type: integer
+          description: Duration in minutes
+        price_cents:
+          type: integer
+          description: Price in cents
+        price_display:
+          type: string
+          description: Formatted price display
+
+    Stylist:
+      type: object
+      required:
+        - id
+        - name
+        - available
+      properties:
+        id:
+          type: integer
+          description: Unique stylist ID
+        name:
+          type: string
+          description: Stylist name
+        available:
+          type: boolean
+          description: Whether stylist is currently available
+
+    AvailabilitySlot:
+      type: object
+      required:
+        - stylist_id
+        - stylist_name
+        - start_time
+        - end_time
+        - start_time_local
+        - date_local
+      properties:
+        stylist_id:
+          type: integer
+          description: Stylist ID for this slot
+        stylist_name:
+          type: string
+          description: Stylist name
+        start_time:
+          type: string
+          format: date-time
+          description: Start time in ISO format (UTC)
+        end_time:
+          type: string
+          format: date-time
+          description: End time in ISO format (UTC)
+        start_time_local:
+          type: string
+          description: Start time in local format (e.g., "2:00 PM")
+        date_local:
+          type: string
+          description: Date in local format (e.g., "January 22, 2026")
+
+    AvailabilityResponse:
+      type: object
+      required:
+        - date
+        - service_name
+        - slots
+        - message
+      properties:
+        date:
+          type: string
+          description: Requested date
+        service_name:
+          type: string
+          description: Service name
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/AvailabilitySlot'
+          description: Available time slots
+        message:
+          type: string
+          description: Human-readable summary
+
+    QuoteRequest:
+      type: object
+      required:
+        - service_id
+        - stylist_id
+        - date
+        - start_time
+        - customer_name
+      properties:
+        service_id:
+          type: integer
+          description: Service ID to book
+        stylist_id:
+          type: integer
+          description: Stylist ID to book with
+        date:
+          type: string
+          format: date
+          description: Date in YYYY-MM-DD format
+        start_time:
+          type: string
+          description: Start time in HH:MM format (24-hour)
+        customer_name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Customer's name
+        customer_email:
+          type: string
+          format: email
+          nullable: true
+          description: Customer's email (required if no phone)
+        customer_phone:
+          type: string
+          nullable: true
+          description: Customer's phone number (required if no email)
+
+    QuoteResponse:
+      type: object
+      required:
+        - quote_token
+        - expires_at
+        - service_name
+        - stylist_name
+        - date_local
+        - start_time_local
+        - end_time_local
+        - duration_minutes
+        - price_cents
+        - price_display
+        - customer_name
+        - customer_contact
+        - message
+      properties:
+        quote_token:
+          type: string
+          description: Token to confirm this quote
+        expires_at:
+          type: string
+          format: date-time
+          description: When this quote expires
+        service_name:
+          type: string
+          description: Service name
+        stylist_name:
+          type: string
+          description: Stylist name
+        date_local:
+          type: string
+          description: Date in local format
+        start_time_local:
+          type: string
+          description: Start time in local format
+        end_time_local:
+          type: string
+          description: End time in local format
+        duration_minutes:
+          type: integer
+          description: Duration in minutes
+        price_cents:
+          type: integer
+          description: Price in cents
+        price_display:
+          type: string
+          description: Formatted price
+        customer_name:
+          type: string
+          description: Customer name
+        customer_contact:
+          type: string
+          description: Masked contact info
+        message:
+          type: string
+          description: Confirmation message
+
+    ConfirmRequest:
+      type: object
+      required:
+        - quote_token
+      properties:
+        quote_token:
+          type: string
+          description: Quote token from quote response
+
+    ConfirmResponse:
+      type: object
+      required:
+        - booking_id
+        - status
+        - service_name
+        - stylist_name
+        - date_local
+        - start_time_local
+        - end_time_local
+        - customer_name
+        - message
+      properties:
+        booking_id:
+          type: string
+          format: uuid
+          description: Unique booking ID
+        status:
+          type: string
+          description: Booking status (CONFIRMED)
+        service_name:
+          type: string
+          description: Service name
+        stylist_name:
+          type: string
+          description: Stylist name
+        date_local:
+          type: string
+          description: Date in local format
+        start_time_local:
+          type: string
+          description: Start time in local format
+        end_time_local:
+          type: string
+          description: End time in local format
+        customer_name:
+          type: string
+          description: Customer name
+        message:
+          type: string
+          description: Confirmation message with booking ID
+
+    BookingDetails:
+      type: object
+      required:
+        - booking_id
+        - status
+        - service_name
+        - stylist_name
+        - date_local
+        - start_time_local
+        - end_time_local
+        - customer_name
+        - price_display
+        - created_at
+      properties:
+        booking_id:
+          type: string
+          format: uuid
+          description: Unique booking ID
+        status:
+          type: string
+          description: Booking status
+        service_name:
+          type: string
+          description: Service name
+        stylist_name:
+          type: string
+          description: Stylist name
+        date_local:
+          type: string
+          description: Date in local format
+        start_time_local:
+          type: string
+          description: Start time in local format
+        end_time_local:
+          type: string
+          description: End time in local format
+        customer_name:
+          type: string
+          description: Customer name
+        price_display:
+          type: string
+          description: Formatted price
+        created_at:
+          type: string
+          format: date-time
+          description: When booking was created
+
+    Error:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
+          description: Error message
+
+  responses:
+    BadRequest:
+      description: Bad request - invalid parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Invalid date format. Use YYYY-MM-DD."
+
+    Unauthorized:
+      description: Unauthorized - invalid or missing API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Invalid API key"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "Service not found. Please check the service ID."
+
+    Conflict:
+      description: Conflict - slot not available
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            detail: "This time slot is already booked. Please choose a different time."
