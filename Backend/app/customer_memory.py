@@ -155,8 +155,9 @@ async def update_customer_stats(
     )
     pref = pref_result.scalar_one_or_none()
     if not pref:
+        # Phase 1: Use stylist.shop_id for tenant scoping
         pref = CustomerStylistPreference(
-            customer_id=customer.id, stylist_id=stylist.id, booking_count=1
+            customer_id=customer.id, stylist_id=stylist.id, shop_id=stylist.shop_id, booking_count=1
         )
         session.add(pref)
     else:

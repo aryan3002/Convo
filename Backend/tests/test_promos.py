@@ -62,6 +62,7 @@ def make_promo(**overrides):
 
 
 def test_validate_service_combo_requires_service_id_and_trigger():
+    # When combo_service_ids is not provided, we get combo_service_ids_required error
     payload = PromoCreateRequest(
         type=PromoType.SERVICE_COMBO_PROMO,
         trigger_point=PromoTriggerPoint.AT_CHAT_START,
@@ -70,7 +71,7 @@ def test_validate_service_combo_requires_service_id_and_trigger():
         discount_value=10,
     )
     errors = validate_promo_payload(payload, has_services=True, service_exists=False)
-    assert "service_id_required" in errors
+    assert "combo_service_ids_required" in errors
     assert "trigger_point_invalid_for_service_combo" in errors
 
 

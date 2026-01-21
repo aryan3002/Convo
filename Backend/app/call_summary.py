@@ -100,8 +100,12 @@ async def generate_call_summary(
         # Determine booking status from session data or parsed output
         booking_status = determine_booking_status(session_data, parsed)
         
+        # Phase 1: Get shop_id from session_data (defaults to 1 for single-shop)
+        shop_id = session_data.get("shop_id", 1)
+        
         # Create CallSummary record
         call_summary = CallSummary(
+            shop_id=shop_id,  # Phase 1: Add shop_id for multi-tenancy
             call_sid=call_sid,
             customer_name=parsed.get("customer_name") or session_data.get("customer_name"),
             customer_phone=customer_phone,

@@ -17,7 +17,7 @@ Usage:
     
     response = await ask_with_citations(
         session=db,
-        shop_id=1,
+        shop_id=shop_context.shop_id,
         question="What did customers complain about this week?",
         date_from="2026-01-08",
         date_to="2026-01-15",

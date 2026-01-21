@@ -35,6 +35,7 @@ from .emailer import send_booking_email_with_ics
 from .sms import send_sms
 from .voice import router as voice_router
 from .public_booking import router as public_booking_router
+from .registry import router as registry_router  # Phase 0: Shop registry placeholder
 from .models import (
     AppointmentStatus,
     Booking,
@@ -66,6 +67,7 @@ settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
 app.include_router(voice_router, prefix="/twilio", tags=["voice"])
 app.include_router(public_booking_router)  # ChatGPT Custom GPT public booking API
+app.include_router(registry_router)  # Phase 0: Shop registry placeholder for multi-tenancy
 logger = logging.getLogger(__name__)
 
 
@@ -438,9 +440,14 @@ async def upsert_service_preference(
         await session.commit()
         await session.refresh(existing)
         return existing
+    # Phase 1: Look up service to get shop_id for tenant scoping
+    service_result = await session.execute(select(Service).where(Service.id == service_id))
+    service = service_result.scalar_one_or_none()
+    shop_id = service.shop_id if service else 1  # Fallback to 1 for Phase 1
     preference = CustomerServicePreference(
         customer_id=customer_id,
         service_id=service_id,
+        shop_id=shop_id,
         preferred_style_text=preferred_style_text,
         preferred_style_image_url=preferred_style_image_url,
     )
@@ -541,6 +548,9 @@ def validate_promo_payload(
     if payload.type == PromoType.SERVICE_COMBO_PROMO:
         if not has_services:
             errors.append("service_required")
+        # Validate trigger point is valid for combo promos
+        if payload.trigger_point not in PROMO_COMBO_ALLOWED_TRIGGERS:
+            errors.append("trigger_point_invalid_for_service_combo")
         combo_ids = extract_combo_service_ids(normalize_constraints(payload.constraints_json))
         if combo_ids:
             if len(combo_ids) != 2 or combo_ids[0] == combo_ids[1]:

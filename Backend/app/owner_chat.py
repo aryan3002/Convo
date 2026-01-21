@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .core.config import get_settings
 from .models import Service, ServiceRule, Stylist, StylistSpecialty
 from .vector_search import get_context_for_query, search_similar_chunks
+from .tenancy import LEGACY_DEFAULT_SHOP_ID
 
 settings = get_settings()
 
@@ -224,11 +225,10 @@ ALLOWED_ACTIONS = {
     "delete_promo",
 }
 
-# Default shop ID (single-tenant for now)
-DEFAULT_SHOP_ID = 1
+# PHASE 2: Use LEGACY_DEFAULT_SHOP_ID from tenancy module
 
 
-async def get_call_context_for_query(user_query: str, session: AsyncSession) -> str:
+async def get_call_context_for_query(user_query: str, session: AsyncSession, shop_id: int = LEGACY_DEFAULT_SHOP_ID) -> str:
     """
     Check if the user query might benefit from call transcript context.
     If so, fetch relevant chunks from the vector store.
@@ -249,7 +249,7 @@ async def get_call_context_for_query(user_query: str, session: AsyncSession) -> 
     try:
         context = await get_context_for_query(
             session=session,
-            shop_id=DEFAULT_SHOP_ID,
+            shop_id=shop_id,
             query=user_query,
             max_tokens=1500,  # Leave room for other context
             limit=5,

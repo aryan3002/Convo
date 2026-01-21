@@ -40,6 +40,7 @@ from .core.config import get_settings
 from .core.db import AsyncSessionLocal
 from .models import Service, Stylist
 from .call_summary import generate_call_summary, format_transcript
+from .tenancy import resolve_shop_from_twilio_to, LEGACY_DEFAULT_SHOP_ID
 
 # ────────────────────────────────────────────────────────────────
 # Configuration
@@ -49,7 +50,7 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-SHOP_ID = 1  # Single-shop assumption for now
+# PHASE 2: Removed hardcoded SHOP_ID. Now resolved from Twilio To number.
 SESSION_TTL_MINUTES = 30
 MAX_NO_INPUT_RETRIES = 3
 
@@ -209,6 +210,7 @@ def get_session(call_sid: str) -> dict[str, Any]:
     if call_sid not in CALL_SESSIONS:
         CALL_SESSIONS[call_sid] = {
             "stage": Stage.GET_IDENTITY,
+            "shop_id": LEGACY_DEFAULT_SHOP_ID,  # Will be set from Twilio To number
             "customer_name": None,
             "customer_phone": None,
             "pending_phone": None,  # Phone waiting for confirmation
@@ -479,18 +481,18 @@ def is_goodbye(text: str) -> bool:
 # ────────────────────────────────────────────────────────────────
 
 
-async def get_all_services(session: AsyncSession) -> list[Service]:
+async def get_all_services(session: AsyncSession, shop_id: int) -> list[Service]:
     """Get all services for the shop."""
     result = await session.execute(
-        select(Service).where(Service.shop_id == SHOP_ID)
+        select(Service).where(Service.shop_id == shop_id)
     )
     return list(result.scalars().all())
 
 
-async def get_all_stylists(session: AsyncSession) -> list[Stylist]:
+async def get_all_stylists(session: AsyncSession, shop_id: int) -> list[Stylist]:
     """Get all active stylists for the shop."""
     result = await session.execute(
-        select(Stylist).where(Stylist.shop_id == SHOP_ID, Stylist.active == True)
+        select(Stylist).where(Stylist.shop_id == shop_id, Stylist.active == True)
     )
     return list(result.scalars().all())
 
@@ -927,12 +929,13 @@ async def handle_get_identity(call_sid: str, speech: str) -> VoiceResponse:
 async def handle_get_service(call_sid: str, speech: str) -> VoiceResponse:
     """Stage 2: Get the service they want."""
     session = get_session(call_sid)
+    shop_id = session.get("shop_id", LEGACY_DEFAULT_SHOP_ID)
     
     if is_goodbye(speech):
         return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
     
     async with AsyncSessionLocal() as db:
-        services = await get_all_services(db)
+        services = await get_all_services(db, shop_id)
     
     matched = fuzzy_match_service(speech, services)
     
@@ -958,6 +961,7 @@ async def handle_get_service(call_sid: str, speech: str) -> VoiceResponse:
 async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
     """Stage 3: Get the appointment date."""
     session = get_session(call_sid)
+    shop_id = session.get("shop_id", LEGACY_DEFAULT_SHOP_ID)
     
     if is_goodbye(speech):
         return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
@@ -965,7 +969,7 @@ async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
     # Check if user wants to correct the service
     if any(word in speech.lower() for word in ["change", "wrong", "different service", "not that", "actually"]):
         async with AsyncSessionLocal() as db:
-            services = await get_all_services(db)
+            services = await get_all_services(db, shop_id)
         
         matched = fuzzy_match_service(speech, services)
         if matched:
@@ -1000,6 +1004,7 @@ async def handle_get_date(call_sid: str, speech: str) -> VoiceResponse:
 async def handle_get_time_and_stylist(call_sid: str, speech: str) -> VoiceResponse:
     """Stage 4: Get time preference and optional stylist."""
     session = get_session(call_sid)
+    shop_id = session.get("shop_id", LEGACY_DEFAULT_SHOP_ID)
     
     if is_goodbye(speech):
         return build_say_hangup_with_summary(call_sid, "No problem. Call us back anytime. Goodbye!")
@@ -1012,7 +1017,7 @@ async def handle_get_time_and_stylist(call_sid: str, speech: str) -> VoiceRespon
     
     # Extract stylist preference
     async with AsyncSessionLocal() as db:
-        stylists = await get_all_stylists(db)
+        stylists = await get_all_stylists(db, shop_id)
     
     matched_stylist = fuzzy_match_stylist(speech, stylists)
     if matched_stylist:
@@ -1258,12 +1263,24 @@ async def twilio_voice(request: Request) -> Response:
         return Response("Forbidden", status_code=403)
     
     call_sid = str(form.get("CallSid", "unknown"))
-    logger.info(f"Voice call started: {call_sid}")
+    to_number = str(form.get("To", ""))
+    logger.info(f"Voice call started: {call_sid}, To: {to_number}")
     
     # Initialize session
     session = get_session(call_sid)
     
-    prompt = "Hi, thanks for calling Bishops Tempe! I can help you book an appointment. What's your name and phone number?"
+    # PHASE 2: Resolve shop from Twilio To number
+    shop_name = "Bishops Tempe"  # Default
+    async with AsyncSessionLocal() as db:
+        shop_ctx = await resolve_shop_from_twilio_to(db, to_number)
+        if shop_ctx:
+            update_session(call_sid, shop_id=shop_ctx.shop_id)
+            shop_name = shop_ctx.shop_name or shop_name
+            logger.info(f"Resolved shop from To number: shop_id={shop_ctx.shop_id}, name={shop_name}")
+        else:
+            logger.warning(f"Could not resolve shop from To number {to_number}, using default")
+    
+    prompt = f"Hi, thanks for calling {shop_name}! I can help you book an appointment. What's your name and phone number?"
     add_to_transcript(call_sid, "Agent", prompt)
     twiml = build_gather(prompt)
     

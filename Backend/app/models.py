@@ -56,8 +56,59 @@ class Shop(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Phase 1: Multi-tenant fields
+    slug: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="America/Phoenix")
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str | None] = mapped_column(String(50), nullable=True)  # e.g., 'barbershop', 'salon'
+    phone_number: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)  # Primary shop phone
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ShopPhoneNumber(Base):
+    """Maps multiple phone numbers to a shop for voice/SMS routing (Phase 2)."""
+    __tablename__ = "shop_phone_numbers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True)
+    phone_number: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
+    label: Mapped[str | None] = mapped_column(String(50), nullable=True)  # e.g., 'main', 'booking'
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ShopApiKey(Base):
+    """
+    API keys for shop-scoped external integrations (ChatGPT, public booking, etc.).
+    
+    Keys are stored as SHA-256 hashes for security. The original key is only
+    shown once at creation time.
+    
+    Phase 2: Enables shop resolution from X-API-Key header.
+    """
+    __tablename__ = "shop_api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g., 'ChatGPT Plugin', 'Public Booking'
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)  # SHA-256 hex
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("shop_id", "name", name="uq_shop_api_key_name"),
     )
 
 
@@ -257,6 +308,10 @@ class CustomerStylistPreference(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False, index=True)
     stylist_id: Mapped[int] = mapped_column(ForeignKey("stylists.id"), nullable=False, index=True)
+    # Phase 1: Add shop_id for tenant scoping (denormalized from stylist.shop_id)
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     booking_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -283,6 +338,10 @@ class CustomerServicePreference(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), nullable=False, index=True)
     service_id: Mapped[int] = mapped_column(ForeignKey("services.id"), nullable=False, index=True)
+    # Phase 1: Add shop_id for tenant scoping (denormalized from service.shop_id)
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     preferred_style_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     preferred_style_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at_utc: Mapped[datetime] = mapped_column(
@@ -401,6 +460,10 @@ class CallSummary(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    # Phase 1: Add shop_id for multi-tenancy
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     call_sid: Mapped[str] = mapped_column(String(64), nullable=False, index=True, unique=True)
     customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     customer_phone: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -415,4 +478,56 @@ class CallSummary(Base):
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # Full transcript for reference
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # Composite index for tenant-scoped queries
+        # Index("idx_call_summaries_shop_created", "shop_id", "created_at"),
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+# Customer Shop Profiles - Per-shop customer preferences and stats
+# ────────────────────────────────────────────────────────────────
+
+
+class CustomerShopProfile(Base):
+    """
+    Per-shop customer preferences and stats.
+    Customers are global (by email/phone); this table holds shop-specific data.
+    See ADR-0001 for design rationale.
+    """
+    __tablename__ = "customer_shop_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    shop_id: Mapped[int] = mapped_column(
+        ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    
+    # Shop-specific preferences
+    preferred_stylist_id: Mapped[int | None] = mapped_column(
+        ForeignKey("stylists.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    
+    # Shop-specific stats (mirrors customer_booking_stats, but per-shop)
+    total_bookings: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_spend_cents: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_booking_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    no_show_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("customer_id", "shop_id", name="uq_customer_shop_profile"),
     )

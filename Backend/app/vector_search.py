@@ -19,7 +19,7 @@ Usage:
     # After call completes
     await ingest_call_transcript(
         session=db,
-        shop_id=1,
+        shop_id=shop_context.shop_id,
         call_id=call_summary.id,
         transcript="Agent: Hello...\nCustomer: Hi...",
         customer_id=customer.id,
@@ -29,7 +29,7 @@ Usage:
     # In owner chat
     results = await search_similar_chunks(
         session=db,
-        shop_id=1,
+        shop_id=shop_context.shop_id,
         query="customer complaints about wait time",
         limit=5,
     )
