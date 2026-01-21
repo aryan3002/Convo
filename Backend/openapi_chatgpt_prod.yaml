@@ -1,9 +1,10 @@
 openapi: 3.1.0
 info:
-  title: ConvoAI Booking API
+  title: ConvoAI Booking API (Production)
   description: |
-    Public booking API for ConvoAI Services. This API allows customers to book appointments
-    directly through ChatGPT Custom GPT integration.
+    Public booking API for ConvoAI Services - PRODUCTION VERSION.
+    
+    This spec is configured for the publicly hosted Render backend.
     
     ## Booking Flow
     1. Get business info and available services
@@ -19,14 +20,14 @@ info:
     ## Slot Selection
     Availability slots include a `slot_id` which can be used directly in the quote request
     as an alternative to specifying date + start_time + stylist_id separately.
-  version: 1.0.0
+  version: 1.0.0-dev
   contact:
     name: ConvoAI Support
     email: support@convoai.com
 
 servers:
-  - url: "{{PROD_API_BASE_URL}}"
-    description: Production server (replace with your deployed backend URL)
+  - url: "https://convoai-backend.onrender.com"
+    description: Production Render backend
 
 security:
   - ApiKeyAuth: []
@@ -182,16 +183,7 @@ paths:
     post:
       operationId: createBookingQuote
       summary: Create a booking quote
-      description: |
-        Creates a booking QUOTE for review. This does NOT create an actual booking.
-        
-        **IMPORTANT**: 
-        - The quote must be confirmed using `/public/booking/confirm` to create the actual booking
-        - Quotes expire in 10 minutes
-        - Either `customer_email` OR `customer_phone` is required
-        - Either `slot_id` OR (`date` + `start_time` + `stylist_id`) is required
-        
-        Returns a `quote_token` that must be used to confirm the booking.
+      description: Creates a booking quote (does NOT create booking). Requires confirmation via /public/booking/confirm. Quotes expire in 10 minutes. Returns quote_token for confirmation.
       requestBody:
         required: true
         content:
@@ -249,15 +241,7 @@ paths:
     post:
       operationId: confirmBooking
       summary: Confirm a booking quote
-      description: |
-        Confirms a booking quote and creates the actual booking.
-        
-        **IMPORTANT**:
-        - Requires the `quote_token` from the quote response
-        - This is IDEMPOTENT - calling multiple times after success returns the same booking
-        - If the slot was taken between quote and confirm, returns 409 Conflict
-        
-        On success, returns the booking ID and confirmation details.
+      description: Confirms booking quote and creates the actual booking. Requires quote_token from /public/booking/quote. Idempotent - safe to retry. Returns booking ID on success.
       requestBody:
         required: true
         content:
@@ -587,8 +571,6 @@ components:
         customer_phone:
           type: string
           description: Customer's phone number (required if no email)
-      # Note: Either slot_id OR (date + start_time + stylist_id) required
-      # Note: Either customer_email OR customer_phone required
 
     QuoteResponse:
       type: object
