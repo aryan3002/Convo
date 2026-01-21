@@ -481,18 +481,24 @@ def extract_stylist_from_text(text: str) -> tuple[int | None, str | None]:
     return None, None
 
 
-async def find_service_by_name(session: AsyncSession, name: str) -> Service | None:
+async def find_service_by_name(session: AsyncSession, shop_id: int, name: str) -> Service | None:
+    """Find a service by name, scoped to shop_id."""
     if not name:
         return None
     result = await session.execute(
-        select(Service).where(Service.name.ilike(f"%{name.strip()}%")).order_by(Service.id)
+        select(Service).where(
+            Service.shop_id == shop_id,
+            Service.name.ilike(f"%{name.strip()}%")
+        ).order_by(Service.id)
     )
     return result.scalar_one_or_none()
 
 
-async def get_services_context(session: AsyncSession) -> str:
-    """Get formatted services list for the system prompt."""
-    result = await session.execute(select(Service).order_by(Service.id))
+async def get_services_context(session: AsyncSession, shop_id: int) -> str:
+    """Get formatted services list for the system prompt, scoped to shop_id."""
+    result = await session.execute(
+        select(Service).where(Service.shop_id == shop_id).order_by(Service.id)
+    )
     services = result.scalars().all()
     
     if not services:
@@ -505,10 +511,13 @@ async def get_services_context(session: AsyncSession) -> str:
     return "\n".join(lines)
 
 
-async def get_stylists_context(session: AsyncSession) -> str:
-    """Get formatted stylists list for the system prompt."""
+async def get_stylists_context(session: AsyncSession, shop_id: int) -> str:
+    """Get formatted stylists list for the system prompt, scoped to shop_id."""
     result = await session.execute(
-        select(Stylist).where(Stylist.active.is_(True)).order_by(Stylist.id)
+        select(Stylist).where(
+            Stylist.shop_id == shop_id,
+            Stylist.active.is_(True)
+        ).order_by(Stylist.id)
     )
     stylists = result.scalars().all()
     
@@ -530,7 +539,8 @@ async def get_stylists_context(session: AsyncSession) -> str:
 async def chat_with_ai(
     messages: list[ChatMessage],
     session: AsyncSession,
-    context: dict | None = None
+    context: dict | None = None,
+    shop_id: int = 1,  # Phase 3: Required shop_id for tenant isolation
 ) -> ChatResponse:
     """Process chat messages and return AI response with optional actions."""
     
@@ -691,8 +701,10 @@ async def chat_with_ai(
     # FAST-PATH: Check if user provided all booking details in current message
     # Extract from last user message if we have name and email already
     if customer_name and customer_email and last_user_text:
-        # Get list of services for matching
-        services_result = await session.execute(select(Service).order_by(Service.id))
+        # Get list of services for matching (scoped to shop_id)
+        services_result = await session.execute(
+            select(Service).where(Service.shop_id == shop_id).order_by(Service.id)
+        )
         all_services = services_result.scalars().all()
         service_names = [s.name for s in all_services]
         
@@ -705,7 +717,7 @@ async def chat_with_ai(
         
         # If we have all the details, bypass normal flow and hold slot immediately
         if extracted_service_name and extracted_date and extracted_time and extracted_stylist_id:
-            service = await find_service_by_name(session, extracted_service_name)
+            service = await find_service_by_name(session, shop_id, extracted_service_name)
             if service:
                 return ChatResponse(
                     reply=f"Holding {extracted_time} on {extracted_date} with {extracted_stylist_name}. Tap confirm to finalize.",
@@ -723,9 +735,9 @@ async def chat_with_ai(
                     },
                 )
 
-    # Build system prompt with current context
-    services_text = await get_services_context(session)
-    stylists_text = await get_stylists_context(session)
+    # Build system prompt with current context (scoped to shop_id)
+    services_text = await get_services_context(session, shop_id)
+    stylists_text = await get_stylists_context(session, shop_id)
     
     # Use Arizona timezone for dates
     local_now = get_local_now()

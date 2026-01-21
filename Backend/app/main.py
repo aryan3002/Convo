@@ -36,6 +36,7 @@ from .sms import send_sms
 from .voice import router as voice_router
 from .public_booking import router as public_booking_router
 from .registry import router as registry_router  # Phase 0: Shop registry placeholder
+from .tenancy.context import get_shop_context, ShopContext  # Phase 3: Multi-tenant context
 from .models import (
     AppointmentStatus,
     Booking,
@@ -61,12 +62,14 @@ from .models import (
     TimeOffRequestStatus,
 )
 from .seed import seed_initial_data
+from .routes_scoped import router as scoped_router  # Phase 4: URL-based shop routing
 
 
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
 app.include_router(voice_router, prefix="/twilio", tags=["voice"])
 app.include_router(public_booking_router)  # ChatGPT Custom GPT public booking API
+app.include_router(scoped_router)  # Phase 4: /s/{slug}/... multi-tenant routes
 app.include_router(registry_router)  # Phase 0: Shop registry placeholder for multi-tenancy
 logger = logging.getLogger(__name__)
 
@@ -441,9 +444,13 @@ async def upsert_service_preference(
         await session.refresh(existing)
         return existing
     # Phase 1: Look up service to get shop_id for tenant scoping
-    service_result = await session.execute(select(Service).where(Service.id == service_id))
+    # Note: service_id lookup without shop_id filter is acceptable here as we're
+    # retrieving the shop_id FROM the service for the new preference record
+    service_result = await session.execute(select(Service).where(Service.id == service_id))  # noqa: tenant-scoping
     service = service_result.scalar_one_or_none()
-    shop_id = service.shop_id if service else 1  # Fallback to 1 for Phase 1
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    shop_id = service.shop_id
     preference = CustomerServicePreference(
         customer_id=customer_id,
         service_id=service_id,
@@ -815,8 +822,11 @@ async def merge_promo_impressions(
         except IntegrityError:
             await session.rollback()
 
-async def fetch_service(session: AsyncSession, service_id: int) -> Service:
-    result = await session.execute(select(Service).where(Service.id == service_id))
+async def fetch_service(session: AsyncSession, service_id: int, shop_id: int | None = None) -> Service:
+    query = select(Service).where(Service.id == service_id)
+    if shop_id is not None:
+        query = query.where(Service.shop_id == shop_id)
+    result = await session.execute(query)
     service = result.scalar_one_or_none()
     if not service:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
@@ -842,8 +852,11 @@ async def get_default_shop(session: AsyncSession) -> Shop:
     return shop
 
 
-async def fetch_stylist(session: AsyncSession, stylist_id: int) -> Stylist:
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.active.is_(True)))
+async def fetch_stylist(session: AsyncSession, stylist_id: int, shop_id: int | None = None) -> Stylist:
+    query = select(Stylist).where(Stylist.id == stylist_id, Stylist.active.is_(True))
+    if shop_id is not None:
+        query = query.where(Stylist.shop_id == shop_id)
+    result = await session.execute(query)
     stylist = result.scalar_one_or_none()
     if not stylist:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stylist not found or inactive")
@@ -1145,9 +1158,11 @@ async def on_startup():
     app.state.process_chat_turn = process_chat_turn
 
 
-@app.get("/services")
-async def list_services(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(Service).order_by(Service.id))
+async def _list_services_internal(session: AsyncSession, shop_id: int):
+    """Internal helper to list services for a shop. Use this when calling programmatically."""
+    result = await session.execute(
+        select(Service).where(Service.shop_id == shop_id).order_by(Service.id)
+    )
     services = result.scalars().all()
     return [
         {
@@ -1158,6 +1173,14 @@ async def list_services(session: AsyncSession = Depends(get_session)):
         }
         for svc in services
     ]
+
+
+@app.get("/services")
+async def list_services(
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
+):
+    return await _list_services_internal(session, ctx.shop_id)
 
 
 async def list_services_with_rules(session: AsyncSession, shop_id: int):
@@ -1338,10 +1361,22 @@ async def set_customer_preference(
     )
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(get_session)):
-    """AI-powered chat endpoint for booking appointments."""
-    ai_response = await chat_with_ai(request.messages, session, request.context)
+@app.post("/chat", response_model=ChatResponse, deprecated=True)
+async def chat_endpoint(
+    request: ChatRequest,
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
+):
+    """
+    AI-powered chat endpoint for booking appointments.
+    
+    DEPRECATED: This endpoint uses legacy shop resolution (defaults to shop_id=1).
+    Use POST /s/{slug}/chat for multi-tenant support.
+    
+    This endpoint will be removed in Phase 5.
+    """
+    logger.warning("DEPRECATED: /chat endpoint used. Migrate to /s/{slug}/chat for multi-tenant support.")
+    ai_response = await chat_with_ai(request.messages, session, request.context, shop_id=ctx.shop_id)
     action = ai_response.action or {}
     data: dict | None = None
     reply_override: str | None = None
@@ -1351,14 +1386,16 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
 
     try:
         if action_type == "show_services":
-            services = await list_services(session)
+            services = await _list_services_internal(session, ctx.shop_id)
             data = {"services": services}
         elif action_type == "select_service":
             service_id = int(params.get("service_id") or 0)
             if not service_id and params.get("service_name"):
                 svc_name = str(params.get("service_name")).strip().lower()
-                # Use better matching logic for gender-specific services
-                result = await session.execute(select(Service).order_by(Service.id))
+                # Use better matching logic for gender-specific services (scoped to shop_id)
+                result = await session.execute(
+                    select(Service).where(Service.shop_id == ctx.shop_id).order_by(Service.id)
+                )
                 all_services = result.scalars().all()
                 
                 # Try exact match first
@@ -1556,9 +1593,22 @@ async def chat_endpoint(request: ChatRequest, session: AsyncSession = Depends(ge
     return ChatResponse(reply=reply_override or ai_response.reply, action=ai_response.action, data=data)
 
 
-@app.post("/owner/chat", response_model=OwnerChatResponse)
-async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession = Depends(get_session)):
-    ai_response = await owner_chat_with_ai(request.messages, session)
+@app.post("/owner/chat", response_model=OwnerChatResponse, deprecated=True)
+async def owner_chat_endpoint(
+    request: OwnerChatRequest,
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
+):
+    """
+    Owner GPT chat endpoint for managing shop services and schedule.
+    
+    DEPRECATED: This endpoint uses legacy shop resolution (defaults to shop_id=1).
+    Use POST /s/{slug}/owner/chat for multi-tenant support.
+    
+    This endpoint will be removed in Phase 5.
+    """
+    logger.warning("DEPRECATED: /owner/chat endpoint used. Migrate to /s/{slug}/owner/chat for multi-tenant support.")
+    ai_response = await owner_chat_with_ai(request.messages, session, shop_id=ctx.shop_id)
     action = ai_response.action or {}
     data: dict | None = None
     reply_override: str | None = None
@@ -1566,11 +1616,13 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
     action_type = action.get("type")
     params = action.get("params") or {}
 
-    shop = await get_default_shop(session)
-    result = await session.execute(select(Service).where(Service.shop_id == shop.id).order_by(Service.id))
+    # Use ctx.shop_id for tenant-scoped queries
+    result = await session.execute(
+        select(Service).where(Service.shop_id == ctx.shop_id).order_by(Service.id)
+    )
     service_list = result.scalars().all()
     stylist_result = await session.execute(
-        select(Stylist).where(Stylist.shop_id == shop.id).order_by(Stylist.id)
+        select(Stylist).where(Stylist.shop_id == ctx.shop_id).order_by(Stylist.id)
     )
     stylist_list = stylist_result.scalars().all()
 
@@ -1768,26 +1820,26 @@ async def owner_chat_endpoint(request: OwnerChatRequest, session: AsyncSession =
         service_id = params.get("service_id")
         if service_id:
             try:
-                return await fetch_service(session, int(service_id))
+                return await fetch_service(session, int(service_id), ctx.shop_id)
             except HTTPException:
                 return None
         service_name = str(params.get("service_name") or params.get("name") or "").strip()
         if service_name:
-            return await fetch_service_by_name(session, service_name, shop.id)
+            return await fetch_service_by_name(session, service_name, ctx.shop_id)
         return None
 
     async def resolve_stylist() -> Stylist | None:
         stylist_id = params.get("stylist_id")
         if stylist_id:
             try:
-                return await fetch_stylist(session, int(stylist_id))
+                return await fetch_stylist(session, int(stylist_id), ctx.shop_id)
             except HTTPException:
                 return None
         stylist_name = str(params.get("stylist_name") or params.get("name") or "").strip()
         if stylist_name:
             result = await session.execute(
                 select(Stylist).where(
-                    Stylist.shop_id == shop.id,
+                    Stylist.shop_id == ctx.shop_id,
                     Stylist.name.ilike(f"%{stylist_name}%"),
                 )
             )
@@ -3787,7 +3839,8 @@ async def list_owner_promos(
 async def update_promo(
     promo_id: int, payload: PromoUpdateRequest, session: AsyncSession = Depends(get_session)
 ):
-    result = await session.execute(select(Promo).where(Promo.id == promo_id))
+    shop = await get_default_shop(session)
+    result = await session.execute(select(Promo).where(Promo.id == promo_id, Promo.shop_id == shop.id))
     promo = result.scalar_one_or_none()
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo not found")
@@ -3871,7 +3924,8 @@ async def update_promo(
 
 @app.delete("/owner/promos/{promo_id}")
 async def delete_promo(promo_id: int, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(Promo).where(Promo.id == promo_id))
+    shop = await get_default_shop(session)
+    result = await session.execute(select(Promo).where(Promo.id == promo_id, Promo.shop_id == shop.id))
     promo = result.scalar_one_or_none()
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo not found")
@@ -4131,7 +4185,7 @@ async def owner_schedule(
         secondary_service_name = None
         if booking.secondary_service_id:
             secondary_result = await session.execute(
-                select(Service).where(Service.id == booking.secondary_service_id)
+                select(Service).where(Service.id == booking.secondary_service_id, Service.shop_id == booking.shop_id)
             )
             secondary_service = secondary_result.scalar_one_or_none()
             if secondary_service:
@@ -4586,7 +4640,7 @@ async def confirm_booking(payload: ConfirmRequest, session: AsyncSession = Depen
     secondary_service = None
     if booking.secondary_service_id:
         secondary_result = await session.execute(
-            select(Service).where(Service.id == booking.secondary_service_id)
+            select(Service).where(Service.id == booking.secondary_service_id, Service.shop_id == booking.shop_id)
         )
         secondary_service = secondary_result.scalar_one_or_none()
 
@@ -4708,7 +4762,7 @@ async def booking_invite(
     secondary_service = None
     if booking.secondary_service_id:
         secondary_result = await session.execute(
-            select(Service).where(Service.id == booking.secondary_service_id)
+            select(Service).where(Service.id == booking.secondary_service_id, Service.shop_id == booking.shop_id)
         )
         secondary_service = secondary_result.scalar_one_or_none()
     if not booking.is_confirmed():
@@ -4762,7 +4816,7 @@ async def booking_invite_ics(
     secondary_service = None
     if booking.secondary_service_id:
         secondary_result = await session.execute(
-            select(Service).where(Service.id == booking.secondary_service_id)
+            select(Service).where(Service.id == booking.secondary_service_id, Service.shop_id == booking.shop_id)
         )
         secondary_service = secondary_result.scalar_one_or_none()
     
@@ -4849,16 +4903,16 @@ async def track_bookings(email: str, session: AsyncSession = Depends(get_session
     # Fetch service and stylist names for each booking
     response = []
     for booking in bookings:
-        svc_result = await session.execute(select(Service).where(Service.id == booking.service_id))
+        svc_result = await session.execute(select(Service).where(Service.id == booking.service_id, Service.shop_id == booking.shop_id))
         service = svc_result.scalar_one_or_none()
         secondary_service = None
         if booking.secondary_service_id:
             secondary_result = await session.execute(
-                select(Service).where(Service.id == booking.secondary_service_id)
+                select(Service).where(Service.id == booking.secondary_service_id, Service.shop_id == booking.shop_id)
             )
             secondary_service = secondary_result.scalar_one_or_none()
 
-        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
+        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id, Stylist.shop_id == booking.shop_id))
         stylist = stylist_result.scalar_one_or_none()
         
         service_price = service.price_cents if service else 0
@@ -4908,18 +4962,18 @@ async def lookup_bookings(phone: str, session: AsyncSession = Depends(get_sessio
     bookings = result.scalars().all()
     
     # Fetch service and stylist names for each booking
-    response = []
+    response = []  
     for booking in bookings:
-        svc_result = await session.execute(select(Service).where(Service.id == booking.service_id))
+        svc_result = await session.execute(select(Service).where(Service.id == booking.service_id, Service.shop_id == booking.shop_id))
         service = svc_result.scalar_one_or_none()
         secondary_service = None
         if booking.secondary_service_id:
             secondary_result = await session.execute(
-                select(Service).where(Service.id == booking.secondary_service_id)
+                select(Service).where(Service.id == booking.secondary_service_id, Service.shop_id == booking.shop_id)
             )
             secondary_service = secondary_result.scalar_one_or_none()
 
-        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
+        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id, Stylist.shop_id == booking.shop_id))
         stylist = stylist_result.scalar_one_or_none()
         
         service_price = service.price_cents if service else 0
@@ -5068,7 +5122,7 @@ async def get_bookings_by_service(service_id: int, session: AsyncSession = Depen
     details = []
     
     for booking in bookings:
-        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id))
+        stylist_result = await session.execute(select(Stylist).where(Stylist.id == booking.stylist_id, Stylist.shop_id == booking.shop_id))
         stylist = stylist_result.scalar_one_or_none()
         
         details.append(ServiceBookingDetail(
@@ -5162,8 +5216,9 @@ async def employee_login(
     session: AsyncSession = Depends(get_session),
 ):
     """Authenticate an employee using their PIN."""
+    shop = await get_default_shop(session)
     stylist = await session.execute(
-        select(Stylist).where(Stylist.id == req.stylist_id)
+        select(Stylist).where(Stylist.id == req.stylist_id, Stylist.shop_id == shop.id)
     )
     stylist = stylist.scalar_one_or_none()
     
@@ -5201,7 +5256,8 @@ async def get_employee_schedule(
         raise HTTPException(status_code=401, detail="Invalid or expired session token")
     
     # Get stylist
-    stylist_result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    shop = await get_default_shop(session)
+    stylist_result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
     stylist = stylist_result.scalar_one_or_none()
     if not stylist:
         raise HTTPException(status_code=404, detail="Stylist not found")
@@ -5248,7 +5304,7 @@ async def get_employee_schedule(
     services_map = {}
     if service_ids:
         svc_result = await session.execute(
-            select(Service).where(Service.id.in_(service_ids))
+            select(Service).where(Service.id.in_(service_ids), Service.shop_id == stylist.shop_id)
         )
         for svc in svc_result.scalars().all():
             services_map[svc.id] = svc.name
@@ -5506,8 +5562,9 @@ async def get_my_time_off_requests(
 @app.get("/stylists-for-login")
 async def get_stylists_for_login(session: AsyncSession = Depends(get_session)):
     """Get list of stylists available for employee login (those with PINs set)."""
+    shop = await get_default_shop(session)
     result = await session.execute(
-        select(Stylist).where(Stylist.pin_hash.isnot(None)).order_by(Stylist.name)
+        select(Stylist).where(Stylist.shop_id == shop.id, Stylist.pin_hash.isnot(None)).order_by(Stylist.name)
     )
     stylists = result.scalars().all()
     return [{"id": s.id, "name": s.name} for s in stylists]
@@ -5528,7 +5585,8 @@ async def set_stylist_pin(
     session: AsyncSession = Depends(get_session),
 ):
     """Set or update a stylist's PIN (owner action)."""
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    shop = await get_default_shop(session)
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
     stylist = result.scalar_one_or_none()
     
     if not stylist:
@@ -5547,7 +5605,8 @@ async def remove_stylist_pin(
     session: AsyncSession = Depends(get_session),
 ):
     """Remove a stylist's PIN (owner action)."""
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    shop = await get_default_shop(session)
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
     stylist = result.scalar_one_or_none()
     
     if not stylist:
@@ -5566,7 +5625,8 @@ async def get_stylist_pin_status(
     session: AsyncSession = Depends(get_session),
 ):
     """Check if a stylist has a PIN set."""
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id))
+    shop = await get_default_shop(session)
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
     stylist = result.scalar_one_or_none()
     
     if not stylist:
@@ -5601,11 +5661,12 @@ async def get_all_time_off_requests(
     requests = result.scalars().all()
     
     # Get stylist names
+    shop = await get_default_shop(session)
     stylist_ids = set(r.stylist_id for r in requests)
     stylists_map = {}
     if stylist_ids:
         stylists_result = await session.execute(
-            select(Stylist).where(Stylist.id.in_(stylist_ids))
+            select(Stylist).where(Stylist.id.in_(stylist_ids), Stylist.shop_id == shop.id)
         )
         for s in stylists_result.scalars().all():
             stylists_map[s.id] = s.name
@@ -5777,10 +5838,11 @@ async def get_analytics_summary(
     prev_bookings = prev_result.scalars().all()
     
     # Get services and stylists for names
-    services_result = await session.execute(select(Service))
+    shop = await get_default_shop(session)
+    services_result = await session.execute(select(Service).where(Service.shop_id == shop.id))
     services_map = {s.id: s for s in services_result.scalars().all()}
     
-    stylists_result = await session.execute(select(Stylist))
+    stylists_result = await session.execute(select(Stylist).where(Stylist.shop_id == shop.id))
     stylists_map = {s.id: s for s in stylists_result.scalars().all()}
     
     # Compute metrics

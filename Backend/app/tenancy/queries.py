@@ -4,18 +4,26 @@ Tenant-scoped query helpers.
 These functions provide safe, tenant-isolated database queries.
 ALL queries for tenant data MUST use these helpers or include explicit shop_id filtering.
 
+PHASE 3: This module is THE central place for tenant-scoped queries.
+Any query for Service, Stylist, Booking, Promo, CustomerShopProfile, etc.
+MUST either use these helpers OR include explicit shop_id == ctx.shop_id filter.
+
 Usage:
-    from app.tenancy.queries import get_service_by_id, list_services
+    from app.tenancy.queries import get_service_by_id, list_services, scoped_select
     
     service = await get_service_by_id(session, ctx.shop_id, service_id)
     services = await list_services(session, ctx.shop_id)
+    
+    # Or using composable helpers:
+    stmt = scoped_select(Service, shop_id).where(Service.name.ilike("%haircut%"))
 """
 
-from typing import Optional, Sequence
+from typing import Optional, Sequence, TypeVar, Type
 from datetime import datetime
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, Select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import DeclarativeBase
 
 from ..models import (
     Service,
@@ -29,6 +37,106 @@ from ..models import (
     CustomerStylistPreference,
     CustomerServicePreference,
 )
+
+# Type variable for generic model functions
+T = TypeVar("T", bound=DeclarativeBase)
+
+
+# ────────────────────────────────────────────────────────────────
+# Composable Query Helpers (Phase 3)
+# ────────────────────────────────────────────────────────────────
+
+def scoped_select(model: Type[T], shop_id: int) -> Select:
+    """
+    Create a SELECT statement pre-filtered by shop_id.
+    
+    Usage:
+        stmt = scoped_select(Service, ctx.shop_id).where(Service.active == True)
+        result = await session.execute(stmt)
+    """
+    return select(model).where(model.shop_id == shop_id)
+
+
+def tenant_filter(model: Type[T], shop_id: int):
+    """
+    Return a SQLAlchemy filter clause for shop_id.
+    
+    Usage:
+        stmt = select(Service).where(tenant_filter(Service, ctx.shop_id), Service.active == True)
+    """
+    return model.shop_id == shop_id
+
+
+async def require_owned(
+    session: AsyncSession,
+    model: Type[T],
+    entity_id: int,
+    shop_id: int,
+) -> Optional[T]:
+    """
+    Fetch an entity by ID, validating shop ownership.
+    Returns None if not found or wrong shop.
+    
+    Usage:
+        service = await require_owned(session, Service, service_id, ctx.shop_id)
+        if not service:
+            raise HTTPException(404, "Service not found")
+    """
+    result = await session.execute(
+        select(model).where(
+            model.id == entity_id,
+            model.shop_id == shop_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_services_by_ids(
+    session: AsyncSession,
+    shop_id: int,
+    service_ids: Sequence[int],
+) -> Sequence[Service]:
+    """Get multiple services by IDs, scoped to shop."""
+    if not service_ids:
+        return []
+    result = await session.execute(
+        select(Service).where(
+            Service.shop_id == shop_id,
+            Service.id.in_(service_ids)
+        )
+    )
+    return result.scalars().all()
+
+
+async def get_stylists_by_ids(
+    session: AsyncSession,
+    shop_id: int,
+    stylist_ids: Sequence[int],
+) -> Sequence[Stylist]:
+    """Get multiple stylists by IDs, scoped to shop."""
+    if not stylist_ids:
+        return []
+    result = await session.execute(
+        select(Stylist).where(
+            Stylist.shop_id == shop_id,
+            Stylist.id.in_(stylist_ids)
+        )
+    )
+    return result.scalars().all()
+
+
+async def list_stylists_with_pin(
+    session: AsyncSession,
+    shop_id: int,
+) -> Sequence[Stylist]:
+    """List stylists who have set a PIN, scoped to shop."""
+    result = await session.execute(
+        select(Stylist).where(
+            Stylist.shop_id == shop_id,
+            Stylist.pin_hash.isnot(None)
+        ).order_by(Stylist.name)
+    )
+    return result.scalars().all()
 
 
 # ────────────────────────────────────────────────────────────────

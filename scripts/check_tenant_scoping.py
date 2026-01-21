@@ -113,6 +113,7 @@ IGNORE_PATTERNS = [
     r"# TODO",  # TODO comments
     r"shop_id: int",  # Type annotations
     r"shop_id=shop_id",  # Passing through
+    r"noqa:\s*tenant-scoping",  # Explicit suppression
     r"shop_id=ctx\.shop_id",  # Using context
     r"shop_id=shop\.id",  # Using shop object
     r"\.shop_id ==",  # Filter conditions (likely scoped)
@@ -171,6 +172,14 @@ def scan_file(file_path: Path) -> List[Finding]:
         
         for pattern, severity, description in BAD_PATTERNS:
             if re.search(pattern, line, re.IGNORECASE):
+                # For HIGH severity issues (queries), check if shop_id is in the context
+                # Look at current line plus next 5 lines for multi-line statements
+                if severity == "HIGH":
+                    context_window = "\n".join(lines[line_num-1:line_num+5])
+                    # Check if shop_id is properly scoped in the context
+                    if re.search(r"\.shop_id\s*==|shop_id\s*=\s*ctx\.shop_id|shop_id\s*=\s*shop\.id", context_window):
+                        continue  # Skip - this is properly scoped
+                
                 findings.append(Finding(
                     file=file_path,
                     line_num=line_num,

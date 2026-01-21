@@ -163,8 +163,11 @@ def shorten_reply(text: str) -> str:
     return sentence
 
 
-async def get_services_context(session: AsyncSession) -> str:
-    result = await session.execute(select(Service).order_by(Service.id))
+async def get_services_context(session: AsyncSession, shop_id: int) -> str:
+    """Get services context scoped to shop_id."""
+    result = await session.execute(
+        select(Service).where(Service.shop_id == shop_id).order_by(Service.id)
+    )
     services = result.scalars().all()
     if not services:
         return "No services available."
@@ -180,8 +183,11 @@ async def get_services_context(session: AsyncSession) -> str:
     return "\n".join(lines)
 
 
-async def get_stylists_context(session: AsyncSession) -> str:
-    result = await session.execute(select(Stylist).order_by(Stylist.id))
+async def get_stylists_context(session: AsyncSession, shop_id: int) -> str:
+    """Get stylists context scoped to shop_id."""
+    result = await session.execute(
+        select(Stylist).where(Stylist.shop_id == shop_id).order_by(Stylist.id)
+    )
     stylists = result.scalars().all()
     if not stylists:
         return "No stylists available."
@@ -264,15 +270,19 @@ async def get_call_context_for_query(user_query: str, session: AsyncSession, sho
     return ""
 
 
-async def owner_chat_with_ai(messages: list[OwnerChatMessage], session: AsyncSession) -> OwnerChatResponse:
+async def owner_chat_with_ai(
+    messages: list[OwnerChatMessage],
+    session: AsyncSession,
+    shop_id: int = LEGACY_DEFAULT_SHOP_ID,  # Phase 3: Required for tenant isolation
+) -> OwnerChatResponse:
     if not settings.openai_api_key:
         return OwnerChatResponse(
             reply="Owner assistant is not configured yet. Please add OPENAI_API_KEY.",
             action=None,
         )
 
-    services_text = await get_services_context(session)
-    stylists_text = await get_stylists_context(session)
+    services_text = await get_services_context(session, shop_id)
+    stylists_text = await get_stylists_context(session, shop_id)
     tz = ZoneInfo(settings.chat_timezone)
     today = datetime.now(tz).strftime("%Y-%m-%d")
     

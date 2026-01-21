@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .core.db import get_session
+from .tenancy.context import get_shop_context, ShopContext  # Phase 3: Multi-tenant context
 from .models import (
     Booking,
     BookingStatus,
@@ -530,20 +531,20 @@ async def get_default_shop(session: AsyncSession) -> Shop:
 async def get_business_info(
     _: bool = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Get business information for ChatGPT context.
     
     Returns business name, hours, timezone, and working days.
     """
-    shop = await get_default_shop(session)
-    
+    # Use ShopContext for tenant-aware business info
     day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     working_days = [day_names[i] for i in sorted(settings.working_days_list)]
     
     return BusinessInfoResponse(
-        business_name=shop.name,
-        timezone=settings.chat_timezone,
+        business_name=ctx.shop_name or settings.default_shop_name,
+        timezone=ctx.timezone or settings.chat_timezone,
         working_hours_start=settings.working_hours_start,
         working_hours_end=settings.working_hours_end,
         working_days=working_days,
@@ -557,6 +558,7 @@ async def get_business_info(
 async def list_public_services(
     _: bool = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     List all available services.
@@ -564,9 +566,8 @@ async def list_public_services(
     Returns service ID, name, duration, and price.
     ChatGPT should use service_id when creating quotes.
     """
-    shop = await get_default_shop(session)
     result = await session.execute(
-        select(Service).where(Service.shop_id == shop.id).order_by(Service.id)
+        select(Service).where(Service.shop_id == ctx.shop_id).order_by(Service.id)
     )
     services = result.scalars().all()
     
@@ -587,18 +588,15 @@ async def list_public_services(
 async def list_public_stylists(
     _: bool = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     List all available stylists.
     
     Returns stylist ID and name. Use stylist_id when creating quotes.
     """
-    shop = await get_default_shop(session)
     result = await session.execute(
-        select(Stylist).where(
-            Stylist.shop_id == shop.id,
-            Stylist.active.is_(True)
-        ).order_by(Stylist.id)
+        select(Stylist).where(Stylist.shop_id == ctx.shop_id, Stylist.active.is_(True)).order_by(Stylist.id)
     )
     stylists = result.scalars().all()
     
@@ -620,6 +618,7 @@ async def check_availability(
     stylist_id: Optional[int] = None,
     _: bool = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Check available time slots for a service on a specific date.
@@ -661,9 +660,9 @@ async def check_availability(
     
     shop = await get_default_shop(session)
     
-    # Fetch service
+    # Fetch service (scoped to shop)
     result = await session.execute(
-        select(Service).where(Service.id == service_id, Service.shop_id == shop.id)
+        select(Service).where(Service.id == service_id, Service.shop_id == ctx.shop_id)
     )
     service = result.scalar_one_or_none()
     if not service:
@@ -672,11 +671,8 @@ async def check_availability(
             detail="Service not found. Please check the service ID.",
         )
     
-    # Fetch stylists
-    query = select(Stylist).where(
-        Stylist.shop_id == shop.id,
-        Stylist.active.is_(True)
-    )
+    # Fetch stylists (scoped to shop)
+    query = select(Stylist).where(Stylist.shop_id == ctx.shop_id, Stylist.active.is_(True))
     if stylist_id:
         query = query.where(Stylist.id == stylist_id)
     query = query.order_by(Stylist.id)
@@ -804,6 +800,7 @@ async def create_booking_quote(
     request: QuoteRequest,
     _: bool = Depends(verify_api_key),
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Create a booking QUOTE (does NOT create actual booking).
@@ -828,7 +825,6 @@ async def create_booking_quote(
             detail="Customer email or phone number is required for booking.",
         )
     
-    shop = await get_default_shop(session)
     tz = get_local_tz()
     now_utc = datetime.now(timezone.utc)
     now_local = datetime.now(tz)
@@ -890,9 +886,9 @@ async def create_booking_quote(
     
     shop = await get_default_shop(session)
     
-    # Fetch service
+    # Fetch service (scoped to shop)
     result = await session.execute(
-        select(Service).where(Service.id == request.service_id, Service.shop_id == shop.id)
+        select(Service).where(Service.id == request.service_id, Service.shop_id == ctx.shop_id)
     )
     service = result.scalar_one_or_none()
     if not service:
@@ -901,13 +897,9 @@ async def create_booking_quote(
             detail="Service not found. Please check the service ID.",
         )
     
-    # Fetch stylist
+    # Fetch stylist (scoped to shop)
     result = await session.execute(
-        select(Stylist).where(
-            Stylist.id == stylist_id,
-            Stylist.shop_id == shop.id,
-            Stylist.active.is_(True)
-        )
+        select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == ctx.shop_id, Stylist.active.is_(True))
     )
     stylist = result.scalar_one_or_none()
     if not stylist:

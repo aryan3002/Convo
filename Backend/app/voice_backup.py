@@ -1,3 +1,14 @@
+"""
+DEPRECATED: Legacy voice handler backup.
+
+This file is DEPRECATED and should not be used in production.
+It uses hardcoded shop_id=1 and does not support multi-tenancy.
+
+The active voice handler is in voice.py, which resolves shop from Twilio To number.
+
+TODO Phase 5: Delete this file entirely after confirming voice.py is stable.
+"""
+
 import logging
 import re
 import uuid
@@ -16,6 +27,12 @@ from .customer_memory import normalize_phone
 from .models import Service
 from sqlalchemy import select
 
+import warnings
+warnings.warn(
+    "voice_backup.py is deprecated and should not be used. Use voice.py instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -522,11 +539,25 @@ def extract_date_from_speech(text: str, tz: ZoneInfo) -> str | None:
     return None
 
 
-async def match_service_from_speech(session: AsyncSessionLocal, text: str) -> Service | None:
+async def match_service_from_speech(session: AsyncSessionLocal, text: str, shop_id: int | None = None) -> Service | None:
+    """Match a service from speech text.
+    
+    Args:
+        session: Database session
+        text: Speech text to match
+        shop_id: Optional shop_id for tenant scoping. If None, returns all services (legacy).
+    """
     normalized = normalize_text(text)
     if not normalized:
         return None
-    result = await session.execute(select(Service).order_by(Service.id))
+    # TODO [Phase 4]: Require shop_id parameter once voice routes pass ShopContext
+    if shop_id:
+        result = await session.execute(
+            select(Service).where(Service.shop_id == shop_id).order_by(Service.id)
+        )
+    else:
+        # Legacy path - will be removed in Phase 4
+        result = await session.execute(select(Service).order_by(Service.id))  # noqa: tenant-scoping
     services = result.scalars().all()
     best_service = None
     best_score = 0.0
@@ -560,8 +591,9 @@ async def hold_selected_slot(state: dict, selected_slot: dict) -> dict | None:
         if not service_id:
             service_name = context.get("selected_service")
             if service_name:
+                # TODO [Phase 4]: Get shop_id from call session/Twilio context
                 result = await session.execute(
-                    select(Service).where(Service.name.ilike(f"%{service_name}%"))
+                    select(Service).where(Service.name.ilike(f"%{service_name}%"))  # noqa: tenant-scoping
                 )
                 service = result.scalar_one_or_none()
                 if service:

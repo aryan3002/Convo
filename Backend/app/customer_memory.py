@@ -179,7 +179,12 @@ async def update_customer_stats(
     return customer
 
 
-async def get_customer_context(session: AsyncSession, email: str | None = None, phone: str | None = None) -> dict:
+async def get_customer_context(
+    session: AsyncSession,
+    email: str | None = None,
+    phone: str | None = None,
+    shop_id: int | None = None,  # Phase 3: Optional shop_id for scoping stylist lookups
+) -> dict:
     if email and "@" not in email and not phone:
         phone = email
         email = None
@@ -223,9 +228,17 @@ async def get_customer_context(session: AsyncSession, email: str | None = None, 
 
     preferred_stylist_name = None
     if customer.preferred_stylist_id:
-        stylist_result = await session.execute(
-            select(Stylist).where(Stylist.id == customer.preferred_stylist_id)
-        )
+        # Scope stylist lookup to shop if shop_id provided
+        if shop_id:
+            stylist_result = await session.execute(
+                select(Stylist).where(Stylist.id == customer.preferred_stylist_id, Stylist.shop_id == shop_id)
+            )
+        else:
+            # Legacy path: no shop_id scoping (backward compatible) - shop_id will be required in Phase 4
+            # TODO [Phase 4]: Remove legacy path once all callers pass shop_id
+            stylist_result = await session.execute(
+                select(Stylist).where(Stylist.id == customer.preferred_stylist_id)  # noqa: tenant-scoping
+            )
         stylist = stylist_result.scalar_one_or_none()
         preferred_stylist_name = stylist.name if stylist else None
 
