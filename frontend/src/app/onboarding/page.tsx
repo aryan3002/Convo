@@ -40,7 +40,7 @@ const initialFormData: FormData = {
   ownerUserId: "",
   shopName: "",
   phone: "",
-  timezone: "America/Los_Angeles",
+  timezone: "America/Phoenix",
   address: "",
   category: "",
 };
@@ -145,9 +145,13 @@ export default function OnboardingPage() {
       <header className="sticky top-0 z-50 backdrop-blur-xl bg-[#0a0e1a]/80 border-b border-white/5">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#00d4ff] via-[#a855f7] to-[#ec4899] flex items-center justify-center shadow-neon">
+            <button
+              onClick={() => router.push("/owner-landing")}
+              className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#00d4ff] via-[#a855f7] to-[#ec4899] flex items-center justify-center shadow-neon hover:scale-105 transition-transform"
+              title="Back to Home"
+            >
               <Store className="w-5 h-5 text-white" />
-            </div>
+            </button>
             <div>
               <h1 className="text-lg font-bold text-white">Convo</h1>
               <p className="text-xs text-gray-500">Shop Onboarding</p>

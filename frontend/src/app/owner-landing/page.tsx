@@ -200,7 +200,7 @@ export default function OwnerLandingPage() {
             </div>
           </motion.div>
 
-          {/* Legacy Dashboard Link */}
+          {/* Help Text */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -208,13 +208,10 @@ export default function OwnerLandingPage() {
             className="text-center mt-12"
           >
             <p className="text-xs text-gray-600">
-              Looking for the demo dashboard?{" "}
-              <a
-                href="/owner-legacy"
-                className="text-gray-400 hover:text-[#00d4ff] transition-colors"
-              >
-                Access legacy dashboard →
-              </a>
+              Need help?{" "}
+              <span className="text-gray-400">
+                Contact support@convo.ai
+              </span>
             </p>
           </motion.div>
         </div>

@@ -37,7 +37,7 @@ from .tenancy import (
     list_services,
     list_active_stylists,
 )
-from .models import Service, Stylist, ShopMemberRole
+from .models import Service, Stylist, ShopMemberRole, Booking, BookingStatus, TimeOffBlock, StylistSpecialty
 from .auth import (
     get_current_user_id,
     require_owner_or_manager,
@@ -335,3 +335,219 @@ async def scoped_shop_info(
         "working_hours_start": settings.working_hours_start,
         "working_hours_end": settings.working_hours_end,
     }
+
+
+# ────────────────────────────────────────────────────────────────
+# Owner Schedule Endpoint
+# ────────────────────────────────────────────────────────────────
+
+class OwnerScheduleBooking(BaseModel):
+    """Booking info for schedule grid."""
+    id: str  # UUID as string
+    stylist_id: int
+    stylist_name: str
+    service_name: str
+    secondary_service_name: str | None = None
+    customer_name: str | None
+    status: str  # BookingStatus enum value
+    preferred_style_text: str | None = None
+    preferred_style_image_url: str | None = None
+    start_time: str  # HH:MM format
+    end_time: str  # HH:MM format
+
+
+class OwnerScheduleTimeOff(BaseModel):
+    """Time off block for schedule grid."""
+    id: int
+    stylist_id: int
+    stylist_name: str
+    start_time: str  # HH:MM format
+    end_time: str  # HH:MM format
+    reason: str | None = None
+
+
+class OwnerScheduleResponse(BaseModel):
+    """Schedule data for a specific date."""
+    date: str  # YYYY-MM-DD
+    stylists: list[dict]  # Stylist details with specialties and time_off_count
+    bookings: list[OwnerScheduleBooking]
+    time_off: list[OwnerScheduleTimeOff]
+
+
+def to_local_time_str(utc_dt: datetime, tz_offset_minutes: int) -> str:
+    """Convert UTC datetime to local HH:MM string."""
+    local_dt = utc_dt - timedelta(minutes=tz_offset_minutes)
+    return local_dt.strftime("%H:%M")
+
+
+def to_utc_from_local(date: datetime.date, local_time: time, tz_offset_minutes: int) -> datetime:
+    """Convert local date/time to UTC datetime."""
+    local_dt = datetime.combine(date, local_time)
+    return local_dt + timedelta(minutes=tz_offset_minutes)
+
+
+async def list_stylists_with_details(session: AsyncSession, shop_id: int):
+    """Get stylists with specialties and time off count."""
+    result = await session.execute(
+        select(Stylist).where(Stylist.shop_id == shop_id).order_by(Stylist.id)
+    )
+    stylists = result.scalars().all()
+    stylist_ids = [stylist.id for stylist in stylists]
+    specialties_map: dict[int, list[str]] = {stylist_id: [] for stylist_id in stylist_ids}
+    time_off_days: dict[int, set[str]] = {stylist_id: set() for stylist_id in stylist_ids}
+
+    if stylist_ids:
+        spec_result = await session.execute(
+            select(StylistSpecialty).where(StylistSpecialty.stylist_id.in_(stylist_ids))
+        )
+        for spec in spec_result.scalars().all():
+            specialties_map.setdefault(spec.stylist_id, []).append(spec.tag)
+
+        now = datetime.now(timezone.utc)
+        tz = ZoneInfo(settings.chat_timezone)
+        time_off_result = await session.execute(
+            select(TimeOffBlock).where(
+                TimeOffBlock.stylist_id.in_(stylist_ids),
+                TimeOffBlock.end_at_utc > now,
+            )
+        )
+        for block in time_off_result.scalars().all():
+            local_start = block.start_at_utc.astimezone(tz)
+            local_end = block.end_at_utc.astimezone(tz)
+            start_date = local_start.date()
+            end_date = local_end.date()
+            if local_end.time() == time(0, 0) and end_date > start_date:
+                end_date = end_date - timedelta(days=1)
+            cursor = start_date
+            while cursor <= end_date:
+                time_off_days[block.stylist_id].add(cursor.isoformat())
+                cursor += timedelta(days=1)
+
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "work_start": s.work_start,
+            "work_end": s.work_end,
+            "specialties": specialties_map.get(s.id, []),
+            "time_off_count": len(time_off_days.get(s.id, set())),
+            "active": s.active,
+        }
+        for s in stylists
+    ]
+
+
+@router.get("/owner/schedule", response_model=OwnerScheduleResponse)
+async def scoped_owner_schedule(
+    date: str,
+    tz_offset_minutes: int = 0,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Get schedule for a specific date with bookings and time off blocks.
+    
+    Requires authentication and OWNER or MANAGER role.
+    
+    Headers Required:
+        X-User-Id: User identifier from auth provider
+    
+    Example: 
+        GET /s/bishops-tempe/owner/schedule?date=2026-01-22&tz_offset_minutes=-420
+    
+    Returns:
+        401: Missing X-User-Id header
+        403: User is not a member or doesn't have OWNER/MANAGER role
+        404: Shop not found
+        200: Schedule data
+    """
+    # Verify user has OWNER or MANAGER role
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    logger.info(f"Scoped owner schedule request for shop_id={ctx.shop_id} ({ctx.shop_slug}) by user={user_id}, date={date}")
+    
+    try:
+        local_date = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format")
+
+    stylists = await list_stylists_with_details(session, ctx.shop_id)
+
+    day_start = to_utc_from_local(local_date, time(0, 0), tz_offset_minutes)
+    day_end = to_utc_from_local(local_date + timedelta(days=1), time(0, 0), tz_offset_minutes)
+
+    # Fetch bookings for the day
+    from .models import Service  # Already imported at top
+    booking_result = await session.execute(
+        select(Booking, Service, Stylist)
+        .join(Service, Service.id == Booking.service_id)
+        .join(Stylist, Stylist.id == Booking.stylist_id)
+        .where(
+            Booking.shop_id == ctx.shop_id,
+            Booking.start_at_utc < day_end,
+            Booking.end_at_utc > day_start,
+            Booking.status.in_([BookingStatus.HOLD, BookingStatus.CONFIRMED]),
+        )
+        .order_by(Booking.start_at_utc)
+    )
+    bookings = []
+    for booking, service, stylist in booking_result.all():
+        secondary_service_name = None
+        if booking.secondary_service_id:
+            secondary_result = await session.execute(
+                select(Service).where(
+                    Service.id == booking.secondary_service_id,
+                    Service.shop_id == ctx.shop_id
+                )
+            )
+            secondary_service = secondary_result.scalar_one_or_none()
+            if secondary_service:
+                secondary_service_name = secondary_service.name
+        bookings.append(
+            OwnerScheduleBooking(
+                id=str(booking.id),
+                stylist_id=stylist.id,
+                stylist_name=stylist.name,
+                service_name=service.name,
+                secondary_service_name=secondary_service_name,
+                customer_name=booking.customer_name,
+                status=booking.status.value,
+                preferred_style_text=booking.preferred_style_text,
+                preferred_style_image_url=booking.preferred_style_image_url,
+                start_time=to_local_time_str(booking.start_at_utc, tz_offset_minutes),
+                end_time=to_local_time_str(booking.end_at_utc, tz_offset_minutes),
+            )
+        )
+
+    # Fetch time off blocks for the day
+    time_off_result = await session.execute(
+        select(TimeOffBlock, Stylist)
+        .join(Stylist, Stylist.id == TimeOffBlock.stylist_id)
+        .where(
+            Stylist.shop_id == ctx.shop_id,
+            TimeOffBlock.start_at_utc < day_end,
+            TimeOffBlock.end_at_utc > day_start,
+        )
+        .order_by(TimeOffBlock.start_at_utc)
+    )
+    time_off = []
+    for block, stylist in time_off_result.all():
+        time_off.append(
+            OwnerScheduleTimeOff(
+                id=block.id,
+                stylist_id=stylist.id,
+                stylist_name=stylist.name,
+                start_time=to_local_time_str(block.start_at_utc, tz_offset_minutes),
+                end_time=to_local_time_str(block.end_at_utc, tz_offset_minutes),
+                reason=block.reason,
+            )
+        )
+
+    return OwnerScheduleResponse(
+        date=local_date.strftime("%Y-%m-%d"),
+        stylists=stylists,
+        bookings=bookings,
+        time_off=time_off,
+    )
+
