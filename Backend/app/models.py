@@ -559,3 +559,45 @@ class CustomerShopProfile(Base):
     __table_args__ = (
         UniqueConstraint("customer_id", "shop_id", name="uq_customer_shop_profile"),
     )
+
+# ============================================================================
+# PHASE 7: AUDIT LOGGING
+# ============================================================================
+
+class AuditLog(Base):
+    """
+    Security audit trail for all significant actions.
+    
+    Phase 7: Tracks who did what, when, and to which tenant.
+    
+    IMPORTANT: extra_data MUST NOT contain PII (phone, email) unless absolutely necessary.
+    """
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    
+    # Tenant context (nullable for system-level actions like shop creation during onboarding)
+    shop_id: Mapped[int | None] = mapped_column(
+        ForeignKey("shops.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    
+    # Who performed the action (from auth provider user ID)
+    actor_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    
+    # Action identifier (e.g., 'shop.created', 'owner.chat', 'booking.created')
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    
+    # Target entity type (e.g., 'shop', 'booking', 'service')
+    target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    
+    # Target entity ID (string to support various ID types)
+    target_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    
+    # Additional context (JSON blob, must NOT contain PII unless necessary)
+    # Note: Using 'extra_data' instead of 'metadata' to avoid SQLAlchemy reserved name
+    extra_data: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+    
+    # Timestamp with timezone
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )

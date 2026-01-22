@@ -56,6 +56,7 @@ async def init_db():
         print("   - shop_phone_numbers")
         print("   - shop_api_keys")
         print("   - shop_members (Phase 6)")
+        print("   - audit_logs (Phase 7)")
         print("   - services, stylists, bookings")
         print("   - customers, customer_shop_profiles")
         print("   - time_off_blocks, time_off_requests")
@@ -63,9 +64,10 @@ async def init_db():
         print("   - call_summaries")
         print("\n🎯 Next steps:")
         print("   1. Run tests:")
-        print("      pytest Backend/tests/test_phase6_onboarding.py -v")
+        print("      pytest Backend/tests/test_phase7_security.py -v")
         print("   2. Seed data for manual testing:")
         print("      python3 Backend/scripts/seed_convo_test.py")
+
         
     except Exception as e:
         print(f"❌ Error initializing database: {e}")

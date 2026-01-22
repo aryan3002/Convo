@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     allowed_origins: str = Field(default="http://localhost:3000", alias="ALLOWED_ORIGINS")
+    # Phase 8 Feature Flag: Enable embeddings/pgvector (default OFF)
+    # When disabled, the app runs without pgvector and won't create embedded_chunks table
+    enable_embeddings: bool = Field(default=False, alias="ENABLE_EMBEDDINGS")
     hold_ttl_minutes: int = Field(default=5, alias="HOLD_TTL_MINUTES")
     working_hours_start: str = Field(default="09:00", alias="WORKING_HOURS_START")
     working_hours_end: str = Field(default="17:00", alias="WORKING_HOURS_END")

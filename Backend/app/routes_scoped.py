@@ -2,6 +2,8 @@
 Slug-scoped routes for multi-tenant API.
 
 Phase 4: These routes use URL path slugs for shop resolution.
+Phase 7: Added authentication and RBAC for protected routes.
+
 Pattern: /s/{slug}/endpoint
 
 These are the PREFERRED routes for multi-tenant access. The old root routes
@@ -9,7 +11,7 @@ These are the PREFERRED routes for multi-tenant access. The old root routes
 
 Usage:
     POST /s/bishops-tempe/chat       -> Chat with shop "bishops-tempe"
-    POST /s/bishops-tempe/owner/chat -> Owner chat for shop "bishops-tempe"
+    POST /s/bishops-tempe/owner/chat -> Owner chat for shop "bishops-tempe" (requires auth)
     GET  /s/bishops-tempe/services   -> List services for shop
     GET  /s/bishops-tempe/stylists   -> List stylists for shop
 """
@@ -35,7 +37,13 @@ from .tenancy import (
     list_services,
     list_active_stylists,
 )
-from .models import Service, Stylist
+from .models import Service, Stylist, ShopMemberRole
+from .auth import (
+    get_current_user_id,
+    require_owner_or_manager,
+    log_audit,
+    AUDIT_OWNER_CHAT,
+)
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -182,15 +190,57 @@ async def scoped_owner_chat_endpoint(
     request: OwnerChatRequest,
     ctx: ShopContext = Depends(get_shop_context_from_slug),
     session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
 ):
     """
     Owner GPT chat endpoint for managing shop services and schedule.
     
     This is the Phase 4 multi-tenant owner chat endpoint.
+    Phase 7: Requires authentication and OWNER or MANAGER role.
     
-    Example: POST /s/bishops-tempe/owner/chat
+    Headers Required:
+        X-User-Id: User identifier from auth provider
+    
+    Example: 
+        curl -X POST /s/bishops-tempe/owner/chat \\
+             -H "X-User-Id: user_abc123" \\
+             -H "Content-Type: application/json" \\
+             -d '{"messages": [{"role": "user", "content": "Show services"}]}'
+    
+    Returns:
+        401: Missing X-User-Id header
+        403: User is not a member or doesn't have OWNER/MANAGER role
+        404: Shop not found
+        200: Success with AI response
     """
-    logger.info(f"Scoped owner chat request for shop_id={ctx.shop_id} ({ctx.shop_slug})")
+    # Phase 7: Verify user has OWNER or MANAGER role
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    logger.info(f"Scoped owner chat request for shop_id={ctx.shop_id} ({ctx.shop_slug}) by user={user_id}")
+    
+    # Log audit trail for owner chat invocation
+    # Extract intent from first user message for audit (no PII)
+    # Note: request.messages are Pydantic models, not dicts
+    user_messages = [m for m in request.messages if m.role == "user"]
+    intent_preview = None
+    if user_messages:
+        # Truncate to first 100 chars for audit, avoid any potential PII
+        raw_content = user_messages[-1].content[:100] if user_messages[-1].content else ""
+        intent_preview = raw_content if raw_content else None
+    
+    await log_audit(
+        session,
+        actor_user_id=user_id,
+        action=AUDIT_OWNER_CHAT,
+        shop_id=ctx.shop_id,
+        target_type="shop",
+        target_id=str(ctx.shop_id),
+        metadata={
+            "slug": ctx.shop_slug,
+            "intent_preview": intent_preview,
+            "message_count": len(request.messages),
+        }
+    )
     
     # Call existing owner_chat_with_ai with shop context
     ai_response = await owner_chat_with_ai(
@@ -206,6 +256,7 @@ async def scoped_owner_chat_endpoint(
         shop_slug=ctx.shop_slug,
         shop_name=ctx.shop_name,
     )
+
 
 
 @router.get("/services", response_model=ServicesResponse)

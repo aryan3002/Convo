@@ -95,3 +95,55 @@ https://<YOUR_NGROK_SUBDOMAIN>.ngrok-free.dev/twilio/voice
 ```
 
 The gather webhook is handled automatically by the backend at `/twilio/gather`.
+
+## Embeddings / Vector Search (Feature Flag)
+
+The backend includes semantic search over call transcripts using pgvector. This feature is **disabled by default** to allow running without pgvector installed.
+
+### Running Without pgvector (Default)
+
+By default, `ENABLE_EMBEDDINGS=False`:
+- The app starts normally without pgvector
+- `embedded_chunks` table is NOT created
+- All vector search functions return empty results (no-ops)
+- RAG queries return "feature not enabled" messages
+- All other features work normally
+
+This is the recommended mode for:
+- Local development without pgvector
+- Migrations to new databases (e.g., Neon)
+- Testing non-vector features
+
+### Enabling Embeddings (Phase 8)
+
+To enable vector search:
+
+1) Install pgvector extension in Postgres:
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+2) Set environment variable:
+```bash
+export ENABLE_EMBEDDINGS=true
+```
+
+3) Install the Python pgvector package:
+```bash
+pip install pgvector
+```
+
+4) Restart the app - `embedded_chunks` table will be auto-created
+
+When enabled:
+- Call transcripts are automatically chunked and embedded
+- Owner GPT can search call history semantically
+- RAG provides grounded answers with citations
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_EMBEDDINGS` | `false` | Enable pgvector semantic search |
+| `OPENAI_API_KEY` | - | Required for embeddings when enabled |
+

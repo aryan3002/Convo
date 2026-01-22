@@ -13,10 +13,15 @@ Design Choices:
 - Idempotency: Skip chunks with matching content_hash
 - Multi-tenancy: All operations require shop_id
 
+Feature Flag:
+    ENABLE_EMBEDDINGS (default: False)
+    When disabled, all embedding/search functions are no-ops that return empty results.
+    Enable when pgvector is installed and ready (Phase 8).
+
 Usage:
     from app.vector_search import ingest_call_transcript, search_similar_chunks
     
-    # After call completes
+    # After call completes (no-op if embeddings disabled)
     await ingest_call_transcript(
         session=db,
         shop_id=shop_context.shop_id,
@@ -26,7 +31,7 @@ Usage:
         stylist_id=stylist.id,
     )
     
-    # In owner chat
+    # In owner chat (returns [] if embeddings disabled)
     results = await search_similar_chunks(
         session=db,
         shop_id=shop_context.shop_id,
@@ -43,107 +48,27 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any, Sequence
 
-from openai import AsyncOpenAI
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, text, Index, CheckConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
 
 from .core.config import get_settings
-from .core.db import Base
+
+# Import shared types and conditional model from vector_models
+from .vector_models import (
+    SourceType,
+    EmbeddedChunk,
+    EMBEDDINGS_ENABLED,
+    EMBEDDING_MODEL,
+    EMBEDDING_DIMENSION,
+    MAX_CHUNK_TOKENS,
+    CHUNK_OVERLAP_TOKENS,
+    CHARS_PER_TOKEN,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-# ============================================================================
-# Configuration
-# ============================================================================
-
-# OpenAI text-embedding-3-small: 1536 dimensions
-# Switch to text-embedding-3-large (3072) for higher quality if needed
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIMENSION = 1536
-
-# Chunking parameters (in tokens, approximate)
-# OpenAI recommends 512-1024 tokens per chunk for embeddings
-MAX_CHUNK_TOKENS = 512
-CHUNK_OVERLAP_TOKENS = 50
-
-# Approximate tokens-to-chars ratio for English (rough estimate)
-# OpenAI uses ~4 chars per token on average
-CHARS_PER_TOKEN = 4
-
-
-class SourceType(str, Enum):
-    """Types of content that can be embedded."""
-    CALL_TRANSCRIPT = "call_transcript"
-    CALL_SUMMARY = "call_summary"
-    BOOKING_NOTE = "booking_note"
-
-
-# ============================================================================
-# SQLAlchemy Model for embedded_chunks
-# ============================================================================
-
-class EmbeddedChunk(Base):
-    """
-    Stores embedded text chunks for semantic search.
-    
-    All queries MUST filter by shop_id for multi-tenant isolation.
-    """
-    __tablename__ = "embedded_chunks"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    shop_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    
-    # Optional foreign keys for filtering
-    booking_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("bookings.id", ondelete="SET NULL"), nullable=True
-    )
-    call_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    customer_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
-    )
-    stylist_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("stylists.id", ondelete="SET NULL"), nullable=True
-    )
-    
-    # Chunk content
-    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    
-    # Vector embedding (1536 dims for text-embedding-3-small)
-    embedding = Column(Vector(EMBEDDING_DIMENSION), nullable=False)
-    
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
-    )
-
-    __table_args__ = (
-        # Prevent duplicate chunk ingestion
-        Index("uq_chunk_identity", "shop_id", "source_type", "source_id", "chunk_index", unique=True),
-        # Filtered indexes
-        Index("idx_chunks_shop_created", "shop_id", "created_at"),
-        Index("idx_chunks_shop_source_type", "shop_id", "source_type"),
-        Index("idx_chunks_content_hash", "shop_id", "content_hash"),
-        # Source type validation
-        CheckConstraint(
-            "source_type IN ('call_transcript', 'call_summary', 'booking_note')",
-            name="ck_source_type_valid"
-        ),
-    )
 
 
 # ============================================================================
@@ -455,15 +380,20 @@ async def embed_texts(
     Returns list of embedding vectors in same order as input.
     
     Raises:
-        ValueError: If no API key configured
+        ValueError: If embeddings disabled or no API key configured
         OpenAI API errors propagate up
     """
+    if not EMBEDDINGS_ENABLED:
+        logger.debug("Embeddings disabled, skipping embed_texts")
+        raise ValueError("Embeddings are disabled (ENABLE_EMBEDDINGS=False)")
+    
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY not configured")
     
     if not texts:
         return []
     
+    from openai import AsyncOpenAI
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     all_embeddings: list[list[float]] = []
     
@@ -483,7 +413,13 @@ async def embed_texts(
 
 
 async def embed_single(text: str) -> list[float]:
-    """Embed a single text. Convenience wrapper around embed_texts."""
+    """
+    Embed a single text. Convenience wrapper around embed_texts.
+    
+    Raises ValueError if embeddings are disabled.
+    """
+    if not EMBEDDINGS_ENABLED:
+        raise ValueError("Embeddings are disabled (ENABLE_EMBEDDINGS=False)")
     embeddings = await embed_texts([text])
     return embeddings[0]
 
@@ -508,6 +444,7 @@ async def ingest_chunks(
     Ingest text chunks into pgvector table.
     
     Idempotent: Skips chunks that already exist (by shop_id, source_type, source_id, chunk_index).
+    Returns 0 (no-op) if embeddings are disabled.
     
     Args:
         session: Database session
@@ -521,8 +458,12 @@ async def ingest_chunks(
         stylist_id: Optional related stylist
     
     Returns:
-        Number of chunks inserted (excluding skipped duplicates)
+        Number of chunks inserted (excluding skipped duplicates), 0 if disabled
     """
+    if not EMBEDDINGS_ENABLED:
+        logger.debug("Embeddings disabled, skipping ingest_chunks for %s/%s", source_type.value, source_id)
+        return 0
+    
     if not chunks:
         return 0
     
@@ -748,6 +689,8 @@ async def search_similar_chunks(
     """
     Search for chunks similar to the query text.
     
+    Returns empty list if embeddings are disabled.
+    
     Args:
         session: Database session
         shop_id: Shop ID for multi-tenant isolation (REQUIRED)
@@ -759,8 +702,12 @@ async def search_similar_chunks(
         min_similarity: Minimum similarity score (0.0 to 1.0)
     
     Returns:
-        List of SearchResult objects ordered by similarity (highest first)
+        List of SearchResult objects ordered by similarity (highest first), empty if disabled
     """
+    if not EMBEDDINGS_ENABLED:
+        logger.debug("Embeddings disabled, returning empty search results")
+        return []
+    
     # Embed the query
     query_embedding = await embed_single(query)
     embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
@@ -844,6 +791,8 @@ async def get_context_for_query(
     Retrieves similar chunks and formats them as context,
     respecting a token budget.
     
+    Returns empty string if embeddings are disabled.
+    
     Args:
         session: Database session
         shop_id: Shop ID for multi-tenant isolation
@@ -852,8 +801,12 @@ async def get_context_for_query(
         limit: Maximum chunks to retrieve
     
     Returns:
-        Formatted context string for injection into LLM prompt
+        Formatted context string for injection into LLM prompt, empty if disabled
     """
+    if not EMBEDDINGS_ENABLED:
+        logger.debug("Embeddings disabled, returning empty context")
+        return ""
+    
     results = await search_similar_chunks(
         session=session,
         shop_id=shop_id,

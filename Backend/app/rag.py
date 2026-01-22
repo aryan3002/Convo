@@ -38,7 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
-from .vector_search import embed_single, SourceType
+from .vector_search import embed_single, SourceType, EMBEDDINGS_ENABLED
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -514,6 +514,8 @@ async def ask_with_citations(
     4. Generates grounded answer with citations
     5. Returns structured response with sources
     
+    Returns a "feature disabled" response if embeddings are disabled.
+    
     Args:
         session: Database session
         shop_id: Shop ID for multi-tenant isolation (REQUIRED)
@@ -530,10 +532,24 @@ async def ask_with_citations(
         RAGResponse with answer, sources, and metadata
     
     Guardrails:
+        - If embeddings disabled: Returns "feature not enabled" message
         - If no chunks above threshold: Returns "No relevant data found"
         - If LLM answer has no citations: Applies refusal
         - Answer is capped at ~7 sentences
     """
+    # Check if embeddings are enabled
+    if not EMBEDDINGS_ENABLED:
+        logger.info("RAG ask_with_citations called but embeddings are disabled")
+        return RAGResponse(
+            answer="Semantic search over call transcripts is not currently enabled. "
+                   "This feature will be available in a future update.",
+            sources=[],
+            has_sufficient_evidence=False,
+            query=question,
+            total_chunks_retrieved=0,
+            chunks_above_threshold=0,
+        )
+    
     # Step 1: Retrieve chunks
     all_chunks = await search_chunks_with_filters(
         session=session,

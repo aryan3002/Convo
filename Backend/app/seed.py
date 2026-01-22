@@ -14,7 +14,13 @@ async def seed_initial_data(session):
     shop = result.scalar_one_or_none()
 
     if not shop:
-        shop = Shop(name=settings.default_shop_name)
+        # Generate slug from shop name
+        slug = settings.default_shop_name.lower().replace(" ", "-").replace("'", "")
+        shop = Shop(
+            name=settings.default_shop_name,
+            slug=slug,
+            timezone="America/Phoenix"
+        )
         session.add(shop)
         await session.flush()
 

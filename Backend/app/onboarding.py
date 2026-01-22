@@ -1,5 +1,7 @@
 """
 Phase 6: Onboarding & Scale
+Phase 7: Added audit logging for shop creation
+
 Global shop onboarding and public shop registry endpoints.
 
 These endpoints DO NOT require shop context resolution.
@@ -13,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.models import Shop, ShopPhoneNumber, ShopMember, ShopMemberRole
+from app.auth import log_audit, AUDIT_SHOP_CREATED, AUDIT_MEMBER_ADDED
 
 router = APIRouter()
 
@@ -198,6 +201,23 @@ async def create_shop(
         role=ShopMemberRole.OWNER.value
     )
     db.add(owner_member)
+    
+    # Phase 7: Audit logging for shop creation
+    # Note: We log the shop_id after creation, no PII in metadata
+    await log_audit(
+        db,
+        actor_user_id=request.owner_user_id,
+        action=AUDIT_SHOP_CREATED,
+        shop_id=new_shop.id,
+        target_type="shop",
+        target_id=str(new_shop.id),
+        metadata={
+            "slug": unique_slug,
+            "name": request.name,
+            "category": request.category,
+            "timezone": request.timezone,
+        }
+    )
     
     await db.commit()
     await db.refresh(new_shop)

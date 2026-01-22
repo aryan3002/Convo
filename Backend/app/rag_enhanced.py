@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
 from .rag import RetrievedChunk, RAGResponse, Citation
-from .vector_search import embed_single, SourceType
+from .vector_search import embed_single, SourceType, EMBEDDINGS_ENABLED
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -652,6 +652,8 @@ async def enhanced_ask_with_citations(
     """
     Enhanced RAG with query rewriting, hybrid search, reranking, and caching.
     
+    Returns "feature not enabled" response if embeddings are disabled.
+    
     Returns:
         Tuple of (RAGResponse, RAGMetrics)
     """
@@ -661,6 +663,28 @@ async def enhanced_ask_with_citations(
     config = config or get_rag_config()
     request_id = str(uuid_mod.uuid4())[:8]
     start_time = time.time()
+    
+    # Check if embeddings are enabled
+    if not EMBEDDINGS_ENABLED:
+        logger.info("Enhanced RAG called but embeddings are disabled")
+        empty_metrics = RAGMetrics(
+            request_id=request_id,
+            timestamp=datetime.utcnow(),
+            shop_id=shop_id,
+            original_query=question,
+            total_ms=(time.time() - start_time) * 1000,
+            has_sufficient_evidence=False,
+        )
+        empty_response = RAGResponse(
+            answer="Semantic search over call transcripts is not currently enabled. "
+                   "This feature will be available in a future update.",
+            sources=[],
+            has_sufficient_evidence=False,
+            query=question,
+            total_chunks_retrieved=0,
+            chunks_above_threshold=0,
+        )
+        return empty_response, empty_metrics
     
     # Initialize metrics
     metrics = RAGMetrics(
