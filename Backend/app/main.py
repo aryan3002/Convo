@@ -63,13 +63,17 @@ from .models import (
 )
 from .seed import seed_initial_data
 from .routes_scoped import router as scoped_router  # Phase 4: URL-based shop routing
+from .router_gpt import router as router_gpt_router  # Phase 5: RouterGPT discovery layer
+from .onboarding import router as onboarding_router  # Phase 6: Global onboarding endpoints
 
 
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
 app.include_router(voice_router, prefix="/twilio", tags=["voice"])
 app.include_router(public_booking_router)  # ChatGPT Custom GPT public booking API
+app.include_router(onboarding_router)  # Phase 6: Global onboarding (no shop context required)
 app.include_router(scoped_router)  # Phase 4: /s/{slug}/... multi-tenant routes
+app.include_router(router_gpt_router)  # Phase 5: RouterGPT discovery layer
 app.include_router(registry_router)  # Phase 0: Shop registry placeholder for multi-tenancy
 logger = logging.getLogger(__name__)
 

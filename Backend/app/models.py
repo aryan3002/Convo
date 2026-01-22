@@ -112,6 +112,34 @@ class ShopApiKey(Base):
     )
 
 
+class ShopMemberRole(str, Enum):
+    """Roles for shop members (Phase 6)."""
+    OWNER = "OWNER"
+    MANAGER = "MANAGER"
+    EMPLOYEE = "EMPLOYEE"
+
+
+class ShopMember(Base):
+    """
+    Shop membership for multi-user access control (Phase 6).
+    
+    Tracks which users have access to which shops and their roles.
+    """
+    __tablename__ = "shop_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)  # Auth provider user ID
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="EMPLOYEE")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    
+    __table_args__ = (
+        UniqueConstraint("shop_id", "user_id", name="uq_shop_member"),
+    )
+
+
 class Service(Base):
     __tablename__ = "services"
 

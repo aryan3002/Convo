@@ -77,7 +77,7 @@ These routes still work but:
 The `/twilio/voice` endpoint now uses **strict** shop resolution:
 
 1. Extracts `To` number from Twilio webhook
-2. Looks up shop by registered Twilio phone number
+2. Looks up shop by registered phone number in `shop_phone_numbers` table (preferred) or `shops.phone_number` (fallback)
 3. **No fallback** - returns error TwiML if shop not found
 
 ### Error Handling
@@ -95,13 +95,35 @@ If Twilio To number is not registered:
 
 ### Setup Required
 
-To enable voice for a shop, register the Twilio number in the database:
+To enable voice for a shop, register the Twilio number in the database.
+
+**Option A: Use `shop_phone_numbers` table (recommended for multiple numbers)**:
 
 ```sql
-UPDATE shops 
-SET twilio_phone = '+14801234567' 
+-- Insert into shop_phone_numbers (supports multiple numbers per shop)
+-- Note: phone_number has a UNIQUE constraint across all shops
+INSERT INTO shop_phone_numbers (shop_id, phone_number, label, is_primary)
+SELECT id, '+14801234567', 'booking', true
+FROM shops
 WHERE slug = 'bishops-tempe';
 ```
+
+**Schema reference:**
+- `shop_id`: Foreign key to shops table
+- `phone_number`: VARCHAR(20), UNIQUE across all shops
+- `label`: Optional label like 'main', 'booking', 'support'
+- `is_primary`: BOOLEAN, marks the primary number for the shop
+
+**Option B: Use `shops.phone_number` column (simple single-number setup)**:
+
+```sql
+-- Set the primary phone directly on the shop
+UPDATE shops 
+SET phone_number = '+14801234567' 
+WHERE slug = 'bishops-tempe';
+```
+
+**Resolution Order**: The system checks `shop_phone_numbers` first, then falls back to `shops.phone_number`. Use Option A for multi-number routing (e.g., separate booking vs support lines).
 
 ## File Changes
 
