@@ -73,9 +73,62 @@ class ShopPublicInfo(BaseModel):
         }
 
 
+class ShopListItem(BaseModel):
+    """Shop item for listing."""
+    
+    id: int
+    slug: str
+    name: str
+    timezone: Optional[str] = None
+    address: Optional[str] = None
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "id": 1,
+                "slug": "bishops-tempe",
+                "name": "Bishops Tempe",
+                "timezone": "America/Phoenix",
+                "address": "123 Mill Ave, Tempe, AZ 85281",
+            }
+        }
+
+
 # ────────────────────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/shops",
+    response_model=list[ShopListItem],
+    summary="List all shops",
+    description="""
+    Get a list of all available shops.
+    Used by employee portal for shop selection.
+    
+    **PHASE 6 STATUS:** Returns all active shops.
+    """,
+)
+async def list_shops(
+    session: AsyncSession = Depends(get_session),
+) -> list[ShopListItem]:
+    """List all available shops for selection."""
+    result = await session.execute(
+        select(Shop).order_by(Shop.name)
+    )
+    shops = list(result.scalars())
+    
+    return [
+        ShopListItem(
+            id=shop.id,
+            slug=shop.slug,
+            name=shop.name,
+            timezone=shop.timezone,
+            address=shop.address,
+        )
+        for shop in shops
+    ]
+
 
 @router.get(
     "/resolve",

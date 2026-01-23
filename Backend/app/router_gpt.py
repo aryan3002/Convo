@@ -7,8 +7,10 @@ right business and delegates to the appropriate multi-tenant endpoint.
 
 Endpoints:
     GET  /router/search              - Search businesses by query/location/category
+    POST /router/search-by-location  - Search businesses by lat/lon coordinates
     GET  /router/business/{id}       - Get detailed business summary
     POST /router/handoff             - Generate handoff package for delegation
+    POST /router/delegate            - Delegate to a shop's booking agent
 
 Design Principles:
     - Discovery only - never creates bookings or modifies data
@@ -18,23 +20,29 @@ Design Principles:
 
 Tools for ChatGPT:
     1. search_businesses - Find businesses matching user criteria
-    2. get_business_summary - Get details about a specific business
-    3. handoff_to_business_gpt - Generate delegation payload
+    2. search_by_location - Find nearby businesses by coordinates
+    3. get_business_summary - Get details about a specific business
+    4. handoff_to_business_gpt - Generate delegation payload
+    5. delegate_to_shop - Hand off to shop's booking agent
 """
 
 import logging
 import re
+import uuid
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Body, status, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.db import get_session
 from .models import Shop, ShopPhoneNumber, Service, Stylist
+from .geocoding import calculate_distance, geocode_or_lookup
+from .rate_limiter import rate_limit_dependency
+from .router_analytics import track_search, track_delegation
 
 
 logger = logging.getLogger(__name__)
@@ -122,6 +130,78 @@ class HandoffResponse(BaseModel):
     recommended_endpoint: str = Field(..., description="The /s/{slug}/chat endpoint to call")
     payload_template: HandoffPayloadTemplate = Field(..., description="Suggested payload structure")
     explanation: str = Field(..., description="Human-readable explanation of the handoff")
+
+
+# ────────────────────────────────────────────────────────────────
+# Phase 3: Location Search & Delegation Models
+# ────────────────────────────────────────────────────────────────
+
+class LocationSearchRequest(BaseModel):
+    """Request for location-based business search."""
+    latitude: float = Field(..., ge=-90, le=90, description="Latitude coordinate")
+    longitude: float = Field(..., ge=-180, le=180, description="Longitude coordinate")
+    radius_miles: float = Field(5.0, gt=0, le=50, description="Search radius in miles")
+    category: Optional[str] = Field(None, description="Filter by category (e.g., 'barbershop', 'salon')")
+    query: Optional[str] = Field(None, description="Additional text filter")
+
+
+class LocationSearchResult(BaseModel):
+    """A single business in location search results."""
+    business_id: int = Field(..., description="Unique business ID (shop_id)")
+    slug: str = Field(..., description="URL-safe slug for routing")
+    name: str = Field(..., description="Business display name")
+    category: Optional[str] = Field(None, description="Business category")
+    address: Optional[str] = Field(None, description="Business address")
+    timezone: str = Field(..., description="IANA timezone")
+    primary_phone: Optional[str] = Field(None, description="Primary contact phone")
+    distance_miles: float = Field(..., description="Distance from search coordinates in miles")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Match confidence score")
+
+
+class LocationSearchResponse(BaseModel):
+    """Response for location-based search."""
+    query: str = Field(..., description="Description of the search")
+    latitude: float = Field(..., description="Search center latitude")
+    longitude: float = Field(..., description="Search center longitude")
+    radius_miles: float = Field(..., description="Search radius used")
+    results: list[LocationSearchResult] = Field(default_factory=list)
+    total_count: int = Field(..., description="Total matching businesses")
+
+
+class CustomerContext(BaseModel):
+    """Context about the customer from RouterGPT."""
+    location: Optional[dict] = Field(None, description="Customer location {lat, lon}")
+    intent: Optional[str] = Field(None, description="Extracted intent (e.g., 'haircut')")
+    preferred_time: Optional[str] = Field(None, description="Preferred time (e.g., 'afternoon')")
+
+
+class DelegateRequest(BaseModel):
+    """Request to delegate to a shop's booking agent."""
+    shop_slug: str = Field(..., description="Target shop slug")
+    customer_context: Optional[CustomerContext] = Field(None, description="Context from RouterGPT")
+    conversation_history: list[ConversationMessage] = Field(
+        default_factory=list,
+        description="Conversation history to preserve"
+    )
+
+
+class ServiceInfo(BaseModel):
+    """Service information for delegation response."""
+    id: int
+    name: str
+    duration_minutes: int
+    price_cents: int
+    price_display: str
+
+
+class DelegateResponse(BaseModel):
+    """Response for delegation to shop booking agent."""
+    success: bool = Field(..., description="Whether delegation was successful")
+    shop_slug: str = Field(..., description="Target shop slug")
+    shop_name: str = Field(..., description="Shop display name")
+    session_id: str = Field(..., description="Unique session ID for tracking")
+    initial_message: str = Field(..., description="Greeting from the business agent")
+    available_services: list[ServiceInfo] = Field(default_factory=list, description="First few services")
 
 
 # ────────────────────────────────────────────────────────────────
@@ -483,6 +563,271 @@ async def handoff_to_business_gpt(
         recommended_endpoint=f"/s/{shop.slug}/chat",
         payload_template=payload_template,
         explanation=explanation,
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+# Phase 3: Location-Based Search Endpoint
+# ────────────────────────────────────────────────────────────────
+
+@router.post("/search-by-location", response_model=LocationSearchResponse)
+async def search_by_location(
+    request: LocationSearchRequest,
+    req: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(rate_limit_dependency(20, 60)),  # 20 requests per minute
+) -> LocationSearchResponse:
+    """
+    Search for businesses near a geographic location.
+    
+    Rate Limit: 20 requests per minute per IP
+    
+    This endpoint enables RouterGPT to find nearby businesses based on
+    customer coordinates (typically obtained from ChatGPT's location detection).
+    
+    The search:
+    1. Finds all shops with valid coordinates
+    2. Calculates distance using Haversine formula
+    3. Filters by radius and optional category/query
+    4. Ranks by distance (closest first)
+    5. Calculates confidence score based on distance
+    
+    Example:
+        POST /router/search-by-location
+        {
+            "latitude": 33.4255,
+            "longitude": -111.9400,
+            "radius_miles": 5,
+            "category": "barbershop"
+        }
+    
+    Returns:
+        List of nearby businesses with distance and confidence scores.
+    """
+    logger.info(
+        f"[ROUTER] Search: lat={request.latitude}, lon={request.longitude}, "
+        f"radius={request.radius_miles}mi, category={request.category or 'all'}"
+    )
+    
+    # Fetch all shops with coordinates
+    stmt = select(Shop).where(
+        Shop.latitude.isnot(None),
+        Shop.longitude.isnot(None)
+    )
+    
+    # Apply category filter if provided
+    if request.category:
+        stmt = stmt.where(Shop.category == request.category.lower())
+    
+    result = await session.execute(stmt)
+    shops = result.scalars().all()
+    
+    # Calculate distances and filter by radius
+    scored_results = []
+    for shop in shops:
+        # Calculate distance
+        distance = calculate_distance(
+            request.latitude, request.longitude,
+            shop.latitude, shop.longitude
+        )
+        
+        # Skip if outside radius
+        if distance > request.radius_miles:
+            continue
+        
+        # Apply text query filter if provided
+        if request.query:
+            query_lower = request.query.lower()
+            name_match = query_lower in (shop.name or "").lower()
+            address_match = query_lower in (shop.address or "").lower()
+            category_match = query_lower in (shop.category or "").lower()
+            if not (name_match or address_match or category_match):
+                continue
+        
+        # Calculate confidence (closer = higher confidence)
+        confidence = max(0.0, 1.0 - (distance / request.radius_miles))
+        
+        # Get primary phone
+        primary_phone = await get_shop_primary_phone(session, shop.id)
+        
+        scored_results.append(LocationSearchResult(
+            business_id=shop.id,
+            slug=shop.slug,
+            name=shop.name,
+            category=shop.category,
+            address=shop.address,
+            timezone=shop.timezone,
+            primary_phone=primary_phone,
+            distance_miles=round(distance, 2),
+            confidence=round(confidence, 3),
+        ))
+    
+    # Sort by distance (closest first)
+    scored_results.sort(key=lambda x: x.distance_miles)
+    
+    # Limit to top 10 results
+    final_results = scored_results[:10]
+    
+    # Track search analytics
+    try:
+        await track_search(
+            session=session,
+            session_id=uuid.uuid4(),  # Generate unique search ID
+            latitude=request.latitude,
+            longitude=request.longitude,
+            radius_miles=request.radius_miles,
+            category=request.category,
+            results_count=len(final_results),
+            request=req,  # Pass FastAPI request for IP/user-agent
+        )
+        await session.commit()
+    except Exception as e:
+        logger.error(f"[ANALYTICS] Failed to track search: {e}")
+        # Don't fail the request if analytics fails
+    
+    # Log search results
+    logger.info(
+        f"[ROUTER] Search results: {len(final_results)} businesses found "
+        f"(total within radius: {len(scored_results)})"
+    )
+    
+    query_desc = f"Businesses within {request.radius_miles} miles"
+    if request.category:
+        query_desc += f" in category '{request.category}'"
+    if request.query:
+        query_desc += f" matching '{request.query}'"
+    
+    return LocationSearchResponse(
+        query=query_desc,
+        latitude=request.latitude,
+        longitude=request.longitude,
+        radius_miles=request.radius_miles,
+        results=final_results,
+        total_count=len(final_results),
+    )
+
+
+# ────────────────────────────────────────────────────────────────
+# Phase 3: Delegation Endpoint
+# ────────────────────────────────────────────────────────────────
+
+@router.post("/delegate", response_model=DelegateResponse)
+async def delegate_to_shop(
+    request: DelegateRequest,
+    req: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(rate_limit_dependency(10, 60)),  # 10 requests per minute
+) -> DelegateResponse:
+    """
+    Delegate to a shop's booking agent with context.
+    
+    Rate Limit: 10 requests per minute per IP
+    
+    This endpoint is called by RouterGPT after the customer selects a business.
+    It prepares the handoff to the shop's booking agent with any context
+    collected during discovery (location, intent, preferences).
+    
+    The response includes:
+    - A unique session_id for tracking
+    - An initial greeting message from the business
+    - Available services to show the customer
+    
+    After calling this endpoint, RouterGPT should:
+    1. Present the initial_message to the customer
+    2. Route subsequent messages to POST /s/{slug}/chat
+    3. Include router_session_id in the chat requests
+    
+    Example:
+        POST /router/delegate
+        {
+            "shop_slug": "bishops-tempe",
+            "customer_context": {
+                "location": {"lat": 33.4255, "lon": -111.94},
+                "intent": "haircut"
+            }
+        }
+    """
+    logger.info(f"RouterGPT delegate to shop: {request.shop_slug}")
+    
+    # Resolve shop
+    stmt = select(Shop).where(Shop.slug == request.shop_slug)
+    result = await session.execute(stmt)
+    shop = result.scalar_one_or_none()
+    
+    if not shop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Shop not found: {request.shop_slug}"
+        )
+    
+    # Generate unique session ID for tracking
+    session_id = str(uuid.uuid4())
+    
+    # Get first 5 services for context
+    services_stmt = select(Service).where(Service.shop_id == shop.id).limit(5)
+    services_result = await session.execute(services_stmt)
+    services = services_result.scalars().all()
+    
+    # Format services
+    available_services = [
+        ServiceInfo(
+            id=svc.id,
+            name=svc.name,
+            duration_minutes=svc.duration_minutes,
+            price_cents=svc.price_cents,
+            price_display=f"${svc.price_cents / 100:.2f}",
+        )
+        for svc in services
+    ]
+    
+    # Build initial greeting based on context
+    intent = request.customer_context.intent if request.customer_context else None
+    
+    if intent:
+        greeting = f"Welcome to {shop.name}! I understand you're looking for {intent}. "
+    else:
+        greeting = f"Welcome to {shop.name}! I'm here to help you book an appointment. "
+    
+    # Add service suggestions
+    if available_services:
+        top_services = available_services[:3]
+        service_list = ", ".join([s.name for s in top_services])
+        greeting += f"We offer {service_list} and more. What would you like to book today?"
+    else:
+        greeting += "How can I help you today?"
+    
+    # Log delegation
+    logger.info(
+        f"[ROUTER] Delegate: shop={request.shop_slug}, session={session_id}, "
+        f"intent={intent or 'none'}, services={len(available_services)}"
+    )
+    
+    # Track delegation analytics
+    try:
+        await track_delegation(
+            session=session,
+            session_id=uuid.UUID(session_id),
+            shop_id=shop.id,
+            shop_slug=shop.slug,
+            customer_latitude=request.customer_context.location.get("lat") if request.customer_context and request.customer_context.location else None,
+            customer_longitude=request.customer_context.location.get("lon") if request.customer_context and request.customer_context.location else None,
+            shop_latitude=shop.latitude,
+            shop_longitude=shop.longitude,
+            intent=intent,
+            request=req,  # Pass FastAPI request for IP/user-agent
+        )
+        await session.commit()
+    except Exception as e:
+        logger.error(f"[ANALYTICS] Failed to track delegation: {e}")
+        # Don't fail the request if analytics fails
+    
+    return DelegateResponse(
+        success=True,
+        shop_slug=shop.slug,
+        shop_name=shop.name,
+        session_id=session_id,
+        initial_message=greeting,
+        available_services=available_services,
     )
 
 

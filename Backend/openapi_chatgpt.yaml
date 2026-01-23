@@ -5,7 +5,26 @@ info:
     Public booking API for ConvoAI Services. This API allows customers to book appointments
     directly through ChatGPT Custom GPT integration.
     
-    ## Booking Flow
+    ## RouterGPT: Location-Based Discovery (Phase 3)
+    
+    RouterGPT enables location-based business discovery and seamless delegation:
+    
+    1. **Discovery Phase**: Customer shares location → Search for nearby businesses
+    2. **Delegation Phase**: Customer selects business → Hand off to booking agent
+    3. **Booking Phase**: Continue conversation with shop's booking agent
+    
+    ### Discovery Flow
+    ```
+    User: "I need a haircut near me"
+    → Extract location (GPS, ZIP, address)
+    → POST /router/search-by-location (find nearby shops)
+    → Present top results to user
+    → User selects a business
+    → POST /router/delegate (hand off to shop)
+    → Continue with POST /s/{slug}/chat
+    ```
+    
+    ## Legacy Single-Shop Booking Flow
     1. Get business info and available services
     2. Check availability for desired date/service
     3. Create a booking QUOTE (does NOT create booking)
@@ -15,7 +34,7 @@ info:
     
     ## Authentication
     All endpoints require an API key passed in the `X-API-Key` header.
-  version: 1.0.0
+  version: 2.0.0
   contact:
     name: ConvoAI Support
     email: support@convoai.com
@@ -30,6 +49,241 @@ security:
   - ApiKeyAuth: []
 
 paths:
+  # ────────────────────────────────────────────────────────────────
+  # Phase 3: RouterGPT Discovery & Delegation Endpoints
+  # ────────────────────────────────────────────────────────────────
+  
+  /router/search-by-location:
+    post:
+      operationId: searchBusinessesByLocation
+      summary: Find businesses near customer's GPS location
+      description: |
+        Search for businesses near a geographic location. Use this when the customer
+        shares their location or provides coordinates.
+        
+        **When to use:**
+        - Customer says "near me" and shares GPS location
+        - Customer provides a specific address
+        - Customer gives ZIP code or city (geocode first, then search)
+        
+        **Response includes:**
+        - List of nearby businesses sorted by distance
+        - Distance in miles from customer
+        - Confidence score (closer = higher confidence)
+        
+        After getting results, present the top 3 to the customer and ask them to choose.
+      tags:
+        - RouterGPT Discovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationSearchRequest'
+            example:
+              latitude: 33.4255
+              longitude: -111.94
+              radius_miles: 10
+              category: "barbershop"
+      responses:
+        '200':
+          description: List of nearby businesses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocationSearchResponse'
+              example:
+                query: "Businesses within 10.0 miles in category 'barbershop'"
+                latitude: 33.4255
+                longitude: -111.94
+                radius_miles: 10.0
+                results:
+                  - business_id: 2
+                    slug: "bishops-tempe"
+                    name: "Bishops Tempe"
+                    category: "barbershop"
+                    address: "123 Mill Ave, Tempe, AZ 85281"
+                    timezone: "America/Phoenix"
+                    primary_phone: "+1-480-555-1234"
+                    distance_miles: 0.5
+                    confidence: 0.95
+                  - business_id: 5
+                    slug: "classic-cuts-mesa"
+                    name: "Classic Cuts Mesa"
+                    category: "barbershop"
+                    address: "456 Main St, Mesa, AZ 85201"
+                    timezone: "America/Phoenix"
+                    primary_phone: "+1-480-555-5678"
+                    distance_miles: 3.2
+                    confidence: 0.68
+                total_count: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /router/delegate:
+    post:
+      operationId: delegateToBusinessBookingAgent
+      summary: Hand off conversation to shop's booking agent
+      description: |
+        Delegate to a specific shop's booking agent after the customer selects a business.
+        This endpoint prepares the handoff with context from the discovery phase.
+        
+        **When to use:**
+        - Customer has selected a business from search results
+        - Ready to start the booking conversation
+        
+        **Response includes:**
+        - Unique session_id for tracking (include in subsequent /s/{slug}/chat calls)
+        - Initial greeting message to show the customer
+        - Available services to help start the conversation
+        
+        **After calling this endpoint:**
+        1. Display the initial_message to the customer
+        2. Show available services as options
+        3. Route all subsequent messages to POST /s/{slug}/chat
+        4. Always include router_session_id in chat requests
+      tags:
+        - RouterGPT Discovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DelegateRequest'
+            example:
+              shop_slug: "bishops-tempe"
+              customer_context:
+                intent: "haircut"
+                location:
+                  lat: 33.4255
+                  lon: -111.94
+      responses:
+        '200':
+          description: Delegation successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DelegateResponse'
+              example:
+                success: true
+                shop_slug: "bishops-tempe"
+                shop_name: "Bishops Tempe"
+                session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                initial_message: "Welcome to Bishops Tempe! I understand you're looking for haircut. We offer Men's Haircut, Women's Haircut, Beard Trim and more. What would you like to book today?"
+                available_services:
+                  - id: 1
+                    name: "Men's Haircut"
+                    duration_minutes: 30
+                    price_cents: 3500
+                    price_display: "$35.00"
+                  - id: 2
+                    name: "Women's Haircut"
+                    duration_minutes: 45
+                    price_cents: 5500
+                    price_display: "$55.00"
+        '404':
+          description: Shop not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Shop not found: invalid-slug"
+
+  /s/{slug}/chat:
+    post:
+      operationId: chatWithBusinessBookingAgent
+      summary: Continue booking conversation with specific shop
+      description: |
+        Send a message to a shop's AI booking agent. Use this endpoint for all
+        booking-related conversations after delegation.
+        
+        **When to use:**
+        - After calling /router/delegate
+        - For each customer message in the booking flow
+        
+        **Include RouterGPT context:**
+        - router_session_id: From /router/delegate response
+        - customer_location: From discovery phase
+        - router_intent: Customer's stated intent
+        
+        The AI will guide the customer through:
+        1. Service selection
+        2. Date and time selection
+        3. Stylist preference (optional)
+        4. Customer information
+        5. Booking confirmation
+      tags:
+        - Shop Booking Agent
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop URL slug (e.g., "bishops-tempe")
+          schema:
+            type: string
+          example: "bishops-tempe"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            example:
+              messages:
+                - role: "user"
+                  content: "I'd like to book a men's haircut for tomorrow afternoon"
+              router_session_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              router_intent: "haircut"
+              customer_location:
+                lat: 33.4255
+                lon: -111.94
+      responses:
+        '200':
+          description: AI response with optional action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+              example:
+                reply: "Great choice! For a Men's Haircut tomorrow afternoon, I have these times available: 1:00 PM, 2:30 PM, or 4:00 PM. Which works best for you?"
+                action:
+                  type: "show_slots"
+                  params:
+                    service_id: 1
+                    date: "2026-01-23"
+                data:
+                  slots:
+                    - time: "13:00"
+                      time_display: "1:00 PM"
+                      stylist_name: "Alex"
+                    - time: "14:30"
+                      time_display: "2:30 PM"
+                      stylist_name: "Jamie"
+                    - time: "16:00"
+                      time_display: "4:00 PM"
+                      stylist_name: "Alex"
+                chips:
+                  - "1:00 PM"
+                  - "2:30 PM"
+                  - "4:00 PM"
+                shop_slug: "bishops-tempe"
+                shop_name: "Bishops Tempe"
+        '404':
+          description: Shop not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                detail: "Shop not found: invalid-slug. Check the URL and try again."
+
+  # ────────────────────────────────────────────────────────────────
+  # Legacy Single-Shop Endpoints
+  # ────────────────────────────────────────────────────────────────
+
   /public/business:
     get:
       operationId: getBusinessInfo
@@ -671,6 +925,338 @@ components:
           type: string
           format: date-time
           description: When booking was created
+
+    # ────────────────────────────────────────────────────────────────
+    # Phase 3: RouterGPT Schemas
+    # ────────────────────────────────────────────────────────────────
+
+    LocationSearchRequest:
+      type: object
+      required:
+        - latitude
+        - longitude
+      properties:
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          description: Customer's latitude coordinate (WGS84)
+          example: 33.4255
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          description: Customer's longitude coordinate (WGS84)
+          example: -111.94
+        radius_miles:
+          type: number
+          format: double
+          minimum: 0.1
+          maximum: 50
+          default: 10
+          description: Search radius in miles (default 10, max 50)
+          example: 10
+        category:
+          type: string
+          nullable: true
+          description: Filter by business category (e.g., "barbershop", "salon")
+          example: "barbershop"
+        query:
+          type: string
+          nullable: true
+          description: Optional text query to filter results
+          example: "bishops"
+
+    LocationSearchResult:
+      type: object
+      required:
+        - business_id
+        - slug
+        - name
+        - distance_miles
+        - confidence
+      properties:
+        business_id:
+          type: integer
+          description: Unique business ID
+          example: 2
+        slug:
+          type: string
+          description: URL-safe slug for routing to shop endpoints
+          example: "bishops-tempe"
+        name:
+          type: string
+          description: Business display name
+          example: "Bishops Tempe"
+        category:
+          type: string
+          nullable: true
+          description: Business category
+          example: "barbershop"
+        address:
+          type: string
+          nullable: true
+          description: Business address
+          example: "123 Mill Ave, Tempe, AZ 85281"
+        timezone:
+          type: string
+          description: Business timezone (IANA format)
+          example: "America/Phoenix"
+        primary_phone:
+          type: string
+          nullable: true
+          description: Business phone number
+          example: "+1-480-555-1234"
+        distance_miles:
+          type: number
+          format: double
+          description: Distance from customer location in miles
+          example: 0.5
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Confidence score (0-1, higher = closer/better match)
+          example: 0.95
+
+    LocationSearchResponse:
+      type: object
+      required:
+        - query
+        - latitude
+        - longitude
+        - radius_miles
+        - results
+        - total_count
+      properties:
+        query:
+          type: string
+          description: Human-readable query description
+          example: "Businesses within 10.0 miles in category 'barbershop'"
+        latitude:
+          type: number
+          format: double
+          description: Search center latitude
+        longitude:
+          type: number
+          format: double
+          description: Search center longitude
+        radius_miles:
+          type: number
+          format: double
+          description: Search radius used
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/LocationSearchResult'
+          description: List of matching businesses sorted by distance
+        total_count:
+          type: integer
+          description: Total number of results
+          example: 2
+
+    CustomerContext:
+      type: object
+      description: Context collected during discovery phase
+      properties:
+        intent:
+          type: string
+          nullable: true
+          description: Customer's stated intent (e.g., "haircut", "color")
+          example: "haircut"
+        location:
+          type: object
+          nullable: true
+          properties:
+            lat:
+              type: number
+              format: double
+              description: Customer latitude
+            lon:
+              type: number
+              format: double
+              description: Customer longitude
+
+    DelegateRequest:
+      type: object
+      required:
+        - shop_slug
+      properties:
+        shop_slug:
+          type: string
+          description: Shop slug from search results
+          example: "bishops-tempe"
+        customer_context:
+          $ref: '#/components/schemas/CustomerContext'
+
+    ServiceInfo:
+      type: object
+      required:
+        - id
+        - name
+        - duration_minutes
+        - price_cents
+        - price_display
+      properties:
+        id:
+          type: integer
+          description: Service ID
+          example: 1
+        name:
+          type: string
+          description: Service name
+          example: "Men's Haircut"
+        duration_minutes:
+          type: integer
+          description: Duration in minutes
+          example: 30
+        price_cents:
+          type: integer
+          description: Price in cents
+          example: 3500
+        price_display:
+          type: string
+          description: Formatted price string
+          example: "$35.00"
+
+    DelegateResponse:
+      type: object
+      required:
+        - success
+        - shop_slug
+        - shop_name
+        - session_id
+        - initial_message
+        - available_services
+      properties:
+        success:
+          type: boolean
+          description: Whether delegation was successful
+          example: true
+        shop_slug:
+          type: string
+          description: Shop slug for subsequent requests
+          example: "bishops-tempe"
+        shop_name:
+          type: string
+          description: Shop display name
+          example: "Bishops Tempe"
+        session_id:
+          type: string
+          format: uuid
+          description: Unique session ID for tracking (include in /s/{slug}/chat requests)
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        initial_message:
+          type: string
+          description: Welcome message to show the customer
+          example: "Welcome to Bishops Tempe! I understand you're looking for haircut. We offer Men's Haircut, Women's Haircut, Beard Trim and more. What would you like to book today?"
+        available_services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceInfo'
+          description: First 5 available services to show customer
+
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: ["user", "assistant", "system"]
+          description: Message role
+          example: "user"
+        content:
+          type: string
+          description: Message content
+          example: "I'd like to book a men's haircut for tomorrow afternoon"
+
+    CustomerLocation:
+      type: object
+      properties:
+        lat:
+          type: number
+          format: double
+          description: Customer latitude
+          example: 33.4255
+        lon:
+          type: number
+          format: double
+          description: Customer longitude
+          example: -111.94
+
+    ChatRequest:
+      type: object
+      required:
+        - messages
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+          description: Conversation history
+          minItems: 1
+        context:
+          type: object
+          nullable: true
+          description: Optional booking context (service_id, date, etc.)
+        router_session_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Session ID from /router/delegate (for tracking)
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        router_intent:
+          type: string
+          nullable: true
+          description: Customer's stated intent from discovery
+          example: "haircut"
+        customer_location:
+          $ref: '#/components/schemas/CustomerLocation'
+
+    ChatResponse:
+      type: object
+      required:
+        - reply
+      properties:
+        reply:
+          type: string
+          description: AI assistant's response
+          example: "Great choice! For a Men's Haircut tomorrow afternoon, I have these times available: 1:00 PM, 2:30 PM, or 4:00 PM. Which works best for you?"
+        action:
+          type: object
+          nullable: true
+          description: Action for the client to perform
+          properties:
+            type:
+              type: string
+              description: Action type (show_services, show_slots, hold_slot, confirm_booking)
+            params:
+              type: object
+              description: Action parameters
+        data:
+          type: object
+          nullable: true
+          description: Data payload (services, slots, booking confirmation, etc.)
+        chips:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: Quick response options to show user
+          example: ["1:00 PM", "2:30 PM", "4:00 PM"]
+        shop_slug:
+          type: string
+          nullable: true
+          description: Shop slug for context
+        shop_name:
+          type: string
+          nullable: true
+          description: Shop name for display
 
     Error:
       type: object

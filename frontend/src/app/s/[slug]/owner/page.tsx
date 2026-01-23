@@ -28,6 +28,10 @@ import {
   Lock,
   Unlock,
   Search,
+  Edit2,
+  Trash2,
+  Check,
+  Save,
 } from "lucide-react";
 import {
   getApiBase,
@@ -248,6 +252,32 @@ export default function ShopOwnerDashboard() {
   }, [stylists]);
 
   // ──────────────────────────────────────────────────────────
+  // CRUD State for Services
+  // ──────────────────────────────────────────────────────────
+  const [showAddService, setShowAddService] = useState(false);
+  const [editingServiceId, setEditingServiceId] = useState<number | null>(null);
+  const [serviceFormData, setServiceFormData] = useState({
+    name: "",
+    duration_minutes: 30,
+    price_cents: 2500,
+  });
+  const [serviceLoading, setServiceLoading] = useState(false);
+  const [deletingServiceId, setDeletingServiceId] = useState<number | null>(null);
+
+  // ──────────────────────────────────────────────────────────
+  // CRUD State for Stylists
+  // ──────────────────────────────────────────────────────────
+  const [showAddStylist, setShowAddStylist] = useState(false);
+  const [editingStylistId, setEditingStylistId] = useState<number | null>(null);
+  const [stylistFormData, setStylistFormData] = useState({
+    name: "",
+    work_start: "09:00",
+    work_end: "17:00",
+  });
+  const [stylistLoading, setStylistLoading] = useState(false);
+  const [deletingStylistId, setDeletingStylistId] = useState<number | null>(null);
+
+  // ──────────────────────────────────────────────────────────
   // Chat
   // ──────────────────────────────────────────────────────────
 
@@ -320,7 +350,7 @@ export default function ShopOwnerDashboard() {
         setSuggestedChips(data.suggested_chips);
       }
 
-      // Apply any data updates from response
+      // Apply any data updates from response immediately
       if (data.data?.services) {
         setServices(data.data.services as unknown as Service[]);
       }
@@ -328,8 +358,15 @@ export default function ShopOwnerDashboard() {
         setStylists(data.data.stylists as unknown as Stylist[]);
       }
 
-      // Refresh data after chat action
-      fetchData();
+      // Always refresh data after chat action to ensure sync
+      console.log("[OWNER_DASHBOARD] Chat action completed, refreshing data...");
+      await fetchData();
+      
+      // Also refresh related data
+      await Promise.all([
+        promos.fetchPromos(),
+        serviceBookings.fetchBookingCounts(),
+      ]);
     } catch (error) {
       console.error("Chat error:", error);
       const errorMsg: OwnerMessage = {
@@ -340,6 +377,205 @@ export default function ShopOwnerDashboard() {
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Service CRUD Functions
+  // ──────────────────────────────────────────────────────────
+
+  async function handleAddService() {
+    if (!serviceFormData.name.trim()) return;
+    setServiceLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId || "",
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: "user",
+            content: `Add a new service called "${serviceFormData.name}" for ${serviceFormData.duration_minutes} minutes at $${(serviceFormData.price_cents / 100).toFixed(2)}`,
+          }],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.data?.services) {
+          setServices(data.data.services as unknown as Service[]);
+        }
+        await fetchData();
+        setShowAddService(false);
+        setServiceFormData({ name: "", duration_minutes: 30, price_cents: 2500 });
+      }
+    } catch (error) {
+      console.error("Failed to add service:", error);
+    } finally {
+      setServiceLoading(false);
+    }
+  }
+
+  async function handleUpdateService(serviceId: number) {
+    const service = services.find((s) => s.id === serviceId);
+    if (!service || !serviceFormData.name.trim()) return;
+    setServiceLoading(true);
+    try {
+      // Update price if changed
+      if (serviceFormData.price_cents !== service.price_cents) {
+        await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-User-Id": userId || "",
+          },
+          body: JSON.stringify({
+            messages: [{
+              role: "user",
+              content: `Change the price of "${service.name}" to $${(serviceFormData.price_cents / 100).toFixed(2)}`,
+            }],
+          }),
+        });
+      }
+      // Update duration if changed
+      if (serviceFormData.duration_minutes !== service.duration_minutes) {
+        await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-User-Id": userId || "",
+          },
+          body: JSON.stringify({
+            messages: [{
+              role: "user",
+              content: `Change the duration of "${service.name}" to ${serviceFormData.duration_minutes} minutes`,
+            }],
+          }),
+        });
+      }
+      await fetchData();
+      setEditingServiceId(null);
+    } catch (error) {
+      console.error("Failed to update service:", error);
+    } finally {
+      setServiceLoading(false);
+    }
+  }
+
+  async function handleDeleteService(serviceId: number) {
+    const service = services.find((s) => s.id === serviceId);
+    if (!service) return;
+    setDeletingServiceId(serviceId);
+    try {
+      await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId || "",
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: "user",
+            content: `Remove the service "${service.name}"`,
+          }],
+        }),
+      });
+      await fetchData();
+    } catch (error) {
+      console.error("Failed to delete service:", error);
+    } finally {
+      setDeletingServiceId(null);
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Stylist CRUD Functions
+  // ──────────────────────────────────────────────────────────
+
+  async function handleAddStylist() {
+    if (!stylistFormData.name.trim()) return;
+    setStylistLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId || "",
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: "user",
+            content: `Add a new stylist named "${stylistFormData.name}" working from ${stylistFormData.work_start} to ${stylistFormData.work_end}`,
+          }],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.data?.stylists) {
+          setStylists(data.data.stylists as unknown as Stylist[]);
+        }
+        await fetchData();
+        setShowAddStylist(false);
+        setStylistFormData({ name: "", work_start: "09:00", work_end: "17:00" });
+      }
+    } catch (error) {
+      console.error("Failed to add stylist:", error);
+    } finally {
+      setStylistLoading(false);
+    }
+  }
+
+  async function handleUpdateStylistHours(stylistId: number) {
+    const stylist = stylists.find((s) => s.id === stylistId);
+    if (!stylist) return;
+    setStylistLoading(true);
+    try {
+      await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId || "",
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: "user",
+            content: `Change ${stylist.name}'s work hours to ${stylistFormData.work_start} to ${stylistFormData.work_end}`,
+          }],
+        }),
+      });
+      await fetchData();
+      setEditingStylistId(null);
+    } catch (error) {
+      console.error("Failed to update stylist hours:", error);
+    } finally {
+      setStylistLoading(false);
+    }
+  }
+
+  async function handleDeleteStylist(stylistId: number) {
+    const stylist = stylists.find((s) => s.id === stylistId);
+    if (!stylist) return;
+    setDeletingStylistId(stylistId);
+    try {
+      await fetch(`${API_BASE}/s/${slug}/owner/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": userId || "",
+        },
+        body: JSON.stringify({
+          messages: [{
+            role: "user",
+            content: `Remove stylist "${stylist.name}"`,
+          }],
+        }),
+      });
+      await fetchData();
+    } catch (error) {
+      console.error("Failed to delete stylist:", error);
+    } finally {
+      setDeletingStylistId(null);
     }
   }
 
@@ -610,6 +846,14 @@ export default function ShopOwnerDashboard() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => router.push(`/employee/${slug}`)}
+              className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 hover:text-white hover:border-[#a855f7]/50 transition-all flex items-center gap-1.5"
+              title="Employee Portal"
+            >
+              <Users className="w-3 h-3 text-[#a855f7]" />
+              Employee Portal
+            </button>
             <span className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               {userId}
@@ -859,20 +1103,99 @@ export default function ShopOwnerDashboard() {
                   </h2>
                   <p className="text-xs text-gray-500">Live view from the database.</p>
                 </div>
-                <button
-                  onClick={fetchData}
-                  disabled={dataLoading}
-                  className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-4 h-4 ${dataLoading ? "animate-spin" : ""}`} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => {
+                      setShowAddService(true);
+                      setServiceFormData({ name: "", duration_minutes: 30, price_cents: 2500 });
+                    }}
+                    className="p-2 rounded-lg btn-neon text-xs flex items-center gap-1"
+                  >
+                    <Plus className="w-3 h-3" />
+                    Add
+                  </motion.button>
+                  <button
+                    onClick={fetchData}
+                    disabled={dataLoading}
+                    className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${dataLoading ? "animate-spin" : ""}`} />
+                  </button>
+                </div>
               </div>
+
+              {/* Add Service Form */}
+              <AnimatePresence>
+                {showAddService && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="mb-4 glass rounded-xl p-4 border border-[#00d4ff]/30"
+                  >
+                    <h3 className="text-xs font-semibold text-[#00d4ff] mb-3">Add New Service</h3>
+                    <div className="space-y-3">
+                      <input
+                        type="text"
+                        placeholder="Service name"
+                        value={serviceFormData.name}
+                        onChange={(e) => setServiceFormData((prev) => ({ ...prev, name: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                      />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-gray-500">Duration (min)</label>
+                          <input
+                            type="number"
+                            value={serviceFormData.duration_minutes}
+                            onChange={(e) => setServiceFormData((prev) => ({ ...prev, duration_minutes: parseInt(e.target.value) || 30 }))}
+                            className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-gray-500">Price ($)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={(serviceFormData.price_cents / 100).toFixed(2)}
+                            onChange={(e) => setServiceFormData((prev) => ({ ...prev, price_cents: Math.round(parseFloat(e.target.value) * 100) || 0 }))}
+                            className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={handleAddService}
+                          disabled={serviceLoading || !serviceFormData.name.trim()}
+                          className="flex-1 px-3 py-2 rounded-lg btn-neon text-xs font-medium flex items-center justify-center gap-1 disabled:opacity-50"
+                        >
+                          {serviceLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                          Save
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => setShowAddService(false)}
+                          className="px-3 py-2 rounded-lg glass border border-white/10 text-xs text-gray-400 hover:text-white"
+                        >
+                          Cancel
+                        </motion.button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               <div className="space-y-3">
                 {(!services || services.length === 0) && !dataLoading && (
                   <div className="text-xs text-gray-500 text-center py-8">
                     No services configured yet.
                     <br />
-                    <span className="text-[#00d4ff]">Try "Add a service" in chat!</span>
+                    <span className="text-[#00d4ff]">Click "Add" above to create one!</span>
                   </div>
                 )}
                 {dataLoading && (!services || services.length === 0) && (
@@ -882,28 +1205,111 @@ export default function ShopOwnerDashboard() {
                 )}
                 {services && Array.isArray(services) && services.map((svc) => {
                   const count = serviceBookings.bookingCounts[svc.id] || 0;
+                  const isEditing = editingServiceId === svc.id;
+                  const isDeleting = deletingServiceId === svc.id;
+                  
                   return (
                     <motion.div
                       key={svc.id}
-                      whileHover={{ scale: 1.01 }}
-                      className="glass rounded-xl p-3 border border-white/5 hover:border-[#00d4ff]/30 transition-all"
+                      whileHover={{ scale: isEditing ? 1 : 1.01 }}
+                      className={`glass rounded-xl p-3 border transition-all ${
+                        isEditing ? "border-[#00d4ff]/50" : "border-white/5 hover:border-[#00d4ff]/30"
+                      }`}
                     >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-sm font-medium text-white">{svc.name}</p>
-                          <p className="text-xs text-gray-500 flex items-center gap-2 mt-1">
-                            <Clock className="w-3 h-3" />
-                            {svc.duration_minutes} min
-                            <span className="text-[#00d4ff]">·</span>
-                            <DollarSign className="w-3 h-3" />
-                            {formatMoney(svc.price_cents)}
-                          </p>
+                      {isEditing ? (
+                        <div className="space-y-3">
+                          <input
+                            type="text"
+                            value={serviceFormData.name}
+                            onChange={(e) => setServiceFormData((prev) => ({ ...prev, name: e.target.value }))}
+                            className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                          />
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[10px] text-gray-500">Duration (min)</label>
+                              <input
+                                type="number"
+                                value={serviceFormData.duration_minutes}
+                                onChange={(e) => setServiceFormData((prev) => ({ ...prev, duration_minutes: parseInt(e.target.value) || 30 }))}
+                                className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-gray-500">Price ($)</label>
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={(serviceFormData.price_cents / 100).toFixed(2)}
+                                onChange={(e) => setServiceFormData((prev) => ({ ...prev, price_cents: Math.round(parseFloat(e.target.value) * 100) || 0 }))}
+                                className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <motion.button
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              onClick={() => handleUpdateService(svc.id)}
+                              disabled={serviceLoading}
+                              className="flex-1 px-3 py-2 rounded-lg btn-neon text-xs font-medium flex items-center justify-center gap-1 disabled:opacity-50"
+                            >
+                              {serviceLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                              Save
+                            </motion.button>
+                            <motion.button
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              onClick={() => setEditingServiceId(null)}
+                              className="px-3 py-2 rounded-lg glass border border-white/10 text-xs text-gray-400 hover:text-white"
+                            >
+                              Cancel
+                            </motion.button>
+                          </div>
                         </div>
-                        <ServiceBookingBadge
-                          count={count}
-                          onClick={() => serviceBookings.fetchServiceBookings(svc.id, svc.name)}
-                        />
-                      </div>
+                      ) : (
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-medium text-white">{svc.name}</p>
+                            <p className="text-xs text-gray-500 flex items-center gap-2 mt-1">
+                              <Clock className="w-3 h-3" />
+                              {svc.duration_minutes} min
+                              <span className="text-[#00d4ff]">·</span>
+                              <DollarSign className="w-3 h-3" />
+                              {formatMoney(svc.price_cents)}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <ServiceBookingBadge
+                              count={count}
+                              onClick={() => serviceBookings.fetchServiceBookings(svc.id, svc.name)}
+                            />
+                            <motion.button
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
+                              onClick={() => {
+                                setEditingServiceId(svc.id);
+                                setServiceFormData({
+                                  name: svc.name,
+                                  duration_minutes: svc.duration_minutes,
+                                  price_cents: svc.price_cents,
+                                });
+                              }}
+                              className="p-1.5 rounded-lg glass border border-white/10 text-gray-400 hover:text-[#00d4ff] hover:border-[#00d4ff]/30 transition-all"
+                            >
+                              <Edit2 className="w-3 h-3" />
+                            </motion.button>
+                            <motion.button
+                              whileHover={{ scale: 1.1 }}
+                              whileTap={{ scale: 0.9 }}
+                              onClick={() => handleDeleteService(svc.id)}
+                              disabled={isDeleting}
+                              className="p-1.5 rounded-lg glass border border-white/10 text-gray-400 hover:text-red-400 hover:border-red-400/30 transition-all disabled:opacity-50"
+                            >
+                              {isDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                            </motion.button>
+                          </div>
+                        </div>
+                      )}
                     </motion.div>
                   );
                 })}
@@ -926,20 +1332,98 @@ export default function ShopOwnerDashboard() {
                   </h2>
                   <p className="text-xs text-gray-500">Hours, specialties, and PIN status.</p>
                 </div>
-                <button
-                  onClick={fetchData}
-                  disabled={dataLoading}
-                  className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-4 h-4 ${dataLoading ? "animate-spin" : ""}`} />
-                </button>
+                <div className="flex items-center gap-2">
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => {
+                      setShowAddStylist(true);
+                      setStylistFormData({ name: "", work_start: "09:00", work_end: "17:00" });
+                    }}
+                    className="p-2 rounded-lg bg-[#a855f7] text-white text-xs flex items-center gap-1 hover:bg-[#9333ea] transition-colors"
+                  >
+                    <Plus className="w-3 h-3" />
+                    Add
+                  </motion.button>
+                  <button
+                    onClick={fetchData}
+                    disabled={dataLoading}
+                    className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${dataLoading ? "animate-spin" : ""}`} />
+                  </button>
+                </div>
               </div>
+
+              {/* Add Stylist Form */}
+              <AnimatePresence>
+                {showAddStylist && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="mb-4 glass rounded-xl p-4 border border-[#a855f7]/30"
+                  >
+                    <h3 className="text-xs font-semibold text-[#a855f7] mb-3">Add New Stylist</h3>
+                    <div className="space-y-3">
+                      <input
+                        type="text"
+                        placeholder="Stylist name"
+                        value={stylistFormData.name}
+                        onChange={(e) => setStylistFormData((prev) => ({ ...prev, name: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                      />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-gray-500">Start Time</label>
+                          <input
+                            type="time"
+                            value={stylistFormData.work_start}
+                            onChange={(e) => setStylistFormData((prev) => ({ ...prev, work_start: e.target.value }))}
+                            className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-gray-500">End Time</label>
+                          <input
+                            type="time"
+                            value={stylistFormData.work_end}
+                            onChange={(e) => setStylistFormData((prev) => ({ ...prev, work_end: e.target.value }))}
+                            className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={handleAddStylist}
+                          disabled={stylistLoading || !stylistFormData.name.trim()}
+                          className="flex-1 px-3 py-2 rounded-lg bg-[#a855f7] text-white text-xs font-medium flex items-center justify-center gap-1 disabled:opacity-50 hover:bg-[#9333ea]"
+                        >
+                          {stylistLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                          Save
+                        </motion.button>
+                        <motion.button
+                          whileHover={{ scale: 1.02 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => setShowAddStylist(false)}
+                          className="px-3 py-2 rounded-lg glass border border-white/10 text-xs text-gray-400 hover:text-white"
+                        >
+                          Cancel
+                        </motion.button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               <div className="space-y-3">
                 {(!stylists || stylists.length === 0) && !dataLoading && (
                   <div className="text-xs text-gray-500 text-center py-8">
                     No stylists configured yet.
                     <br />
-                    <span className="text-[#a855f7]">Try "Add a stylist" in chat!</span>
+                    <span className="text-[#a855f7]">Click "Add" above to create one!</span>
                   </div>
                 )}
                 {dataLoading && (!stylists || stylists.length === 0) && (
@@ -947,99 +1431,180 @@ export default function ShopOwnerDashboard() {
                     <Loader2 className="w-5 h-5 text-[#a855f7] animate-spin" />
                   </div>
                 )}
-                {stylists && Array.isArray(stylists) && stylists.map((stylist) => (
-                  <motion.div
-                    key={stylist.id}
-                    whileHover={{ scale: 1.01 }}
-                    className="glass rounded-xl p-3 border border-white/5 hover:border-[#a855f7]/30 transition-all"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-white">{stylist.name}</p>
-                        <p className="text-xs text-gray-500 flex items-center gap-1 mt-1">
-                          <Clock className="w-3 h-3" />
-                          {stylist.work_start}–{stylist.work_end}
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {stylist.specialties.length > 0
-                            ? stylist.specialties.join(", ")
-                            : "No specialties"}
-                        </p>
-                      </div>
-                      <div className="flex flex-col gap-2">
-                        <PinStatusButton
-                          stylistId={stylist.id}
-                          stylistName={stylist.name}
-                          pinStatus={pinManagement.pinStatuses[stylist.id]}
-                          onOpenModal={pinManagement.openModal}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => stylistTimeOff.toggleStylistTimeOff(stylist.id)}
-                          className="text-[11px] px-2 py-1 rounded-full glass border border-white/10 text-gray-400 hover:bg-white/10 hover:text-white transition-all"
-                        >
-                          {stylist.time_off_count}{" "}
-                          {stylist.time_off_count === 1 ? "day" : "days"} off
-                        </button>
-                      </div>
-                    </div>
-                    <AnimatePresence>
-                      {stylistTimeOff.openStylistId === stylist.id && (
-                        <motion.div
-                          initial={{ height: 0, opacity: 0 }}
-                          animate={{ height: "auto", opacity: 1 }}
-                          exit={{ height: 0, opacity: 0 }}
-                          className="mt-3 glass rounded-xl px-3 py-2 text-xs text-gray-400 border border-white/5"
-                        >
-                          {stylistTimeOff.loading &&
-                            !stylistTimeOff.timeOffEntries[stylist.id] && (
-                              <div className="flex items-center gap-2">
-                                <div className="spinner w-3 h-3" />
-                                Loading time off...
-                              </div>
-                            )}
-                          {!stylistTimeOff.loading &&
-                            (stylistTimeOff.timeOffEntries[stylist.id]?.length ?? 0) === 0 && (
-                              <div className="text-gray-500">No time off logged.</div>
-                            )}
-                          {stylistTimeOff.timeOffEntries[stylist.id]?.length ? (
-                            <div className="space-y-2">
-                              {summarizeTimeOff(stylistTimeOff.timeOffEntries[stylist.id]).map(
-                                (entry) => (
-                                  <div
-                                    key={`${stylist.id}-${entry.date}`}
-                                    className="flex items-start justify-between gap-3"
-                                  >
-                                    <div>
-                                      <div className="text-[11px] font-semibold text-white">
-                                        {formatDateLabel(entry.date)}
-                                      </div>
-                                      <div className="text-[11px] text-gray-500">
-                                        {entry.blocks
-                                          .map(
-                                            (block) =>
-                                              `${formatTimeLabel(
-                                                minutesToTimeValue(block.start)
-                                              )}–${formatTimeLabel(
-                                                minutesToTimeValue(block.end)
-                                              )}`
-                                          )
-                                          .join(", ")}
-                                      </div>
-                                    </div>
-                                    <div className="text-[11px] font-semibold text-[#00d4ff]">
-                                      {formatDuration(entry.totalMinutes)}
-                                    </div>
-                                  </div>
-                                )
-                              )}
+                {stylists && Array.isArray(stylists) && stylists.map((stylist) => {
+                  const isEditing = editingStylistId === stylist.id;
+                  const isDeleting = deletingStylistId === stylist.id;
+                  
+                  return (
+                    <motion.div
+                      key={stylist.id}
+                      whileHover={{ scale: isEditing ? 1 : 1.01 }}
+                      className={`glass rounded-xl p-3 border transition-all ${
+                        isEditing ? "border-[#a855f7]/50" : "border-white/5 hover:border-[#a855f7]/30"
+                      }`}
+                    >
+                      {isEditing ? (
+                        <div className="space-y-3">
+                          <div className="text-sm font-medium text-white">{stylist.name}</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="text-[10px] text-gray-500">Start Time</label>
+                              <input
+                                type="time"
+                                value={stylistFormData.work_start}
+                                onChange={(e) => setStylistFormData((prev) => ({ ...prev, work_start: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                              />
                             </div>
-                          ) : null}
-                        </motion.div>
+                            <div>
+                              <label className="text-[10px] text-gray-500">End Time</label>
+                              <input
+                                type="time"
+                                value={stylistFormData.work_end}
+                                onChange={(e) => setStylistFormData((prev) => ({ ...prev, work_end: e.target.value }))}
+                                className="w-full px-3 py-2 rounded-lg input-glass text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <motion.button
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              onClick={() => handleUpdateStylistHours(stylist.id)}
+                              disabled={stylistLoading}
+                              className="flex-1 px-3 py-2 rounded-lg bg-[#a855f7] text-white text-xs font-medium flex items-center justify-center gap-1 disabled:opacity-50 hover:bg-[#9333ea]"
+                            >
+                              {stylistLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                              Save
+                            </motion.button>
+                            <motion.button
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              onClick={() => setEditingStylistId(null)}
+                              className="px-3 py-2 rounded-lg glass border border-white/10 text-xs text-gray-400 hover:text-white"
+                            >
+                              Cancel
+                            </motion.button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="text-sm font-medium text-white">{stylist.name}</p>
+                              <p className="text-xs text-gray-500 flex items-center gap-1 mt-1">
+                                <Clock className="w-3 h-3" />
+                                {stylist.work_start}–{stylist.work_end}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                {stylist.specialties.length > 0
+                                  ? stylist.specialties.join(", ")
+                                  : "No specialties"}
+                              </p>
+                            </div>
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center gap-1">
+                                <motion.button
+                                  whileHover={{ scale: 1.1 }}
+                                  whileTap={{ scale: 0.9 }}
+                                  onClick={() => {
+                                    setEditingStylistId(stylist.id);
+                                    setStylistFormData({
+                                      name: stylist.name,
+                                      work_start: stylist.work_start,
+                                      work_end: stylist.work_end,
+                                    });
+                                  }}
+                                  className="p-1.5 rounded-lg glass border border-white/10 text-gray-400 hover:text-[#a855f7] hover:border-[#a855f7]/30 transition-all"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                </motion.button>
+                                <motion.button
+                                  whileHover={{ scale: 1.1 }}
+                                  whileTap={{ scale: 0.9 }}
+                                  onClick={() => handleDeleteStylist(stylist.id)}
+                                  disabled={isDeleting}
+                                  className="p-1.5 rounded-lg glass border border-white/10 text-gray-400 hover:text-red-400 hover:border-red-400/30 transition-all disabled:opacity-50"
+                                >
+                                  {isDeleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+                                </motion.button>
+                              </div>
+                              <PinStatusButton
+                                stylistId={stylist.id}
+                                stylistName={stylist.name}
+                                pinStatus={pinManagement.pinStatuses[stylist.id]}
+                                onOpenModal={pinManagement.openModal}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => stylistTimeOff.toggleStylistTimeOff(stylist.id)}
+                                className="text-[11px] px-2 py-1 rounded-full glass border border-white/10 text-gray-400 hover:bg-white/10 hover:text-white transition-all"
+                              >
+                                {stylist.time_off_count}{" "}
+                                {stylist.time_off_count === 1 ? "day" : "days"} off
+                              </button>
+                            </div>
+                          </div>
+                          <AnimatePresence>
+                            {stylistTimeOff.openStylistId === stylist.id && (
+                              <motion.div
+                                initial={{ height: 0, opacity: 0 }}
+                                animate={{ height: "auto", opacity: 1 }}
+                                exit={{ height: 0, opacity: 0 }}
+                                className="mt-3 glass rounded-xl px-3 py-2 text-xs text-gray-400 border border-white/5"
+                              >
+                                {stylistTimeOff.loading &&
+                                  !stylistTimeOff.timeOffEntries[stylist.id] && (
+                                    <div className="flex items-center gap-2">
+                                      <div className="spinner w-3 h-3" />
+                                      Loading time off...
+                                    </div>
+                                  )}
+                                {!stylistTimeOff.loading &&
+                                  (stylistTimeOff.timeOffEntries[stylist.id]?.length ?? 0) === 0 && (
+                                    <div className="text-gray-500">No time off logged.</div>
+                                  )}
+                                {stylistTimeOff.timeOffEntries[stylist.id]?.length ? (
+                                  <div className="space-y-2">
+                                    {summarizeTimeOff(stylistTimeOff.timeOffEntries[stylist.id]).map(
+                                      (entry) => (
+                                        <div
+                                          key={`${stylist.id}-${entry.date}`}
+                                          className="flex items-start justify-between gap-3"
+                                        >
+                                          <div>
+                                            <div className="text-[11px] font-semibold text-white">
+                                              {formatDateLabel(entry.date)}
+                                            </div>
+                                            <div className="text-[11px] text-gray-500">
+                                              {entry.blocks
+                                                .map(
+                                                  (block) =>
+                                                    `${formatTimeLabel(
+                                                      minutesToTimeValue(block.start)
+                                                    )}–${formatTimeLabel(
+                                                      minutesToTimeValue(block.end)
+                                                    )}`
+                                                )
+                                                .join(", ")}
+                                            </div>
+                                          </div>
+                                          <div className="text-[11px] font-semibold text-[#00d4ff]">
+                                            {formatDuration(entry.totalMinutes)}
+                                          </div>
+                                        </div>
+                                      )
+                                    )}
+                                  </div>
+                                ) : null}
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </>
                       )}
-                    </AnimatePresence>
-                  </motion.div>
-                ))}
+                    </motion.div>
+                  );
+                })}
               </div>
             </motion.div>
           )}

@@ -22,6 +22,9 @@ export interface CreateShopPayload {
   timezone?: string;
   address?: string;
   category?: string;
+  // Phase 3: Location coordinates for RouterGPT discovery
+  latitude?: number;
+  longitude?: number;
 }
 
 export interface Shop {
@@ -32,6 +35,9 @@ export interface Shop {
   timezone: string;
   address: string | null;
   category: string | null;
+  // Phase 3: Location coordinates
+  latitude: number | null;
+  longitude: number | null;
   created_at: string;
 }
 

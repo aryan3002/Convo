@@ -15,6 +15,8 @@ import {
   AlertCircle,
   CheckCircle,
   Loader2,
+  MapPinned,
+  XCircle,
 } from "lucide-react";
 import {
   createShop,
@@ -22,6 +24,7 @@ import {
   getErrorMessage,
   isApiError,
 } from "@/lib/api";
+import { geocodeAddress, isValidCoordinates } from "@/lib/geocoding";
 
 // ──────────────────────────────────────────────────────────
 // Form State
@@ -34,7 +37,13 @@ interface FormData {
   timezone: string;
   address: string;
   category: string;
+  // Phase 3: Location coordinates from geocoding
+  latitude?: number;
+  longitude?: number;
 }
+
+// Geocoding status for visual feedback
+type GeocodingStatus = 'idle' | 'loading' | 'success' | 'error';
 
 const initialFormData: FormData = {
   ownerUserId: "",
@@ -43,6 +52,8 @@ const initialFormData: FormData = {
   timezone: "America/Phoenix",
   address: "",
   category: "",
+  latitude: undefined,
+  longitude: undefined,
 };
 
 const TIMEZONES = [
@@ -75,14 +86,65 @@ export default function OnboardingPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  
+  // Phase 3: Geocoding state
+  const [geocodingStatus, setGeocodingStatus] = useState<GeocodingStatus>('idle');
+  const [geocodingError, setGeocodingError] = useState<string | null>(null);
 
   const updateField = useCallback(
     <K extends keyof FormData>(field: K, value: FormData[K]) => {
       setFormData((prev) => ({ ...prev, [field]: value }));
       setError(null);
+      
+      // Clear geocoding status when address changes
+      if (field === 'address') {
+        setGeocodingStatus('idle');
+        setGeocodingError(null);
+        // Clear previous coordinates when address is edited
+        setFormData((prev) => ({ ...prev, latitude: undefined, longitude: undefined }));
+      }
     },
     []
   );
+
+  // Phase 3: Handle address blur to trigger geocoding
+  const handleAddressBlur = useCallback(async () => {
+    const address = formData.address.trim();
+    
+    // Skip if address is too short or empty
+    if (!address || address.length < 10) {
+      return;
+    }
+    
+    // Skip if we already have valid coordinates for this address
+    if (formData.latitude && formData.longitude && geocodingStatus === 'success') {
+      return;
+    }
+    
+    setGeocodingStatus('loading');
+    setGeocodingError(null);
+    
+    try {
+      const result = await geocodeAddress(address);
+      
+      if (result && isValidCoordinates(result.lat, result.lon)) {
+        setFormData((prev) => ({
+          ...prev,
+          latitude: result.lat,
+          longitude: result.lon,
+        }));
+        setGeocodingStatus('success');
+        console.log(`[Onboarding] Geocoded address to: ${result.lat}, ${result.lon}`);
+      } else {
+        setGeocodingStatus('error');
+        setGeocodingError('Could not find location. You can still create your shop.');
+      }
+    } catch (err) {
+      console.error('[Onboarding] Geocoding error:', err);
+      setGeocodingStatus('error');
+      setGeocodingError('Location lookup failed. You can still create your shop.');
+    }
+  }, [formData.address, formData.latitude, formData.longitude, geocodingStatus]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,16 +171,19 @@ export default function OnboardingPage() {
         timezone: formData.timezone || undefined,
         address: formData.address.trim() || undefined,
         category: formData.category || undefined,
+        // Phase 3: Include geocoded coordinates
+        latitude: formData.latitude,
+        longitude: formData.longitude,
       });
 
       // Store the owner user ID for future API calls
       setStoredUserId(formData.ownerUserId.trim());
 
-      setSuccess(`Shop "${shop.name}" created successfully! Redirecting...`);
+      setSuccess(`Shop "${shop.name}" created successfully! Redirecting to setup...`);
 
-      // Redirect to the shop-scoped owner dashboard
+      // Redirect to the shop setup wizard
       setTimeout(() => {
-        router.push(`/s/${shop.slug}/owner`);
+        router.push(`/s/${shop.slug}/setup`);
       }, 1500);
     } catch (err) {
       console.error("Failed to create shop:", err);
@@ -283,14 +348,47 @@ export default function OnboardingPage() {
                     Address
                   </span>
                 </label>
-                <input
-                  type="text"
-                  value={formData.address}
-                  onChange={(e) => updateField("address", e.target.value)}
-                  placeholder="123 Main St, City, State 12345"
-                  className="w-full px-4 py-3 rounded-xl input-glass text-sm"
-                  disabled={isSubmitting}
-                />
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={formData.address}
+                    onChange={(e) => updateField("address", e.target.value)}
+                    onBlur={handleAddressBlur}
+                    placeholder="123 Main St, City, State 12345"
+                    className="w-full px-4 py-3 rounded-xl input-glass text-sm pr-10"
+                    disabled={isSubmitting}
+                  />
+                  {/* Geocoding Status Icons */}
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    {geocodingStatus === 'loading' && (
+                      <Loader2 className="w-4 h-4 text-[#00d4ff] animate-spin" />
+                    )}
+                    {geocodingStatus === 'success' && (
+                      <MapPinned className="w-4 h-4 text-emerald-400" />
+                    )}
+                    {geocodingStatus === 'error' && (
+                      <XCircle className="w-4 h-4 text-amber-400" />
+                    )}
+                  </div>
+                </div>
+                {/* Geocoding Feedback */}
+                {geocodingStatus === 'success' && formData.latitude && formData.longitude && (
+                  <p className="text-xs text-emerald-400/80 mt-1.5 flex items-center gap-1">
+                    <CheckCircle className="w-3 h-3" />
+                    Location found ({formData.latitude.toFixed(4)}, {formData.longitude.toFixed(4)})
+                  </p>
+                )}
+                {geocodingStatus === 'error' && geocodingError && (
+                  <p className="text-xs text-amber-400/80 mt-1.5 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    {geocodingError}
+                  </p>
+                )}
+                {geocodingStatus === 'idle' && (
+                  <p className="text-xs text-gray-500 mt-1.5">
+                    Enter a full address to enable location-based discovery
+                  </p>
+                )}
               </div>
 
               {/* Category */}

@@ -62,6 +62,9 @@ class Shop(Base):
     address: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str | None] = mapped_column(String(50), nullable=True)  # e.g., 'barbershop', 'salon'
     phone_number: Mapped[str | None] = mapped_column(String(20), unique=True, nullable=True)  # Primary shop phone
+    # Phase 3: Location coordinates for RouterGPT location-based search
+    latitude: Mapped[float | None] = mapped_column(nullable=True, index=True)
+    longitude: Mapped[float | None] = mapped_column(nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

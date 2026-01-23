@@ -11,6 +11,7 @@ import {
   Users,
   Scissors,
   MessageSquare,
+  UserCircle,
 } from "lucide-react";
 import { getStoredUserId } from "@/lib/api";
 
@@ -62,10 +63,21 @@ export default function OwnerLandingPage() {
               <p className="text-xs text-gray-500">Owner Portal</p>
             </div>
           </div>
-          <span className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 flex items-center gap-1.5">
-            <Sparkles className="w-3 h-3 text-[#00d4ff]" />
-            Multi-tenant
-          </span>
+          <div className="flex items-center gap-3">
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={() => router.push("/employee")}
+              className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 hover:text-white hover:border-[#a855f7]/50 transition-all flex items-center gap-1.5"
+            >
+              <UserCircle className="w-3 h-3 text-[#a855f7]" />
+              Employee Portal
+            </motion.button>
+            <span className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 flex items-center gap-1.5">
+              <Sparkles className="w-3 h-3 text-[#00d4ff]" />
+              Multi-tenant
+            </span>
+          </div>
         </div>
       </header>
 
@@ -100,7 +112,7 @@ export default function OwnerLandingPage() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.1 }}
-            className="grid md:grid-cols-2 gap-4 mb-12"
+            className="grid md:grid-cols-2 gap-4 mb-8"
           >
             {/* Create Shop Card */}
             <motion.button
@@ -163,6 +175,32 @@ export default function OwnerLandingPage() {
               </form>
             </motion.div>
           </motion.div>
+
+          {/* Employee Portal Card */}
+          <motion.button
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15 }}
+            whileHover={{ scale: 1.02, y: -2 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => router.push("/employee")}
+            className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#ec4899]/30 transition-all group mb-12 flex items-center justify-between"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#ec4899]/20 to-[#f97316]/20 flex items-center justify-center border border-white/10 group-hover:shadow-[0_0_20px_rgba(236,72,153,0.3)] transition-all">
+                <UserCircle className="w-6 h-6 text-[#ec4899]" />
+              </div>
+              <div className="text-left">
+                <h3 className="text-base font-semibold text-white">
+                  Employee Portal
+                </h3>
+                <p className="text-xs text-gray-400">
+                  For stylists and staff members to view their schedules
+                </p>
+              </div>
+            </div>
+            <ArrowRight className="w-5 h-5 text-gray-500 group-hover:text-[#ec4899] group-hover:translate-x-1 transition-all" />
+          </motion.button>
 
           {/* Features */}
           <motion.div

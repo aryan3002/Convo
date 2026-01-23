@@ -65,10 +65,15 @@ from .seed import seed_initial_data
 from .routes_scoped import router as scoped_router  # Phase 4: URL-based shop routing
 from .router_gpt import router as router_gpt_router  # Phase 5: RouterGPT discovery layer
 from .onboarding import router as onboarding_router  # Phase 6: Global onboarding endpoints
+from .rate_limiter import RateLimitHeadersMiddleware  # Phase 5: Rate limiting
 
 
 settings = get_settings()
 app = FastAPI(title="Convo Booking Backend")
+
+# Add rate limiting middleware
+app.add_middleware(RateLimitHeadersMiddleware)
+
 app.include_router(voice_router, prefix="/twilio", tags=["voice"])
 app.include_router(public_booking_router)  # ChatGPT Custom GPT public booking API
 app.include_router(onboarding_router)  # Phase 6: Global onboarding (no shop context required)
