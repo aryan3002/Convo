@@ -282,9 +282,10 @@ async def get_shop_context(
     
     Resolution order (first match wins):
     1. URL path slug (/s/{slug}/ or /api/s/{slug}/)
-    2. Twilio To number (for voice/SMS webhooks)
-    3. API key header (X-API-Key)
-    4. Legacy fallback to shop_id=1 (ONLY for old routes)
+    2. X-Shop-Slug header (for deprecated routes during migration)
+    3. Twilio To number (for voice/SMS webhooks)
+    4. API key header (X-API-Key)
+    5. Legacy fallback to shop_id=1 (ONLY for old routes)
     
     Usage:
         @router.get("/services")
@@ -303,7 +304,16 @@ async def get_shop_context(
             return ctx
         raise HTTPException(status_code=404, detail=f"Shop not found: {slug}")
     
-    # 2. Try Twilio To number (for voice/SMS webhooks)
+    # 2. Try X-Shop-Slug header (for deprecated routes during migration)
+    header_slug = request.headers.get("X-Shop-Slug")
+    if header_slug:
+        ctx = await resolve_shop_from_slug(session, header_slug)
+        if ctx:
+            logger.debug(f"Resolved shop from X-Shop-Slug header: {header_slug} -> shop_id={ctx.shop_id}")
+            return ctx
+        raise HTTPException(status_code=404, detail=f"Shop not found: {header_slug}")
+    
+    # 3. Try Twilio To number (for voice/SMS webhooks)
     # Check form data for Twilio webhooks
     content_type = request.headers.get("content-type", "")
     if "form" in content_type.lower():

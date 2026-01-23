@@ -146,6 +146,23 @@ def parse_action_from_response(response: str) -> tuple[str, dict | None]:
                     action = {"type": raw_action["type"], "params": params}
                 else:
                     action = raw_action
+            else:
+                # AI didn't include type, try to infer from params
+                # If it has name, duration_minutes, price_cents - it's create_service
+                if all(k in raw_action for k in ["name", "duration_minutes", "price_cents"]):
+                    action = {"type": "create_service", "params": raw_action}
+                # If it has name, work_start, work_end - it's create_stylist
+                elif "work_start" in raw_action and "work_end" in raw_action and "name" in raw_action:
+                    action = {"type": "create_stylist", "params": raw_action}
+                # If it has stylist_id or stylist_name and date/start_time - it's time off
+                elif ("stylist_id" in raw_action or "stylist_name" in raw_action) and "date" in raw_action:
+                    if "start_time" in raw_action:
+                        action = {"type": "add_time_off", "params": raw_action}
+                    else:
+                        action = {"type": "remove_time_off", "params": raw_action}
+                # If it has service_id and price_cents - it's update_service_price
+                elif ("service_id" in raw_action or "service_name" in raw_action) and "price_cents" in raw_action:
+                    action = {"type": "update_service_price", "params": raw_action}
             clean_response = response[: match.start()].strip()
         except json.JSONDecodeError:
             clean_response = re.sub(r"\[ACTION:.*\]\]?", "", response, flags=re.DOTALL).strip()
@@ -310,15 +327,23 @@ async def owner_chat_with_ai(
     for msg in messages:
         openai_messages.append({"role": msg.role, "content": msg.content})
 
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[OWNER_CHAT_AI] Sending {len(openai_messages)} messages to OpenAI")
+
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=openai_messages,
-        max_tokens=200,
+        max_tokens=300,  # Increased from 200 to give more room for actions
         temperature=0.2,
     )
 
     ai_response = response.choices[0].message.content or ""
+    logger.debug(f"[OWNER_CHAT_AI] Raw AI response: {ai_response}")
+    
     clean_response, action = parse_action_from_response(ai_response)
+    logger.debug(f"[OWNER_CHAT_AI] Parsed action: {action}")
+    
     reply = shorten_reply(clean_response)
     if not reply:
         reply = "What would you like to change?"

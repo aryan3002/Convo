@@ -31,6 +31,7 @@ from .customer_memory import (
     update_customer_stats,
 )
 from .owner_chat import OwnerChatRequest, OwnerChatResponse, SUPPORTED_RULES, owner_chat_with_ai
+from .owner_actions import execute_owner_action  # Phase 4: Centralized action execution
 from .emailer import send_booking_email_with_ics
 from .sms import send_sms
 from .voice import router as voice_router
@@ -2513,11 +2514,11 @@ async def owner_chat_endpoint(
                     params = action["params"]
 
         if action_type == "list_services":
-            data = {"services": await list_services_with_rules(session, shop.id)}
+            data = {"services": await list_services_with_rules(session, ctx.shop_id)}
             reply_override = "Here are your current services."
 
         elif action_type == "list_promos":
-            promo_list = await list_promos(session, shop.id)
+            promo_list = await list_promos(session, ctx.shop_id)
             data = {"promos": [promo.model_dump() for promo in promo_list]}
             if promo_list:
                 descriptions = [
@@ -2613,7 +2614,7 @@ async def owner_chat_endpoint(
             service_id = params.get("service_id")
             service_name = params.get("service_name")
             if service_id is None and service_name:
-                service_match = await fetch_service_by_name(session, str(service_name), shop.id)
+                service_match = await fetch_service_by_name(session, str(service_name), ctx.shop_id)
                 if service_match:
                     service_id = service_match.id
 
@@ -2625,7 +2626,7 @@ async def owner_chat_endpoint(
                 return OwnerChatResponse(reply="Which discount type should I use?", action=None)
 
             payload = PromoCreateRequest(
-                shop_id=shop.id,
+                shop_id=ctx.shop_id,
                 type=promo_type,
                 trigger_point=trigger_point,
                 service_id=service_id,
@@ -2639,13 +2640,13 @@ async def owner_chat_endpoint(
                 priority=int(params.get("priority", 0) or 0),
             )
             promo_response = await create_promo(payload, session)
-            data = {"promos": [promo.model_dump() for promo in await list_promos(session, shop.id)]}
+            data = {"promos": [promo.model_dump() for promo in await list_promos(session, ctx.shop_id)]}
             reply_override = f"Promotion created: {promo_response.type.value}."
 
         elif action_type == "update_promo":
             promo_id = params.get("promo_id") or params.get("id")
             if not promo_id:
-                promo_list = (await list_promos(session, shop.id))
+                promo_list = (await list_promos(session, ctx.shop_id))
                 promo_match = match_promo_in_text(last_text, [promo for promo in promo_list])
                 if promo_match:
                     promo_id = promo_match.id
@@ -2683,20 +2684,20 @@ async def owner_chat_endpoint(
 
             payload = PromoUpdateRequest(**update_fields)
             promo_response = await update_promo(int(promo_id), payload, session)
-            data = {"promos": [promo.model_dump() for promo in await list_promos(session, shop.id)]}
+            data = {"promos": [promo.model_dump() for promo in await list_promos(session, ctx.shop_id)]}
             reply_override = f"Promotion updated: {promo_response.type.value}."
 
         elif action_type == "delete_promo":
             promo_id = params.get("promo_id") or params.get("id")
             if not promo_id:
-                promo_list = (await list_promos(session, shop.id))
+                promo_list = (await list_promos(session, ctx.shop_id))
                 promo_match = match_promo_in_text(last_text, [promo for promo in promo_list])
                 if promo_match:
                     promo_id = promo_match.id
             if not promo_id:
                 return OwnerChatResponse(reply="Which promotion should I disable? Share the promo ID.", action=None)
             await delete_promo(int(promo_id), session)
-            data = {"promos": [promo.model_dump() for promo in await list_promos(session, shop.id)]}
+            data = {"promos": [promo.model_dump() for promo in await list_promos(session, ctx.shop_id)]}
             reply_override = "Promotion disabled."
 
         elif action_type == "reschedule_booking":
@@ -2743,7 +2744,7 @@ async def owner_chat_endpoint(
             reply_override = f"Moved {from_stylist.name}'s booking from {from_time.strftime('%-I:%M %p')} to {to_stylist.name} at {to_time.strftime('%-I:%M %p')}."
 
         elif action_type == "list_stylists":
-            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            data = {"stylists": await list_stylists_with_details(session, ctx.shop_id)}
             reply_override = "Here are your current stylists."
 
         elif action_type == "get_customer_profile":
@@ -2798,12 +2799,12 @@ async def owner_chat_endpoint(
                     action=None,
                 )
 
-            existing = await fetch_service_by_name(session, name, shop.id)
+            existing = await fetch_service_by_name(session, name, ctx.shop_id)
             if existing:
                 return OwnerChatResponse(reply="That service already exists.", action=None)
 
             service = Service(
-                shop_id=shop.id,
+                shop_id=ctx.shop_id,
                 name=name,
                 duration_minutes=duration,
                 price_cents=price_cents,
@@ -2824,7 +2825,7 @@ async def owner_chat_endpoint(
                     "price_cents": service.price_cents,
                     "availability_rule": rule,
                 },
-                "services": await list_services_with_rules(session, shop.id),
+                "services": await list_services_with_rules(session, ctx.shop_id),
             }
             reply_override = f"Done. {service.name} added."
 
@@ -2862,13 +2863,13 @@ async def owner_chat_endpoint(
                 return OwnerChatResponse(reply="End time should be after start time.", action=None)
 
             existing_stylist = await session.execute(
-                select(Stylist).where(Stylist.shop_id == shop.id, Stylist.name.ilike(f"%{name}%"))
+                select(Stylist).where(Stylist.shop_id == ctx.shop_id, Stylist.name.ilike(f"%{name}%"))
             )
             if existing_stylist.scalar_one_or_none():
                 return OwnerChatResponse(reply="That stylist already exists.", action=None)
 
             stylist = Stylist(
-                shop_id=shop.id,
+                shop_id=ctx.shop_id,
                 name=name,
                 work_start=work_start,
                 work_end=work_end,
@@ -2877,7 +2878,7 @@ async def owner_chat_endpoint(
             session.add(stylist)
             await session.commit()
             await session.refresh(stylist)
-            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            data = {"stylists": await list_stylists_with_details(session, ctx.shop_id)}
             reply_override = f"Added stylist {stylist.name} ({work_start.strftime('%H:%M')}–{work_end.strftime('%H:%M')})."
 
         elif action_type == "update_service_price":
@@ -2892,7 +2893,7 @@ async def owner_chat_endpoint(
             service.price_cents = price_cents
             await session.commit()
             data = {
-                "services": await list_services_with_rules(session, shop.id),
+                "services": await list_services_with_rules(session, ctx.shop_id),
                 "updated_service": {
                     "id": service.id,
                     "name": service.name,
@@ -2916,7 +2917,7 @@ async def owner_chat_endpoint(
             stylist.work_start = start_time
             stylist.work_end = end_time
             await session.commit()
-            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            data = {"stylists": await list_stylists_with_details(session, ctx.shop_id)}
             reply_override = f"Updated {stylist.name}'s hours to {start_time.strftime('%H:%M')}–{end_time.strftime('%H:%M')}."
 
         elif action_type == "update_stylist_specialties":
@@ -2932,7 +2933,7 @@ async def owner_chat_endpoint(
             for tag in tags:
                 session.add(StylistSpecialty(stylist_id=stylist.id, tag=tag))
             await session.commit()
-            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            data = {"stylists": await list_stylists_with_details(session, ctx.shop_id)}
             reply_override = f"Updated {stylist.name}'s specialties."
 
         elif action_type == "add_time_off":
@@ -2966,7 +2967,7 @@ async def owner_chat_endpoint(
                 session=session,
             )  # type: ignore[arg-type]
             data = {
-                "stylists": await list_stylists_with_details(session, shop.id),
+                "stylists": await list_stylists_with_details(session, ctx.shop_id),
                 "schedule": schedule.model_dump(),
             }
             reply_override = f"Time off saved for {stylist.name}."
@@ -3027,7 +3028,7 @@ async def owner_chat_endpoint(
                             session=session,
                         )  # type: ignore[arg-type]
                         data = {
-                            "stylists": await list_stylists_with_details(session, shop.id),
+                            "stylists": await list_stylists_with_details(session, ctx.shop_id),
                             "schedule": schedule.model_dump(),
                         }
                         count = len(blocks)
@@ -3064,7 +3065,7 @@ async def owner_chat_endpoint(
                 session=session,
             )  # type: ignore[arg-type]
             data = {
-                "stylists": await list_stylists_with_details(session, shop.id),
+                "stylists": await list_stylists_with_details(session, ctx.shop_id),
                 "schedule": schedule.model_dump(),
             }
             reply_override = f"Time off removed for {stylist.name}."
@@ -3080,7 +3081,7 @@ async def owner_chat_endpoint(
                 return OwnerChatResponse(reply="Duration should be between 5 and 240 minutes.", action=None)
             service.duration_minutes = duration
             await session.commit()
-            data = {"services": await list_services_with_rules(session, shop.id)}
+            data = {"services": await list_services_with_rules(session, ctx.shop_id)}
             reply_override = f"Updated {service.name} to {duration} minutes."
 
         elif action_type == "remove_service":
@@ -3103,7 +3104,7 @@ async def owner_chat_endpoint(
                 await session.delete(rule)
             await session.delete(service)
             await session.commit()
-            data = {"services": await list_services_with_rules(session, shop.id)}
+            data = {"services": await list_services_with_rules(session, ctx.shop_id)}
             reply_override = "Service removed."
 
         elif action_type == "remove_stylist":
@@ -3130,7 +3131,7 @@ async def owner_chat_endpoint(
             )
             await session.delete(stylist)
             await session.commit()
-            data = {"stylists": await list_stylists_with_details(session, shop.id)}
+            data = {"stylists": await list_stylists_with_details(session, ctx.shop_id)}
             reply_override = f"Stylist {stylist.name} removed."
 
         elif action_type == "set_service_rule":
@@ -3154,7 +3155,7 @@ async def owner_chat_endpoint(
                 else:
                     session.add(ServiceRule(service_id=service.id, rule=rule))
             await session.commit()
-            data = {"services": await list_services_with_rules(session, shop.id)}
+            data = {"services": await list_services_with_rules(session, ctx.shop_id)}
             reply_override = f"Rule updated for {service.name}."
 
     except HTTPException as exc:
@@ -3265,7 +3266,8 @@ class VectorSearchResponse(BaseModel):
 @app.post("/owner/search", response_model=VectorSearchResponse)
 async def semantic_search_calls(
     payload: VectorSearchRequest,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Semantic search over call transcripts, summaries, and booking notes.
@@ -3311,7 +3313,7 @@ async def semantic_search_calls(
     try:
         results = await search_chunks_with_filters(
             session=session,
-            shop_id=shop.id,
+            shop_id=ctx.shop_id,
             query=payload.query,
             limit=payload.limit,
             source_types=source_type_enums,
@@ -3392,7 +3394,8 @@ class AskResponse(BaseModel):
 @app.post("/owner/ask", response_model=AskResponse)
 async def ask_with_rag(
     payload: AskRequest,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Answer questions using RAG (Retrieval-Augmented Generation) with explicit citations.
@@ -3457,7 +3460,7 @@ async def ask_with_rag(
     try:
         result = await ask_with_citations(
             session=session,
-            shop_id=shop.id,
+            shop_id=ctx.shop_id,
             question=payload.question,
             limit=payload.limit,
             min_similarity=payload.min_similarity,
@@ -3536,7 +3539,8 @@ class EnhancedAskResponse(BaseModel):
 @app.post("/owner/ask/enhanced", response_model=EnhancedAskResponse)
 async def enhanced_ask_with_rag(
     payload: EnhancedAskRequest,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Enhanced RAG endpoint with quality improvements:
@@ -3590,7 +3594,7 @@ async def enhanced_ask_with_rag(
     try:
         result, metrics = await enhanced_ask_with_citations(
             session=session,
-            shop_id=shop.id,
+            shop_id=ctx.shop_id,
             question=payload.question,
             limit=payload.limit,
             min_similarity=payload.min_similarity,
@@ -3657,7 +3661,8 @@ class RAGMetricsResponse(BaseModel):
 @app.get("/owner/rag-metrics", response_model=RAGMetricsResponse)
 async def get_rag_metrics(
     hours: int = 24,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Get aggregated RAG metrics for observability.
@@ -3672,7 +3677,7 @@ async def get_rag_metrics(
     from .rag_enhanced import get_metrics_summary
     
     shop = await get_default_shop(session)
-    summary = get_metrics_summary(shop_id=shop.id, hours=hours)
+    summary = get_metrics_summary(shop_id=ctx.shop_id, hours=hours)
     
     return RAGMetricsResponse(**summary)
 
@@ -3717,7 +3722,8 @@ class IngestResponse(BaseModel):
 @app.post("/owner/ingest-call", response_model=IngestResponse)
 async def ingest_call_to_vector_store(
     payload: IngestCallRequest,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Manually trigger ingestion of a call summary's transcript into the vector store.
@@ -3748,7 +3754,7 @@ async def ingest_call_to_vector_store(
         if call_summary.transcript and len(call_summary.transcript.strip()) >= 50:
             chunks_ingested += await ingest_call_transcript(
                 session=session,
-                shop_id=shop.id,
+                shop_id=ctx.shop_id,
                 call_id=call_summary.id,
                 transcript=call_summary.transcript,
             )
@@ -3757,7 +3763,7 @@ async def ingest_call_to_vector_store(
         if call_summary.key_notes:
             chunks_ingested += await ingest_call_summary(
                 session=session,
-                shop_id=shop.id,
+                shop_id=ctx.shop_id,
                 call_id=call_summary.id,
                 summary_text=call_summary.key_notes,
             )
@@ -3774,29 +3780,31 @@ async def ingest_call_to_vector_store(
 
 @app.post("/owner/promos", response_model=PromoResponse)
 async def create_promo(
-    payload: PromoCreateRequest, session: AsyncSession = Depends(get_session)
+    payload: PromoCreateRequest,
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     shop = await get_default_shop(session)
-    if payload.shop_id and payload.shop_id != shop.id:
+    if payload.shop_id and payload.shop_id != ctx.shop_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid shop")
 
     service_exists = True
     if payload.service_id is not None:
         result = await session.execute(
-            select(Service).where(Service.id == payload.service_id, Service.shop_id == shop.id)
+            select(Service).where(Service.id == payload.service_id, Service.shop_id == ctx.shop_id)
         )
         service_exists = result.scalar_one_or_none() is not None
 
     combo_ids = extract_combo_service_ids(normalize_constraints(payload.constraints_json))
     if payload.type == PromoType.SERVICE_COMBO_PROMO and combo_ids:
         combo_result = await session.execute(
-            select(Service.id).where(Service.id.in_(combo_ids), Service.shop_id == shop.id)
+            select(Service.id).where(Service.id.in_(combo_ids), Service.shop_id == ctx.shop_id)
         )
         existing_ids = {row[0] for row in combo_result.all()}
         if len(existing_ids) != len(set(combo_ids)):
             service_exists = False
 
-    count_result = await session.execute(select(func.count()).select_from(Service).where(Service.shop_id == shop.id))
+    count_result = await session.execute(select(func.count()).select_from(Service).where(Service.shop_id == ctx.shop_id))
     has_services = count_result.scalar_one() > 0
 
     errors = validate_promo_payload(payload, has_services, service_exists)
@@ -3817,7 +3825,7 @@ async def create_promo(
     )
 
     promo = Promo(
-        shop_id=shop.id,
+        shop_id=ctx.shop_id,
         type=payload.type,
         trigger_point=assigned_trigger,
         service_id=payload.service_id,
@@ -3839,17 +3847,21 @@ async def create_promo(
 @app.get("/owner/promos", response_model=list[PromoResponse])
 async def list_owner_promos(
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     shop = await get_default_shop(session)
-    return await list_promos(session, shop.id)
+    return await list_promos(session, ctx.shop_id)
 
 
 @app.patch("/owner/promos/{promo_id}", response_model=PromoResponse)
 async def update_promo(
-    promo_id: int, payload: PromoUpdateRequest, session: AsyncSession = Depends(get_session)
+    promo_id: int,
+    payload: PromoUpdateRequest,
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     shop = await get_default_shop(session)
-    result = await session.execute(select(Promo).where(Promo.id == promo_id, Promo.shop_id == shop.id))
+    result = await session.execute(select(Promo).where(Promo.id == promo_id, Promo.shop_id == ctx.shop_id))
     promo = result.scalar_one_or_none()
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo not found")
@@ -3932,9 +3944,13 @@ async def update_promo(
 
 
 @app.delete("/owner/promos/{promo_id}")
-async def delete_promo(promo_id: int, session: AsyncSession = Depends(get_session)):
+async def delete_promo(
+    promo_id: int,
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
+):
     shop = await get_default_shop(session)
-    result = await session.execute(select(Promo).where(Promo.id == promo_id, Promo.shop_id == shop.id))
+    result = await session.execute(select(Promo).where(Promo.id == promo_id, Promo.shop_id == ctx.shop_id))
     promo = result.scalar_one_or_none()
     if not promo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Promo not found")
@@ -3959,6 +3975,7 @@ async def eligible_promo(
     booking_date: str | None = None,
     selected_service_price_cents: int | None = None,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """
     Get eligible promotions for the current trigger point.
@@ -3974,14 +3991,14 @@ async def eligible_promo(
     logger.info(f"[PROMO] eligible_promo called: trigger={trigger_point}, email={email}, service_id={service_id}, session_id={session_id}, booking_date={booking_date}, price={selected_service_price_cents}")
     
     shop = await get_default_shop(session)
-    if shop_id and shop_id != shop.id:
+    if shop_id and shop_id != ctx.shop_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shop not found")
 
     normalized_email = email.strip().lower() if email else None
     email_key, session_key = normalize_identity_key(normalized_email, session_id)
 
     if email_key and session_key:
-        await merge_promo_impressions(session, shop.id, session_key, email_key)
+        await merge_promo_impressions(session, ctx.shop_id, session_key, email_key)
 
     tz = ZoneInfo(settings.chat_timezone)
     actual_now_utc = datetime.now(timezone.utc)
@@ -4000,7 +4017,7 @@ async def eligible_promo(
     service_price_from_db = None
     if service_id:
         service_result = await session.execute(
-            select(Service).where(Service.id == service_id, Service.shop_id == shop.id)
+            select(Service).where(Service.id == service_id, Service.shop_id == ctx.shop_id)
         )
         service = service_result.scalar_one_or_none()
         if service:
@@ -4015,7 +4032,7 @@ async def eligible_promo(
             select(func.count())
             .select_from(Booking)
             .where(
-                Booking.shop_id == shop.id,
+                Booking.shop_id == ctx.shop_id,
                 Booking.customer_email == normalized_email,
                 Booking.status == BookingStatus.CONFIRMED,
             )
@@ -4036,16 +4053,16 @@ async def eligible_promo(
     )
 
     impressions = await build_promo_impression_snapshot(
-        session, shop.id, email_key, session_key, local_day
+        session, ctx.shop_id, email_key, session_key, local_day
     )
 
     promo_result = await session.execute(
         select(Promo)
-        .where(Promo.shop_id == shop.id, Promo.active.is_(True))
+        .where(Promo.shop_id == ctx.shop_id, Promo.active.is_(True))
         .order_by(Promo.priority.desc(), Promo.id)
     )
     promos = promo_result.scalars().all()
-    logger.info(f"[PROMO] Found {len(promos)} active promos for shop {shop.id}")
+    logger.info(f"[PROMO] Found {len(promos)} active promos for shop {ctx.shop_id}")
 
     # Separate combo promos from regular promos
     regular_promos: list[Promo] = []
@@ -4106,7 +4123,7 @@ async def eligible_promo(
                 new_impressions.append(
                     PromoImpression(
                         promo_id=selected_promo.id,
-                        shop_id=shop.id,
+                        shop_id=ctx.shop_id,
                         identity_key=session_key,
                         day_bucket=day_bucket,
                     )
@@ -4115,7 +4132,7 @@ async def eligible_promo(
                 new_impressions.append(
                     PromoImpression(
                         promo_id=selected_promo.id,
-                        shop_id=shop.id,
+                        shop_id=ctx.shop_id,
                         identity_key=email_key,
                         day_bucket=day_bucket,
                     )
@@ -4166,6 +4183,7 @@ async def owner_schedule(
     date: str,
     tz_offset_minutes: int = 0,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     try:
         local_date = datetime.strptime(date, "%Y-%m-%d").date()
@@ -4173,7 +4191,7 @@ async def owner_schedule(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date format")
 
     shop = await get_default_shop(session)
-    stylists = await list_stylists_with_details(session, shop.id)
+    stylists = await list_stylists_with_details(session, ctx.shop_id)
 
     day_start = to_utc_from_local(local_date, time(0, 0), tz_offset_minutes)
     day_end = to_utc_from_local(local_date + timedelta(days=1), time(0, 0), tz_offset_minutes)
@@ -4409,7 +4427,11 @@ async def get_availability(
 
 
 @app.post("/bookings/hold", response_model=HoldResponse)
-async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_session)):
+async def create_hold(
+    payload: HoldRequest,
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
+):
     service = await fetch_service(session, payload.service_id)
     secondary_service = None
     if payload.secondary_service_id:
@@ -4485,7 +4507,6 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
     hold_expires_at = now + timedelta(minutes=settings.hold_ttl_minutes)
 
     # Check for eligible promos
-    shop = await get_default_shop(session)
     tz = ZoneInfo(settings.chat_timezone)
     local_now = now.astimezone(tz)
     local_date = local_date  # already defined
@@ -4501,7 +4522,7 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
             select(func.count())
             .select_from(Booking)
             .where(
-                Booking.shop_id == shop.id,
+                Booking.shop_id == ctx.shop_id,
                 Booking.customer_email == customer_email,
                 Booking.status == BookingStatus.CONFIRMED,
             )
@@ -4512,14 +4533,14 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
     selected_promo: Promo | None = None
     if payload.promo_id:
         promo_result = await session.execute(
-            select(Promo).where(Promo.id == payload.promo_id, Promo.shop_id == shop.id, Promo.active.is_(True))
+            select(Promo).where(Promo.id == payload.promo_id, Promo.shop_id == ctx.shop_id, Promo.active.is_(True))
         )
         candidate_promo = promo_result.scalar_one_or_none()
         if candidate_promo:
             # Validate the promo is still valid (check dates, constraints, etc.)
             # We use a permissive context that doesn't check trigger_point for frontend-provided promos
             impressions = await build_promo_impression_snapshot(
-                session, shop.id, customer_email, None, local_day
+                session, ctx.shop_id, customer_email, None, local_day
             )
             # Create context for validation without trigger_point check
             validation_context = PromoEligibilityContext(
@@ -4554,12 +4575,12 @@ async def create_hold(payload: HoldRequest, session: AsyncSession = Depends(get_
         )
 
         impressions = await build_promo_impression_snapshot(
-            session, shop.id, customer_email, None, local_day
+            session, ctx.shop_id, customer_email, None, local_day
         )
 
         promo_result = await session.execute(
             select(Promo)
-            .where(Promo.shop_id == shop.id, Promo.active.is_(True))
+            .where(Promo.shop_id == ctx.shop_id, Promo.active.is_(True))
             .order_by(Promo.priority.desc(), Promo.id)
         )
         promos = promo_result.scalars().all()
@@ -5223,11 +5244,12 @@ class TimeOffRequestResponse(BaseModel):
 async def employee_login(
     req: EmployeeLoginRequest,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Authenticate an employee using their PIN."""
     shop = await get_default_shop(session)
     stylist = await session.execute(
-        select(Stylist).where(Stylist.id == req.stylist_id, Stylist.shop_id == shop.id)
+        select(Stylist).where(Stylist.id == req.stylist_id, Stylist.shop_id == ctx.shop_id)
     )
     stylist = stylist.scalar_one_or_none()
     
@@ -5254,6 +5276,7 @@ async def get_employee_schedule(
     date_str: str | None = None,
     authorization: str = Header(None),
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Get the employee's schedule for a specific date (default: today)."""
     # Validate auth
@@ -5266,7 +5289,7 @@ async def get_employee_schedule(
     
     # Get stylist
     shop = await get_default_shop(session)
-    stylist_result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
+    stylist_result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == ctx.shop_id))
     stylist = stylist_result.scalar_one_or_none()
     if not stylist:
         raise HTTPException(status_code=404, detail="Stylist not found")
@@ -5569,11 +5592,14 @@ async def get_my_time_off_requests(
 
 
 @app.get("/stylists-for-login")
-async def get_stylists_for_login(session: AsyncSession = Depends(get_session)):
+async def get_stylists_for_login(
+    session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
+):
     """Get list of stylists available for employee login (those with PINs set)."""
     shop = await get_default_shop(session)
     result = await session.execute(
-        select(Stylist).where(Stylist.shop_id == shop.id, Stylist.pin_hash.isnot(None)).order_by(Stylist.name)
+        select(Stylist).where(Stylist.shop_id == ctx.shop_id, Stylist.pin_hash.isnot(None)).order_by(Stylist.name)
     )
     stylists = result.scalars().all()
     return [{"id": s.id, "name": s.name} for s in stylists]
@@ -5592,10 +5618,11 @@ async def set_stylist_pin(
     stylist_id: int,
     req: SetPinRequest,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Set or update a stylist's PIN (owner action)."""
     shop = await get_default_shop(session)
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == ctx.shop_id))
     stylist = result.scalar_one_or_none()
     
     if not stylist:
@@ -5612,10 +5639,11 @@ async def set_stylist_pin(
 async def remove_stylist_pin(
     stylist_id: int,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Remove a stylist's PIN (owner action)."""
     shop = await get_default_shop(session)
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == ctx.shop_id))
     stylist = result.scalar_one_or_none()
     
     if not stylist:
@@ -5632,10 +5660,11 @@ async def remove_stylist_pin(
 async def get_stylist_pin_status(
     stylist_id: int,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Check if a stylist has a PIN set."""
     shop = await get_default_shop(session)
-    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == shop.id))
+    result = await session.execute(select(Stylist).where(Stylist.id == stylist_id, Stylist.shop_id == ctx.shop_id))
     stylist = result.scalar_one_or_none()
     
     if not stylist:
@@ -5653,6 +5682,7 @@ async def get_stylist_pin_status(
 async def get_all_time_off_requests(
     status_filter: str | None = None,
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Get all time-off requests (owner view)."""
     tz = ZoneInfo(settings.chat_timezone)
@@ -5675,7 +5705,7 @@ async def get_all_time_off_requests(
     stylists_map = {}
     if stylist_ids:
         stylists_result = await session.execute(
-            select(Stylist).where(Stylist.id.in_(stylist_ids), Stylist.shop_id == shop.id)
+            select(Stylist).where(Stylist.id.in_(stylist_ids), Stylist.shop_id == ctx.shop_id)
         )
         for s in stylists_result.scalars().all():
             stylists_map[s.id] = s.name
@@ -5800,6 +5830,7 @@ class AnalyticsSummary(BaseModel):
 async def get_analytics_summary(
     range: str = "7d",
     session: AsyncSession = Depends(get_session),
+    ctx: ShopContext = Depends(get_shop_context),
 ):
     """Get analytics summary for the specified time range."""
     tz = ZoneInfo(settings.chat_timezone)
@@ -5848,10 +5879,10 @@ async def get_analytics_summary(
     
     # Get services and stylists for names
     shop = await get_default_shop(session)
-    services_result = await session.execute(select(Service).where(Service.shop_id == shop.id))
+    services_result = await session.execute(select(Service).where(Service.shop_id == ctx.shop_id))
     services_map = {s.id: s for s in services_result.scalars().all()}
     
-    stylists_result = await session.execute(select(Stylist).where(Stylist.shop_id == shop.id))
+    stylists_result = await session.execute(select(Stylist).where(Stylist.shop_id == ctx.shop_id))
     stylists_map = {s.id: s for s in stylists_result.scalars().all()}
     
     # Compute metrics

@@ -152,10 +152,19 @@ async def require_shop_role(
         )
     
     # Check if user's role is in allowed roles
-    user_role = ShopMemberRole(member.role) if isinstance(member.role, str) else member.role
+    # Normalize role to uppercase for case-insensitive comparison
+    member_role_upper = member.role.upper() if isinstance(member.role, str) else member.role
+    try:
+        user_role = ShopMemberRole(member_role_upper)
+    except ValueError:
+        logger.warning(f"Invalid role '{member.role}' for user {user_id} in shop {ctx.shop_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Invalid role configuration. Please contact support.",
+        )
     allowed_role_values = [r.value if isinstance(r, ShopMemberRole) else r for r in allowed_roles]
     
-    if member.role not in allowed_role_values:
+    if user_role.value not in allowed_role_values:
         logger.warning(
             f"Authorization failed: User {user_id} has role {member.role}, "
             f"but needs one of {allowed_role_values} for shop {ctx.shop_id}"
