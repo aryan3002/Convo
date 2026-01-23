@@ -14,6 +14,14 @@ Usage:
     POST /s/bishops-tempe/owner/chat -> Owner chat for shop "bishops-tempe" (requires auth)
     GET  /s/bishops-tempe/services   -> List services for shop
     GET  /s/bishops-tempe/stylists   -> List stylists for shop
+    
+    Public booking endpoints (no auth required):
+    GET  /s/bishops-tempe/public/business     -> Get business info
+    GET  /s/bishops-tempe/public/services     -> List services
+    GET  /s/bishops-tempe/public/stylists     -> List stylists
+    GET  /s/bishops-tempe/public/availability -> Check availability
+    POST /s/bishops-tempe/public/booking/quote   -> Create booking quote
+    POST /s/bishops-tempe/public/booking/confirm -> Confirm booking
 """
 
 import logging
@@ -45,6 +53,7 @@ from .auth import (
     AUDIT_OWNER_CHAT,
 )
 from .owner_actions import execute_owner_action
+from .public_booking import router as public_booking_router  # Phase 4: Include public booking routes
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -55,6 +64,9 @@ logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────
 
 router = APIRouter(prefix="/s/{slug}", tags=["scoped-api"])
+
+# Include public booking endpoints under /s/{slug}/public/...
+router.include_router(public_booking_router, tags=["public-booking"])
 
 
 # ────────────────────────────────────────────────────────────────

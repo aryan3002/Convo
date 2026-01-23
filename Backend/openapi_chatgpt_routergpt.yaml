@@ -1,0 +1,776 @@
+openapi: 3.0.3
+info:
+  title: ConvoAI Booking API (RouterGPT Multi-Shop)
+  description: |
+    Public booking API for ConvoAI Services - RouterGPT Multi-Shop Architecture.
+    This API allows customers to discover and book appointments across multiple locations.
+    
+    ## RouterGPT: Location-Based Discovery
+    
+    **Two-Phase Flow:**
+    
+    ### Phase 1: Discovery
+    1. Customer shares location → `POST /router/search-by-location`
+    2. Present top 3 nearest shops
+    3. Customer selects shop → `POST /router/delegate`
+    4. Receive session_id and welcome message
+    
+    ### Phase 2: Booking
+    1. Show services → `GET /s/{slug}/public/services`
+    2. Check availability → `GET /s/{slug}/public/availability`
+    3. Create quote → `POST /s/{slug}/public/booking/quote`
+    4. Confirm booking → `POST /s/{slug}/public/booking/confirm`
+    
+    ## No Authentication Required
+    All endpoints are public - no API key needed for customer bookings.
+    
+    ## Important Notes
+    - Quotes expire in 10 minutes
+    - All times are in shop's local timezone
+    - Always create quote before confirming
+    - Use shop slug from search results in scoped endpoints
+  version: 3.0.0
+  contact:
+    name: ConvoAI Support
+    email: support@convoai.com
+
+servers:
+  - url: http://localhost:8000
+    description: Development server
+  - url: https://your-backend-domain.com
+    description: Production server
+
+paths:
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 1: RouterGPT Discovery Endpoints
+  # ═══════════════════════════════════════════════════════════════
+  
+  /router/search-by-location:
+    post:
+      operationId: searchBusinessesByLocation
+      summary: Find businesses near customer's location
+      description: Search for businesses near GPS coordinates. Returns list of nearby businesses sorted by distance with slug for booking endpoints. Present top 3 to customer then call delegateToBusinessBookingAgent.
+      tags:
+        - Discovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - latitude
+                - longitude
+              properties:
+                latitude:
+                  type: number
+                  format: double
+                  minimum: -90
+                  maximum: 90
+                  description: Customer's latitude (WGS84)
+                  example: 33.4255
+                longitude:
+                  type: number
+                  format: double
+                  minimum: -180
+                  maximum: 180
+                  description: Customer's longitude (WGS84)
+                  example: -111.94
+                radius_miles:
+                  type: number
+                  format: double
+                  minimum: 0.1
+                  maximum: 50
+                  default: 10
+                  description: Search radius in miles
+                  example: 10
+                category:
+                  type: string
+                  nullable: true
+                  description: Optional category filter
+                  example: "barbershop"
+      responses:
+        '200':
+          description: List of nearby businesses
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:
+                    type: string
+                    example: "Businesses within 10.0 miles"
+                  latitude:
+                    type: number
+                    example: 33.4255
+                  longitude:
+                    type: number
+                    example: -111.94
+                  radius_miles:
+                    type: number
+                    example: 10.0
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        business_id:
+                          type: integer
+                          example: 2
+                        slug:
+                          type: string
+                          description: Use this in /s/{slug}/... endpoints
+                          example: "bishops-barbershop-tempe"
+                        name:
+                          type: string
+                          example: "Bishop's Barbershop Tempe"
+                        address:
+                          type: string
+                          nullable: true
+                          example: "123 Mill Ave, Tempe, AZ"
+                        distance_miles:
+                          type: number
+                          example: 0.5
+                        confidence:
+                          type: number
+                          minimum: 0
+                          maximum: 1
+                          example: 0.95
+                  total_count:
+                    type: integer
+                    example: 7
+        '400':
+          description: Bad request - invalid coordinates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "Invalid latitude/longitude"
+
+  /router/delegate:
+    post:
+      operationId: delegateToBusinessBookingAgent
+      summary: Hand off to shop's booking agent
+      description: Hand off to selected shop. Returns session_id, welcome message, and available services. Show message to customer then proceed to /s/{slug}/public booking endpoints.
+      tags:
+        - Discovery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - shop_slug
+              properties:
+                shop_slug:
+                  type: string
+                  description: Shop slug from search results
+                  example: "bishops-barbershop-tempe"
+                customer_context:
+                  type: object
+                  nullable: true
+                  description: Optional context from discovery
+                  properties:
+                    intent:
+                      type: string
+                      example: "haircut"
+                    location:
+                      type: object
+                      properties:
+                        lat:
+                          type: number
+                          example: 33.4255
+                        lon:
+                          type: number
+                          example: -111.94
+      responses:
+        '200':
+          description: Delegation successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  shop_slug:
+                    type: string
+                    example: "bishops-barbershop-tempe"
+                  shop_name:
+                    type: string
+                    example: "Bishop's Barbershop Tempe"
+                  session_id:
+                    type: string
+                    format: uuid
+                    description: Session ID for tracking
+                    example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  initial_message:
+                    type: string
+                    example: "Welcome to Bishop's Barbershop Tempe! I can help you book a haircut. We offer Men's Haircut, Beard Trim, and more."
+                  available_services:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                          example: 21
+                        name:
+                          type: string
+                          example: "Men's Haircut"
+                        duration_minutes:
+                          type: integer
+                          example: 30
+                        price_cents:
+                          type: integer
+                          example: 3500
+                        price_display:
+                          type: string
+                          example: "$35.00"
+        '404':
+          description: Shop not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "Shop not found"
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 2: Shop-Scoped Booking Endpoints
+  # ═══════════════════════════════════════════════════════════════
+
+  /s/{slug}/public/business:
+    get:
+      operationId: getBusinessInfo
+      summary: Get shop information
+      description: Get business hours, timezone, and address for the selected shop.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+      responses:
+        '200':
+          description: Business information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  business_name:
+                    type: string
+                    example: "Bishop's Barbershop Tempe"
+                  timezone:
+                    type: string
+                    example: "America/Phoenix"
+                  working_hours_start:
+                    type: string
+                    example: "09:00"
+                  working_hours_end:
+                    type: string
+                    example: "18:00"
+                  working_days:
+                    type: array
+                    items:
+                      type: string
+                    example: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+                  address:
+                    type: string
+                    nullable: true
+                    example: "123 Mill Ave, Tempe, AZ 85281"
+                  phone:
+                    type: string
+                    nullable: true
+                    example: "+1-480-555-1234"
+
+  /s/{slug}/public/services:
+    get:
+      operationId: listServices
+      summary: List available services
+      description: Get all services offered by this shop with prices and durations.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+      responses:
+        '200':
+          description: List of services
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                      description: Service ID (use in availability/quote)
+                      example: 21
+                    name:
+                      type: string
+                      example: "Men's Haircut"
+                    duration_minutes:
+                      type: integer
+                      example: 30
+                    price_cents:
+                      type: integer
+                      example: 3500
+                    price_display:
+                      type: string
+                      example: "$35.00"
+
+  /s/{slug}/public/stylists:
+    get:
+      operationId: listStylists
+      summary: List available stylists
+      description: Get all active stylists at this shop.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+      responses:
+        '200':
+          description: List of stylists
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                      example: 1
+                    name:
+                      type: string
+                      example: "Sarah"
+                    available:
+                      type: boolean
+                      example: true
+
+  /s/{slug}/public/availability:
+    get:
+      operationId: checkAvailability
+      summary: Check available time slots
+      description: |
+        Check available appointment slots for a specific service and date.
+        Use the service_id from listServices and provide a date in YYYY-MM-DD format.
+        Returns slots with stylist info and formatted times.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+        - name: service_id
+          in: query
+          required: true
+          description: Service ID from listServices
+          schema:
+            type: integer
+          example: 21
+        - name: date
+          in: query
+          required: true
+          description: Date in YYYY-MM-DD format
+          schema:
+            type: string
+            format: date
+          example: "2026-01-24"
+        - name: stylist_id
+          in: query
+          required: false
+          description: Optional - filter by specific stylist
+          schema:
+            type: integer
+          example: 1
+      responses:
+        '200':
+          description: Available time slots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  date:
+                    type: string
+                    example: "2026-01-24"
+                  service_name:
+                    type: string
+                    example: "Men's Haircut"
+                  slots:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        stylist_id:
+                          type: integer
+                          description: Use this in createBookingQuote
+                          example: 1
+                        stylist_name:
+                          type: string
+                          example: "Sarah"
+                        start_time:
+                          type: string
+                          description: Use this in createBookingQuote (HH:MM format)
+                          example: "14:00"
+                        start_time_local:
+                          type: string
+                          description: Display format for customer
+                          example: "2:00 PM"
+                        date_local:
+                          type: string
+                          example: "January 24, 2026"
+                  message:
+                    type: string
+                    example: "Found 12 available slots"
+        '404':
+          description: Service not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "Service not found"
+
+  /s/{slug}/public/booking/quote:
+    post:
+      operationId: createBookingQuote
+      summary: Create booking quote (does NOT confirm)
+      description: Creates booking QUOTE (not actual booking). Returns quote_token for confirmation. Expires in 10 minutes. Requires name plus email or phone. Use values from checkAvailability.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - service_id
+                - stylist_id
+                - date
+                - start_time
+                - customer_name
+              properties:
+                service_id:
+                  type: integer
+                  description: From listServices
+                  example: 21
+                stylist_id:
+                  type: integer
+                  description: From checkAvailability slot
+                  example: 1
+                date:
+                  type: string
+                  format: date
+                  description: YYYY-MM-DD format
+                  example: "2026-01-24"
+                start_time:
+                  type: string
+                  description: HH:MM format (24-hour) from checkAvailability
+                  example: "14:00"
+                customer_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                  example: "John Smith"
+                customer_email:
+                  type: string
+                  format: email
+                  nullable: true
+                  description: Required if no phone
+                  example: "john@example.com"
+                customer_phone:
+                  type: string
+                  nullable: true
+                  description: Required if no email
+                  example: "+1-480-555-9999"
+      responses:
+        '200':
+          description: Quote created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quote_token:
+                    type: string
+                    description: Use this to confirm booking
+                    example: "abc123def456"
+                  expires_at:
+                    type: string
+                    format: date-time
+                    example: "2026-01-23T15:10:00Z"
+                  service_name:
+                    type: string
+                    example: "Men's Haircut"
+                  stylist_name:
+                    type: string
+                    example: "Sarah"
+                  date_local:
+                    type: string
+                    example: "January 24, 2026"
+                  start_time_local:
+                    type: string
+                    example: "2:00 PM"
+                  end_time_local:
+                    type: string
+                    example: "2:30 PM"
+                  duration_minutes:
+                    type: integer
+                    example: 30
+                  price_cents:
+                    type: integer
+                    example: 3500
+                  price_display:
+                    type: string
+                    example: "$35.00"
+                  customer_name:
+                    type: string
+                    example: "John Smith"
+                  customer_contact:
+                    type: string
+                    description: Masked contact info
+                    example: "jo**@example.com"
+                  message:
+                    type: string
+                    example: "Quote created. Confirm within 10 minutes."
+        '400':
+          description: Bad request - validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "Either email or phone is required"
+        '409':
+          description: Slot not available
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "This time slot is no longer available"
+
+  /s/{slug}/public/booking/confirm:
+    post:
+      operationId: confirmBooking
+      summary: Confirm booking quote (creates actual booking)
+      description: |
+        Confirms a booking quote and creates the actual booking.
+        
+        **IMPORTANT:**
+        - Requires quote_token from createBookingQuote
+        - This is idempotent - safe to call multiple times
+        - Returns booking_id on success
+        
+        If slot was taken between quote and confirm, returns 409 error.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - quote_token
+              properties:
+                quote_token:
+                  type: string
+                  description: Token from createBookingQuote response
+                  example: "abc123def456"
+      responses:
+        '200':
+          description: Booking confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  booking_id:
+                    type: string
+                    format: uuid
+                    description: Unique booking ID
+                    example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status:
+                    type: string
+                    example: "CONFIRMED"
+                  service_name:
+                    type: string
+                    example: "Men's Haircut"
+                  stylist_name:
+                    type: string
+                    example: "Sarah"
+                  date_local:
+                    type: string
+                    example: "January 24, 2026"
+                  start_time_local:
+                    type: string
+                    example: "2:00 PM"
+                  end_time_local:
+                    type: string
+                    example: "2:30 PM"
+                  customer_name:
+                    type: string
+                    example: "John Smith"
+                  message:
+                    type: string
+                    example: "Booking confirmed! Your booking ID is a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        '404':
+          description: Quote not found or expired
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "Quote not found or expired"
+        '409':
+          description: Slot no longer available
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "This time slot was just booked by another customer"
+
+  /s/{slug}/public/bookings/lookup:
+    get:
+      operationId: lookupBooking
+      summary: Lookup existing booking
+      description: |
+        Look up a booking by email or phone number.
+        Useful for customers to check their existing appointments.
+      tags:
+        - Shop Booking
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          description: Shop slug from search results
+          schema:
+            type: string
+          example: "bishops-barbershop-tempe"
+        - name: email
+          in: query
+          required: false
+          description: Customer email (provide email OR phone)
+          schema:
+            type: string
+            format: email
+          example: "john@example.com"
+        - name: phone
+          in: query
+          required: false
+          description: Customer phone (provide email OR phone)
+          schema:
+            type: string
+          example: "+1-480-555-9999"
+      responses:
+        '200':
+          description: Booking(s) found
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    booking_id:
+                      type: string
+                      format: uuid
+                      example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    status:
+                      type: string
+                      example: "CONFIRMED"
+                    service_name:
+                      type: string
+                      example: "Men's Haircut"
+                    stylist_name:
+                      type: string
+                      example: "Sarah"
+                    date_local:
+                      type: string
+                      example: "January 24, 2026"
+                    start_time_local:
+                      type: string
+                      example: "2:00 PM"
+                    customer_name:
+                      type: string
+                      example: "John Smith"
+        '400':
+          description: Missing email or phone
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "Either email or phone is required"
+        '404':
+          description: No bookings found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "No bookings found"

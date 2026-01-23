@@ -180,12 +180,20 @@ def cleanup_expired_quotes():
 # ────────────────────────────────────────────────────────────────
 
 # API key for public booking (set in environment or use default for dev)
+# Phase 5: API key is now OPTIONAL for RouterGPT multi-shop flow
 PUBLIC_BOOKING_API_KEY = getattr(settings, 'public_booking_api_key', None) or "convo-public-booking-key-2024"
 
 
-async def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
-    """Verify API key for public endpoints."""
-    if x_api_key != PUBLIC_BOOKING_API_KEY:
+async def verify_api_key(x_api_key: str = Header(None, alias="X-API-Key")):
+    """
+    Verify API key for public endpoints (OPTIONAL for Phase 5 RouterGPT).
+    
+    Phase 5: API key is optional. When using /s/{slug}/public/... endpoints,
+    shop identification comes from the URL slug, not API key.
+    
+    For backward compatibility with old /public/... endpoints, API key is still checked.
+    """
+    if x_api_key and x_api_key != PUBLIC_BOOKING_API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
