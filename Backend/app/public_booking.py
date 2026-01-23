@@ -666,9 +666,7 @@ async def check_availability(
             message=f"We are closed on {day_names[local_date.weekday()]}. We're open {', '.join(working_days)}.",
         )
     
-    shop = await get_default_shop(session)
-    
-    # Fetch service (scoped to shop)
+    # Fetch service (scoped to shop) using ctx.shop_id
     result = await session.execute(
         select(Service).where(Service.id == service_id, Service.shop_id == ctx.shop_id)
     )
@@ -892,9 +890,7 @@ async def create_booking_quote(
             detail="We are closed on this day.",
         )
     
-    shop = await get_default_shop(session)
-    
-    # Fetch service (scoped to shop)
+    # Fetch service (scoped to shop) using ctx.shop_id
     result = await session.execute(
         select(Service).where(Service.id == request.service_id, Service.shop_id == ctx.shop_id)
     )
@@ -974,7 +970,7 @@ async def create_booking_quote(
     slot_id = generate_slot_id(stylist.id, start_at_utc)
     
     quote_data = QuoteData(
-        shop_id=shop.id,
+        shop_id=ctx.shop_id,
         service_id=service.id,
         stylist_id=stylist.id,
         start_at_utc=start_at_utc,
