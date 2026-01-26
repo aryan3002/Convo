@@ -53,6 +53,11 @@ export function useOwnerPromos(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchPromos = useCallback(async () => {
+    // Don't fetch if no slug provided (e.g., cab shops)
+    if (!shopSlug) {
+      return;
+    }
+    
     setLoading(true);
     setError(null);
     try {
@@ -77,7 +82,7 @@ export function useOwnerPromos(shopSlug?: string) {
     } finally {
       setLoading(false);
     }
-  }, [getEndpoint]);
+  }, [getEndpoint, shopSlug]);
 
   const resetWizard = useCallback(() => {
     setWizardStep(0);

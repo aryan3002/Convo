@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     twilio_account_sid: str | None = Field(default=None, alias="TWILIO_ACCOUNT_SID")
     twilio_auth_token: str | None = Field(default=None, alias="TWILIO_AUTH_TOKEN")
     twilio_from_number: str | None = Field(default=None, alias="TWILIO_FROM_NUMBER")
+    twilio_whatsapp_number: str | None = Field(default=None, alias="TWILIO_WHATSAPP_NUMBER")
     twilio_verify_signature: bool = Field(default=False, alias="TWILIO_VERIFY_SIGNATURE")
+    # Google Maps API
+    google_maps_api_key: str | None = Field(default=None, alias="GOOGLE_MAPS_API_KEY")
     # ChatGPT Custom GPT Public Booking API Key
     public_booking_api_key: str = Field(
         default="convo-public-booking-key-2024",

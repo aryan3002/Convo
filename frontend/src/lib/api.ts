@@ -1,14 +1,63 @@
 /**
  * API Helper Library for Convo Frontend
  * Provides typed fetch functions for backend communication.
+ * 
+ * ## Architecture
+ * - Uses Next.js backend proxy by default (/api/backend/...)
+ * - This eliminates port configuration issues between frontend and backend
+ * - Falls back to NEXT_PUBLIC_API_BASE if explicitly set (for backward compatibility)
+ * 
+ * ## Identity Management (TRANSITIONAL)
+ * 
+ * CURRENT STATE (Temporary):
+ * - User ID is stored in localStorage under 'owner_user_id'
+ * - All authenticated requests automatically include X-User-Id header
+ * - This is INSECURE but works for development/pilot
+ * 
+ * FUTURE STATE (When Clerk is integrated):
+ * - User ID will come from Clerk session/JWT
+ * - X-User-Id header will be removed
+ * - Server will verify JWT signature
+ * 
+ * ## Best Practices
+ * - ALWAYS use apiFetch() for API calls - it handles auth automatically
+ * - NEVER pass userId in URL query params (security risk)
+ * - Use getStoredUserId() to read the current user ID
+ * - Use setStoredUserId() only during onboarding
+ * 
+ * ## Debugging Auth Issues
+ * - If you get 403 errors, check that localStorage has the correct owner_user_id
+ * - The backend endpoint /s/{slug}/owner/auth-status can help diagnose issues
+ * - The user_id must match what was used when creating the shop
  */
 
 // ──────────────────────────────────────────────────────────
 // Configuration
 // ──────────────────────────────────────────────────────────
 
+const DEBUG_LOGGING = typeof window !== "undefined" && process.env.NODE_ENV === "development";
+
+/**
+ * Get the API base URL.
+ * 
+ * Priority:
+ * 1. NEXT_PUBLIC_API_BASE if explicitly set (backward compatibility)
+ * 2. /api/backend (Next.js proxy - recommended)
+ * 
+ * The proxy approach is preferred because:
+ * - Works regardless of backend port
+ * - No CORS issues (same-origin)
+ * - Works in both development and production
+ */
 export function getApiBase(): string {
-  return process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+  // Allow explicit override for backward compatibility
+  const explicitBase = process.env.NEXT_PUBLIC_API_BASE;
+  if (explicitBase) {
+    return explicitBase;
+  }
+  
+  // Default to Next.js backend proxy
+  return "/api/backend";
 }
 
 // ──────────────────────────────────────────────────────────
@@ -18,7 +67,7 @@ export function getApiBase(): string {
 export interface CreateShopPayload {
   owner_user_id: string;
   name: string;
-  phone?: string;
+  phone_number?: string;
   timezone?: string;
   address?: string;
   category?: string;
@@ -39,6 +88,22 @@ export interface Shop {
   latitude: number | null;
   longitude: number | null;
   created_at: string;
+}
+
+/**
+ * Shop info response from /s/{slug}/info - includes routing hints
+ */
+export interface ShopInfo {
+  id: number;
+  slug: string;
+  name: string;
+  category: string | null;
+  timezone: string;
+  address: string | null;
+  phone: string | null;
+  // Routing hints (server-authoritative)
+  is_cab_service: boolean;
+  owner_dashboard_path: string;
 }
 
 export interface Service {
@@ -73,44 +138,202 @@ export interface ApiError {
   status: number;
 }
 
+export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
+  /** 
+   * User ID for authenticated requests. 
+   * If not provided, will automatically use getStoredUserId().
+   * Pass false to explicitly skip auth header.
+   */
+  userId?: string | false;
+  /** Request body - will be JSON.stringify'd if object */
+  body?: BodyInit | object | null;
+  /** Skip automatic JSON content-type header */
+  skipContentType?: boolean;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
+}
+
+// ──────────────────────────────────────────────────────────
+// Storage Helpers (defined early for use in apiFetch)
+// ──────────────────────────────────────────────────────────
+
+const OWNER_USER_ID_KEY = "owner_user_id";
+
+export function getStoredUserId(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(OWNER_USER_ID_KEY);
+}
+
+export function setStoredUserId(userId: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(OWNER_USER_ID_KEY, userId);
+}
+
+export function clearStoredUserId(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(OWNER_USER_ID_KEY);
+}
+
 // ──────────────────────────────────────────────────────────
 // API Fetch Wrapper
 // ──────────────────────────────────────────────────────────
 
+/**
+ * Centralized API fetch wrapper with automatic auth injection.
+ * 
+ * Features:
+ * - Automatic X-User-Id header injection from localStorage
+ * - Request timeout handling
+ * - Consistent error handling with ApiError type
+ * - Debug logging in development
+ * - Safe JSON body handling
+ * 
+ * @example
+ * // Simple GET (auto-authenticates)
+ * const shops = await apiFetch<Shop[]>('/shops');
+ * 
+ * // POST with body
+ * const shop = await apiFetch<Shop>('/shops', {
+ *   method: 'POST',
+ *   body: { name: 'My Shop' },
+ * });
+ * 
+ * // Explicit userId override
+ * const data = await apiFetch('/s/shop/data', { userId: 'user_123' });
+ * 
+ * // Skip auth for public endpoints
+ * const publicData = await apiFetch('/public/info', { userId: false });
+ */
 export async function apiFetch<T>(
   endpoint: string,
-  options: RequestInit & { userId?: string } = {}
+  options: ApiFetchOptions = {}
 ): Promise<T> {
-  const { userId, ...fetchOptions } = options;
+  const { 
+    userId: explicitUserId, 
+    body, 
+    skipContentType,
+    timeout = 30000,
+    ...fetchOptions 
+  } = options;
+  
+  // Build headers
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     ...(fetchOptions.headers as Record<string, string> || {}),
   };
   
-  // Add user ID header if provided
-  if (userId) {
-    headers["X-User-Id"] = userId;
+  // Add Content-Type for JSON unless explicitly skipped
+  if (!skipContentType && body && typeof body === "object" && !(body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
+  
+  // Inject X-User-Id header (automatic identity injection)
+  // - If explicitUserId is provided, use it
+  // - If explicitUserId is false, skip auth header
+  // - Otherwise, use stored userId from localStorage
+  if (explicitUserId !== false) {
+    const userId = explicitUserId || getStoredUserId();
+    if (userId) {
+      headers["X-User-Id"] = userId;
+    }
   }
 
   const url = `${getApiBase()}${endpoint}`;
-  const res = await fetch(url, {
-    ...fetchOptions,
-    headers,
-  });
+  
+  // Serialize body
+  let serializedBody: BodyInit | null | undefined;
+  if (body === null || body === undefined) {
+    serializedBody = undefined;
+  } else if (typeof body === "object" && !(body instanceof FormData) && !(body instanceof ArrayBuffer)) {
+    serializedBody = JSON.stringify(body);
+  } else {
+    serializedBody = body as BodyInit;
+  }
+  
+  // Create abort controller for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+  
+  if (DEBUG_LOGGING) {
+    console.log(`[API] ${fetchOptions.method || 'GET'} ${endpoint}`, { 
+      hasAuth: !!headers["X-User-Id"],
+      hasBody: !!body 
+    });
+  }
+  
+  try {
+    const res = await fetch(url, {
+      ...fetchOptions,
+      headers,
+      body: serializedBody,
+      signal: controller.signal,
+    });
+    
+    clearTimeout(timeoutId);
 
-  if (!res.ok) {
-    let detail = "Request failed";
-    try {
-      const errBody = await res.json();
-      detail = errBody.detail || detail;
-    } catch {
-      // ignore parse errors
+    if (!res.ok) {
+      let detail = "Request failed";
+      try {
+        const errBody = await res.json();
+        detail = errBody.detail || errBody.error || detail;
+      } catch {
+        // Response wasn't JSON, try text
+        try {
+          detail = await res.text() || detail;
+        } catch {
+          // ignore
+        }
+      }
+      
+      if (DEBUG_LOGGING) {
+        console.error(`[API] Error ${res.status}: ${detail}`, { endpoint });
+      }
+      
+      const error: ApiError = { detail, status: res.status };
+      throw error;
     }
-    const error: ApiError = { detail, status: res.status };
+    
+    // Handle empty responses
+    const contentType = res.headers.get("content-type");
+    if (!contentType || !contentType.includes("application/json")) {
+      return {} as T;
+    }
+    
+    const text = await res.text();
+    if (!text) {
+      return {} as T;
+    }
+
+    return JSON.parse(text) as T;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    
+    // Handle abort (timeout)
+    if (err instanceof Error && err.name === "AbortError") {
+      if (DEBUG_LOGGING) {
+        console.error(`[API] Timeout after ${timeout}ms`, { endpoint });
+      }
+      const error: ApiError = { 
+        detail: `Request timed out after ${timeout / 1000} seconds`, 
+        status: 504 
+      };
+      throw error;
+    }
+    
+    // Re-throw ApiError as-is
+    if (isApiError(err)) {
+      throw err;
+    }
+    
+    // Wrap other errors
+    if (DEBUG_LOGGING) {
+      console.error(`[API] Network error:`, err);
+    }
+    const error: ApiError = { 
+      detail: err instanceof Error ? err.message : "Network error", 
+      status: 0 
+    };
     throw error;
   }
-
-  return res.json();
 }
 
 // ──────────────────────────────────────────────────────────
@@ -124,7 +347,7 @@ export async function apiFetch<T>(
 export async function createShop(payload: CreateShopPayload): Promise<Shop> {
   return apiFetch<Shop>("/shops", {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: payload,
   });
 }
 
@@ -132,7 +355,18 @@ export async function createShop(payload: CreateShopPayload): Promise<Shop> {
  * Get public shop info by slug.
  */
 export async function getShopBySlug(slug: string): Promise<Shop> {
-  return apiFetch<Shop>(`/shops/${slug}`);
+  return apiFetch<Shop>(`/shops/${slug}`, { userId: false }); // Public endpoint
+}
+
+/**
+ * Get shop info including routing hints.
+ * This is the SERVER-AUTHORITATIVE endpoint for determining which dashboard to show.
+ * 
+ * @param slug - Shop URL slug
+ * @returns ShopInfo including is_cab_service and owner_dashboard_path
+ */
+export async function getShopInfo(slug: string): Promise<ShopInfo> {
+  return apiFetch<ShopInfo>(`/s/${slug}/info`, { userId: false }); // Public endpoint
 }
 
 // ──────────────────────────────────────────────────────────
@@ -143,29 +377,29 @@ export async function getShopBySlug(slug: string): Promise<Shop> {
  * Get services for a shop.
  */
 export async function getServices(slug: string): Promise<Service[]> {
-  return apiFetch<Service[]>(`/s/${slug}/services`);
+  return apiFetch<Service[]>(`/s/${slug}/services`, { userId: false }); // Public endpoint
 }
 
 /**
  * Get stylists for a shop.
  */
 export async function getStylists(slug: string): Promise<Stylist[]> {
-  return apiFetch<Stylist[]>(`/s/${slug}/stylists`);
+  return apiFetch<Stylist[]>(`/s/${slug}/stylists`, { userId: false }); // Public endpoint
 }
 
 /**
  * Send a message to the owner chat endpoint.
- * Requires user authentication.
+ * Requires user authentication (auto-injected from localStorage).
  */
 export async function ownerChat(
   slug: string,
   messages: OwnerMessage[],
-  userId: string
+  userId?: string
 ): Promise<OwnerChatResponse> {
   return apiFetch<OwnerChatResponse>(`/s/${slug}/owner/chat`, {
     method: "POST",
-    body: JSON.stringify({ messages }),
-    userId,
+    body: { messages },
+    ...(userId && { userId }), // Only override if explicitly provided
   });
 }
 
@@ -196,31 +430,16 @@ export function getErrorMessage(err: unknown): string {
     if (err.status === 422) {
       return err.detail || "Invalid request. Please check your input.";
     }
+    if (err.status === 503) {
+      return "Backend service is unavailable. Please try again later.";
+    }
+    if (err.status === 504) {
+      return "Request timed out. Please try again.";
+    }
     return err.detail;
   }
   if (err instanceof Error) {
     return err.message;
   }
   return "An unexpected error occurred.";
-}
-
-// ──────────────────────────────────────────────────────────
-// Storage Helpers
-// ──────────────────────────────────────────────────────────
-
-const OWNER_USER_ID_KEY = "owner_user_id";
-
-export function getStoredUserId(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(OWNER_USER_ID_KEY);
-}
-
-export function setStoredUserId(userId: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(OWNER_USER_ID_KEY, userId);
-}
-
-export function clearStoredUserId(): void {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem(OWNER_USER_ID_KEY);
 }

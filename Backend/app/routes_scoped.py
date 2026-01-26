@@ -30,9 +30,9 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
-from pydantic import BaseModel
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Path, status, Request, Form
+from pydantic import BaseModel, Field
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.config import get_settings
@@ -48,6 +48,7 @@ from .tenancy import (
 from .models import Service, Stylist, ShopMemberRole, Booking, BookingStatus, TimeOffBlock, StylistSpecialty
 from .auth import (
     get_current_user_id,
+    get_optional_user_id,
     require_owner_or_manager,
     log_audit,
     AUDIT_OWNER_CHAT,
@@ -171,9 +172,157 @@ class StylistsResponse(BaseModel):
     stylists: list[StylistListItem]
 
 
+class ShopInfoResponse(BaseModel):
+    """
+    Shop information response for frontend routing and display.
+    
+    This endpoint is the SERVER-AUTHORITATIVE source for:
+    - Shop category (determines which dashboard to show)
+    - Redirect hints (where to navigate the user)
+    - Shop metadata for display
+    """
+    id: int
+    slug: str
+    name: str
+    category: Optional[str] = None
+    timezone: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    # Routing hints
+    is_cab_service: bool = False
+    owner_dashboard_path: str
+
+
 # ────────────────────────────────────────────────────────────────
 # Endpoints
 # ────────────────────────────────────────────────────────────────
+
+@router.get("/info", response_model=ShopInfoResponse)
+async def get_shop_info(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Get shop information including category and routing hints.
+    
+    This is the SERVER-AUTHORITATIVE endpoint for shop routing.
+    Frontend should use this to determine which dashboard to display.
+    
+    Example: GET /s/bishops-tempe/info
+    
+    Response includes:
+    - is_cab_service: True if this is a cab/transportation business
+    - owner_dashboard_path: The correct path for the owner dashboard
+    
+    No authentication required - this is public shop info.
+    """
+    from .models import Shop
+    
+    result = await session.execute(
+        select(Shop).where(Shop.id == ctx.shop_id)
+    )
+    shop = result.scalar_one_or_none()
+    
+    if not shop:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    
+    is_cab = shop.category == "cab"
+    
+    return ShopInfoResponse(
+        id=shop.id,
+        slug=shop.slug,
+        name=shop.name,
+        category=shop.category,
+        timezone=shop.timezone,
+        address=shop.address,
+        phone=shop.phone_number,
+        is_cab_service=is_cab,
+        owner_dashboard_path=f"/s/{shop.slug}/owner/cab" if is_cab else f"/s/{shop.slug}/owner",
+    )
+
+
+class AuthStatusResponse(BaseModel):
+    """Response for auth status check."""
+    # Request info
+    user_id_from_header: Optional[str] = None
+    is_authenticated: bool = False
+    # Shop access
+    has_shop_access: bool = False
+    user_role: Optional[str] = None
+    # Debug info (only in non-production)
+    shop_owner_ids: list[str] = []
+    error_hint: Optional[str] = None
+
+
+@router.get("/owner/auth-status", response_model=AuthStatusResponse)
+async def check_auth_status(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: Optional[str] = Depends(get_optional_user_id),
+):
+    """
+    Debug endpoint to check authentication and authorization status.
+    
+    Use this to diagnose 403 errors. Returns:
+    - What user ID was received from frontend
+    - Whether that user has access to the shop
+    - What role they have (if any)
+    - What user IDs DO have owner access (for debugging)
+    
+    Example: GET /s/my-cab-shop/owner/auth-status
+    """
+    from .models import ShopMember
+    
+    response = AuthStatusResponse(
+        user_id_from_header=user_id,
+        is_authenticated=bool(user_id),
+    )
+    
+    # Get all owners/managers for this shop
+    result = await session.execute(
+        select(ShopMember).where(
+            ShopMember.shop_id == ctx.shop_id,
+            ShopMember.role.in_(["OWNER", "MANAGER"])
+        )
+    )
+    members = result.scalars().all()
+    
+    # Collect owner IDs (for debugging)
+    response.shop_owner_ids = [m.user_id for m in members]
+    
+    if not user_id:
+        response.error_hint = "No X-User-Id header found in request. Check localStorage.getItem('owner_user_id') in browser."
+        return response
+    
+    # Check if user has access
+    user_member = next((m for m in members if m.user_id == user_id), None)
+    
+    if user_member:
+        response.has_shop_access = True
+        response.user_role = user_member.role
+    else:
+        # Check if user has ANY role in the shop
+        result = await session.execute(
+            select(ShopMember).where(
+                ShopMember.shop_id == ctx.shop_id,
+                ShopMember.user_id == user_id
+            )
+        )
+        any_membership = result.scalar_one_or_none()
+        
+        if any_membership:
+            response.has_shop_access = True
+            response.user_role = any_membership.role
+            response.error_hint = f"User has {any_membership.role} role, but OWNER or MANAGER is required for this operation."
+        else:
+            response.error_hint = (
+                f"User '{user_id}' is not a member of shop '{ctx.shop_slug}'. "
+                f"Expected one of: {response.shop_owner_ids}. "
+                f"This usually means the localStorage owner_user_id doesn't match what was used during shop creation."
+            )
+    
+    return response
+
 
 @router.post("/chat", response_model=ScopedChatResponse)
 async def scoped_chat_endpoint(
@@ -2275,3 +2424,1635 @@ async def get_customer_preferences_for_booking(
         ]),
         "preferences": preferences,
     }
+
+
+# ────────────────────────────────────────────────────────────────
+# CAB BOOKING ENDPOINTS (Phase 10: Cab Services Vertical)
+# ────────────────────────────────────────────────────────────────
+
+from .cab_booking import (
+    CabBookingCreateRequest,
+    CabBookingResponse,
+    CabBookingDetailResponse,
+    CabBookingListItem,
+    get_pricing_rule_for_shop,
+    calculate_route_and_price,
+    create_cab_booking_record,
+    booking_to_response,
+    booking_to_detail_response,
+    booking_to_list_item,
+)
+from .cab_models import (
+    CabBooking, 
+    CabBookingStatus, 
+    CabBookingChannel, 
+    CabVehicleType,
+    CabOwner, 
+    CabDriver, 
+    CabDriverStatus,
+)
+from .cab_distance import RouteError
+
+
+@router.post(
+    "/cab/bookings",
+    response_model=CabBookingResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["cab-booking"],
+    summary="Create a cab booking",
+    description="Create a new cab booking request. Returns distance, duration, and price estimate.",
+)
+async def create_cab_booking(
+    request: CabBookingCreateRequest,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Create a new cab booking (public, no auth required).
+    
+    This endpoint:
+    1. Validates the request
+    2. Calculates route distance and duration via Google Maps
+    3. Calculates price based on shop's pricing rules
+    4. Creates a PENDING booking with pricing snapshot
+    5. Sends notification to owner
+    6. Returns booking details with price breakdown
+    """
+    logger.info(
+        f"Creating cab booking for shop={ctx.shop_slug}: "
+        f"{request.pickup_text} -> {request.drop_text}"
+    )
+    
+    try:
+        # Get pricing rule for this shop
+        pricing_rule = await get_pricing_rule_for_shop(session, ctx.shop_id)
+        
+        # Calculate route and price
+        calc_result = await calculate_route_and_price(
+            pickup_text=request.pickup_text,
+            drop_text=request.drop_text,
+            pricing_rule=pricing_rule,
+            vehicle_type=request.vehicle_type,
+        )
+        
+        # Create booking record
+        booking = await create_cab_booking_record(
+            session=session,
+            shop_id=ctx.shop_id,
+            request=request,
+            calc_result=calc_result,
+        )
+        
+        # Trigger notification (async, don't block on failure)
+        try:
+            from .cab_notifications import notify_owner_new_booking
+            await notify_owner_new_booking(session, booking)
+        except Exception as e:
+            logger.error(f"Failed to send notification for booking {booking.id}: {e}")
+        
+        return booking_to_response(booking, calc_result["pricing_breakdown"])
+        
+    except RouteError as e:
+        logger.warning(f"Route calculation failed: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "route_calculation_failed",
+                "message": e.message,
+                "status": e.status,
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Failed to create cab booking: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create booking. Please try again.",
+        )
+
+
+@router.get(
+    "/cab/bookings/{booking_id}",
+    response_model=CabBookingDetailResponse,
+    tags=["cab-booking"],
+    summary="Get cab booking details",
+    description="Get detailed information about a cab booking.",
+)
+async def get_cab_booking(
+    booking_id: str,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Get details of a specific cab booking (public).
+    """
+    from uuid import UUID
+    
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format",
+        )
+    
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+    
+    return booking_to_detail_response(booking)
+
+
+# ────────────────────────────────────────────────────────────────
+# DEV TEST ENDPOINT (Development Only)
+# ────────────────────────────────────────────────────────────────
+
+import os
+
+@router.post(
+    "/owner/cab/test-booking",
+    response_model=CabBookingResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["cab-owner", "dev"],
+    summary="Create test cab booking (DEV ONLY)",
+    description="Development endpoint to create a test cab booking for UI testing. Disabled in production.",
+)
+async def create_test_cab_booking(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Create a test cab booking for development/testing.
+    
+    This endpoint:
+    - Only works in development mode (when DEV_MODE env is set)
+    - Requires owner/manager authentication
+    - Creates a PENDING booking with mock data
+    """
+    # Check if dev mode is enabled
+    dev_mode = os.getenv("DEV_MODE", "").lower() in ("true", "1", "yes")
+    if not dev_mode:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Test endpoints disabled in production. Set DEV_MODE=true to enable.",
+        )
+    
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Get or create default pricing rule
+    from .cab_booking import get_or_create_default_pricing_rule
+    pricing_rule = await get_or_create_default_pricing_rule(session, ctx.shop_id)
+    
+    # Create test booking with mock data
+    from datetime import timedelta
+    import uuid
+    from decimal import Decimal
+    
+    test_booking = CabBooking(
+        id=uuid.uuid4(),
+        shop_id=ctx.shop_id,
+        channel=CabBookingChannel.WEB,
+        pickup_text="123 Main St, Test City, AZ 85001",
+        drop_text="Phoenix Sky Harbor International Airport (PHX), Phoenix, AZ",
+        pickup_time=datetime.utcnow() + timedelta(days=1, hours=10),
+        vehicle_type=CabVehicleType.SEDAN_4,
+        passengers=2,
+        luggage=2,
+        customer_name="Test Customer",
+        customer_email="test@example.com",
+        customer_phone="+16025551234",
+        distance_miles=Decimal("15.5"),
+        duration_minutes=25,
+        per_mile_rate_snapshot=pricing_rule.per_mile_rate,
+        rounding_step_snapshot=pricing_rule.rounding_step,
+        minimum_fare_snapshot=pricing_rule.minimum_fare,
+        vehicle_multiplier_snapshot=Decimal("1.0"),
+        raw_price=Decimal("65.00"),
+        final_price=Decimal("65.00"),
+        status=CabBookingStatus.PENDING,
+        notes="[DEV TEST] Auto-generated test booking",
+    )
+    
+    session.add(test_booking)
+    await session.commit()
+    await session.refresh(test_booking)
+    
+    logger.info(f"Created test booking {test_booking.id} for shop={ctx.shop_slug}")
+    
+    return booking_to_response(test_booking)
+
+
+# ────────────────────────────────────────────────────────────────
+# OWNER CAB MANAGEMENT ENDPOINTS (Authenticated)
+# ────────────────────────────────────────────────────────────────
+
+class CabBookingListResponse(BaseModel):
+    """Response for listing cab bookings."""
+    items: list[CabBookingListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class PriceOverrideRequest(BaseModel):
+    """Request to override a booking's price."""
+    price: float = Field(..., ge=0, description="New price in dollars")
+    reason: str | None = Field(None, max_length=500, description="Reason for override")
+
+
+class CabBookingActionResponse(BaseModel):
+    """Response for confirm/reject actions."""
+    success: bool
+    booking_id: str
+    status: str
+    message: str
+
+
+@router.get(
+    "/owner/cab/requests",
+    response_model=CabBookingListResponse,
+    tags=["cab-owner"],
+    summary="List cab booking requests",
+    description="Get paginated list of PENDING cab booking requests for owner review.",
+)
+async def list_cab_requests(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    """
+    List all PENDING cab booking requests for owner/manager review.
+    
+    Requires OWNER or MANAGER role.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Count total
+    count_result = await session.execute(
+        select(func.count(CabBooking.id)).where(
+            CabBooking.shop_id == ctx.shop_id,
+            CabBooking.status == CabBookingStatus.PENDING,
+        )
+    )
+    total = count_result.scalar() or 0
+    
+    # Get paginated results
+    offset = (page - 1) * page_size
+    result = await session.execute(
+        select(CabBooking)
+        .where(
+            CabBooking.shop_id == ctx.shop_id,
+            CabBooking.status == CabBookingStatus.PENDING,
+        )
+        .order_by(CabBooking.pickup_time.asc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    bookings = result.scalars().all()
+    
+    return CabBookingListResponse(
+        items=[booking_to_list_item(b) for b in bookings],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get(
+    "/owner/cab/requests/{booking_id}",
+    response_model=CabBookingDetailResponse,
+    tags=["cab-owner"],
+    summary="Get cab request details",
+    description="Get detailed information about a cab booking request.",
+)
+async def get_cab_request(
+    booking_id: str,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Get details of a specific cab booking request for owner review.
+    
+    Requires OWNER or MANAGER role.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format",
+        )
+    
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+    
+    return booking_to_detail_response(booking)
+
+
+@router.post(
+    "/owner/cab/requests/{booking_id}/override-price",
+    response_model=CabBookingDetailResponse,
+    tags=["cab-owner"],
+    summary="Override booking price",
+    description="Override the calculated price for a PENDING cab booking.",
+)
+async def override_cab_price(
+    booking_id: str,
+    request: PriceOverrideRequest,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Override the price for a PENDING booking.
+    
+    Requires OWNER or MANAGER role. Can only override PENDING bookings.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format",
+        )
+    
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+    
+    if not booking.can_override_price():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot override price for booking with status {booking.status.value}",
+        )
+    
+    # Store original price if not already overridden
+    if booking.price_override is None:
+        booking.original_price = booking.final_price
+    
+    booking.price_override = request.price
+    booking.final_price = request.price
+    
+    await session.commit()
+    await session.refresh(booking)
+    
+    logger.info(
+        f"Price overridden for cab booking {booking.id}: "
+        f"${booking.original_price} -> ${request.price} by user {user_id}"
+    )
+    
+    return booking_to_detail_response(booking)
+
+
+@router.post(
+    "/owner/cab/requests/{booking_id}/confirm",
+    response_model=CabBookingActionResponse,
+    tags=["cab-owner"],
+    summary="Confirm cab booking",
+    description="Confirm a PENDING cab booking request.",
+)
+async def confirm_cab_booking(
+    booking_id: str,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Confirm a PENDING cab booking.
+    
+    Requires OWNER or MANAGER role.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format",
+        )
+    
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+    
+    if not booking.can_confirm():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot confirm booking with status {booking.status.value}",
+        )
+    
+    booking.status = CabBookingStatus.CONFIRMED
+    booking.confirmed_at = datetime.utcnow()
+    booking.confirmed_by = user_id
+    
+    await session.commit()
+    
+    logger.info(f"Cab booking {booking.id} confirmed by user {user_id}")
+    
+    # Send confirmation email to customer
+    try:
+        from .cab_notifications import notify_customer_booking_confirmed
+        await notify_customer_booking_confirmed(session, booking)
+    except Exception as e:
+        logger.error(f"Failed to send confirmation email: {e}")
+    
+    return CabBookingActionResponse(
+        success=True,
+        booking_id=str(booking.id),
+        status=booking.status.value,
+        message="Booking confirmed successfully",
+    )
+
+
+@router.post(
+    "/owner/cab/requests/{booking_id}/reject",
+    response_model=CabBookingActionResponse,
+    tags=["cab-owner"],
+    summary="Reject cab booking",
+    description="Reject a PENDING cab booking request.",
+)
+async def reject_cab_booking(
+    booking_id: str,
+    reason: str | None = None,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Reject a PENDING cab booking.
+    
+    Requires OWNER or MANAGER role.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format",
+        )
+    
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+    
+    if not booking.can_reject():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot reject booking with status {booking.status.value}",
+        )
+    
+    booking.status = CabBookingStatus.REJECTED
+    booking.rejected_at = datetime.utcnow()
+    booking.rejected_by = user_id
+    booking.rejection_reason = reason
+    
+    await session.commit()
+    
+    logger.info(f"Cab booking {booking.id} rejected by user {user_id}: {reason}")
+    
+    # Send WhatsApp notification to customer if booking was via WhatsApp
+    if booking.channel == CabBookingChannel.WHATSAPP and booking.customer_phone:
+        try:
+            from .whatsapp import send_whatsapp_message
+            
+            customer_number = booking.customer_phone
+            if not customer_number.startswith('whatsapp:'):
+                customer_number = f'whatsapp:{customer_number}'
+            
+            message = f"""❌ *Booking Cancelled*
+
+🎫 Reference: #{str(booking.id)[:8].upper()}
+
+📍 From: {booking.pickup_text}
+📍 To: {booking.drop_text}
+
+"""
+            
+            if reason:
+                message += f"Reason: {reason}\n\n"
+            
+            message += "We apologize for any inconvenience. Please feel free to make a new booking or contact us for assistance."
+            
+            send_whatsapp_message(customer_number, message)
+            logger.info(f"Rejection WhatsApp notification sent to {customer_number}")
+        except Exception as e:
+            logger.error(f"Failed to send rejection WhatsApp: {e}")
+    
+    # Send rejection email to customer
+    try:
+        from .cab_notifications import notify_customer_booking_rejected
+        await notify_customer_booking_rejected(session, booking)
+    except Exception as e:
+        logger.error(f"Failed to send rejection email: {e}")
+    
+    return CabBookingActionResponse(
+        success=True,
+        booking_id=str(booking.id),
+        status=booking.status.value,
+        message="Booking rejected",
+    )
+
+
+@router.get(
+    "/owner/cab/rides",
+    response_model=CabBookingListResponse,
+    tags=["cab-owner"],
+    summary="List confirmed cab rides",
+    description="Get paginated list of CONFIRMED cab rides for the owner dashboard.",
+)
+async def list_cab_rides(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    upcoming_only: bool = Query(False, description="Only show rides with future pickup times"),
+):
+    """
+    List all CONFIRMED cab rides.
+    
+    Requires OWNER or MANAGER role.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Build query
+    query = select(CabBooking).where(
+        CabBooking.shop_id == ctx.shop_id,
+        CabBooking.status == CabBookingStatus.CONFIRMED,
+    )
+    
+    count_query = select(func.count(CabBooking.id)).where(
+        CabBooking.shop_id == ctx.shop_id,
+        CabBooking.status == CabBookingStatus.CONFIRMED,
+    )
+    
+    if upcoming_only:
+        now = datetime.utcnow()
+        query = query.where(CabBooking.pickup_time > now)
+        count_query = count_query.where(CabBooking.pickup_time > now)
+    
+    # Count total
+    count_result = await session.execute(count_query)
+    total = count_result.scalar() or 0
+    
+    # Get paginated results
+    offset = (page - 1) * page_size
+    result = await session.execute(
+        query.order_by(CabBooking.pickup_time.asc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    bookings = result.scalars().all()
+    
+    return CabBookingListResponse(
+        items=[booking_to_list_item(b) for b in bookings],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+# ============================================================================
+# CAB OWNER MANAGEMENT ENDPOINTS
+# ============================================================================
+
+class CabOwnerResponse(BaseModel):
+    """Response model for cab owner info."""
+    id: str
+    shop_id: int
+    business_name: str
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    whatsapp_phone: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+
+class CabOwnerSetupRequest(BaseModel):
+    """Request to set up cab owner for a shop."""
+    business_name: str = Field(..., min_length=2, max_length=255)
+    contact_email: Optional[str] = Field(default=None, max_length=255)
+    contact_phone: Optional[str] = Field(default=None, max_length=32)
+    whatsapp_phone: Optional[str] = Field(default=None, max_length=32)
+
+
+@router.get(
+    "/owner/cab/owner",
+    response_model=CabOwnerResponse,
+    tags=["cab-owner"],
+    summary="Get cab owner for this shop",
+    description="Get cab owner configuration for this shop. Returns 404 if not set up.",
+)
+async def get_cab_owner(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Get cab owner for the shop."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    result = await session.execute(
+        select(CabOwner).where(
+            CabOwner.shop_id == ctx.shop_id,
+            CabOwner.active == True,
+        )
+    )
+    owner = result.scalar_one_or_none()
+    
+    if not owner:
+        raise HTTPException(status_code=404, detail="Cab owner not configured for this shop")
+    
+    return CabOwnerResponse(
+        id=str(owner.id),
+        shop_id=owner.shop_id,
+        business_name=owner.business_name,
+        contact_email=owner.email,
+        contact_phone=owner.phone,
+        whatsapp_phone=owner.whatsapp_phone,
+        is_active=owner.active,
+        created_at=owner.created_at,
+    )
+
+
+@router.post(
+    "/owner/cab/setup",
+    response_model=CabOwnerResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["cab-owner"],
+    summary="Set up cab owner for this shop",
+    description="Create or update cab owner configuration for this shop.",
+)
+async def setup_cab_owner(
+    request: CabOwnerSetupRequest,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Create or update cab owner for the shop."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Check if owner already exists
+    result = await session.execute(
+        select(CabOwner).where(CabOwner.shop_id == ctx.shop_id)
+    )
+    existing = result.scalar_one_or_none()
+    
+    if existing:
+        # Update existing
+        existing.business_name = request.business_name
+        existing.email = request.contact_email
+        existing.phone = request.contact_phone
+        existing.whatsapp_phone = request.whatsapp_phone
+        existing.active = True
+        owner = existing
+    else:
+        # Create new
+        owner = CabOwner(
+            shop_id=ctx.shop_id,
+            business_name=request.business_name,
+            email=request.contact_email,
+            phone=request.contact_phone,
+            whatsapp_phone=request.whatsapp_phone,
+        )
+        session.add(owner)
+    
+    await session.commit()
+    await session.refresh(owner)
+    
+    logger.info(f"Cab owner set up for shop={ctx.shop_slug}: {owner.business_name}")
+    
+    return CabOwnerResponse(
+        id=str(owner.id),
+        shop_id=owner.shop_id,
+        business_name=owner.business_name,
+        contact_email=owner.email,
+        contact_phone=owner.phone,
+        whatsapp_phone=owner.whatsapp_phone,
+        is_active=owner.active,
+        created_at=owner.created_at,
+    )
+
+
+# ============================================================================
+# CAB DRIVER MANAGEMENT ENDPOINTS
+# ============================================================================
+
+class CabDriverResponse(BaseModel):
+    """Response model for driver info."""
+    id: str
+    name: str
+    phone: str
+    whatsapp_phone: Optional[str] = None
+    status: str
+    created_at: datetime
+
+
+class CabDriverListResponse(BaseModel):
+    """Response for driver list."""
+    items: list[CabDriverResponse]
+    total: int
+
+
+class CabDriverCreateRequest(BaseModel):
+    """Request to create a driver."""
+    name: str = Field(..., min_length=2, max_length=255)
+    phone: str = Field(..., min_length=5, max_length=32)
+    whatsapp_phone: Optional[str] = Field(default=None, max_length=32)
+
+
+class CabDriverUpdateRequest(BaseModel):
+    """Request to update a driver."""
+    name: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    phone: Optional[str] = Field(default=None, min_length=5, max_length=32)
+    whatsapp_phone: Optional[str] = Field(default=None, max_length=32)
+    status: Optional[str] = Field(default=None)
+
+
+@router.get(
+    "/owner/cab/drivers",
+    response_model=CabDriverListResponse,
+    tags=["cab-owner"],
+    summary="List cab drivers",
+    description="Get list of cab drivers for this shop.",
+)
+async def list_cab_drivers(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """List all drivers for this shop's cab owner."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Get cab owner
+    result = await session.execute(
+        select(CabOwner).where(
+            CabOwner.shop_id == ctx.shop_id,
+            CabOwner.active == True,
+        )
+    )
+    owner = result.scalar_one_or_none()
+    
+    if not owner:
+        raise HTTPException(status_code=404, detail="Cab owner not configured")
+    
+    # Get drivers
+    result = await session.execute(
+        select(CabDriver).where(CabDriver.cab_owner_id == owner.id)
+        .order_by(CabDriver.created_at.desc())
+    )
+    drivers = result.scalars().all()
+    
+    return CabDriverListResponse(
+        items=[
+            CabDriverResponse(
+                id=str(d.id),
+                name=d.name,
+                phone=d.phone,
+                whatsapp_phone=d.whatsapp_phone,
+                status=d.status.value,
+                created_at=d.created_at,
+            )
+            for d in drivers
+        ],
+        total=len(drivers),
+    )
+
+
+@router.post(
+    "/owner/cab/drivers",
+    response_model=CabDriverResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["cab-owner"],
+    summary="Add a cab driver",
+    description="Add a new driver to this shop's cab service.",
+)
+async def create_cab_driver(
+    request: CabDriverCreateRequest,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Create a new driver."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Get cab owner
+    result = await session.execute(
+        select(CabOwner).where(
+            CabOwner.shop_id == ctx.shop_id,
+            CabOwner.active == True,
+        )
+    )
+    owner = result.scalar_one_or_none()
+    
+    if not owner:
+        raise HTTPException(status_code=404, detail="Cab owner not configured")
+    
+    driver = CabDriver(
+        cab_owner_id=owner.id,
+        name=request.name,
+        phone=request.phone,
+        whatsapp_phone=request.whatsapp_phone,
+    )
+    session.add(driver)
+    await session.commit()
+    await session.refresh(driver)
+    
+    logger.info(f"Driver added for shop={ctx.shop_slug}: {driver.name}")
+    
+    return CabDriverResponse(
+        id=str(driver.id),
+        name=driver.name,
+        phone=driver.phone,
+        whatsapp_phone=driver.whatsapp_phone,
+        status=driver.status.value,
+        created_at=driver.created_at,
+    )
+
+
+@router.patch(
+    "/owner/cab/drivers/{driver_id}",
+    response_model=CabDriverResponse,
+    tags=["cab-owner"],
+    summary="Update a cab driver",
+    description="Update driver info or status.",
+)
+async def update_cab_driver(
+    driver_id: str = Path(..., description="Driver UUID"),
+    request: CabDriverUpdateRequest = ...,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Update a driver."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    try:
+        driver_uuid = UUID(driver_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid driver ID")
+    
+    # Get cab owner
+    result = await session.execute(
+        select(CabOwner).where(
+            CabOwner.shop_id == ctx.shop_id,
+            CabOwner.active == True,
+        )
+    )
+    owner = result.scalar_one_or_none()
+    
+    if not owner:
+        raise HTTPException(status_code=404, detail="Cab owner not configured")
+    
+    # Get driver (ensure it belongs to this owner)
+    result = await session.execute(
+        select(CabDriver).where(
+            CabDriver.id == driver_uuid,
+            CabDriver.cab_owner_id == owner.id,
+        )
+    )
+    driver = result.scalar_one_or_none()
+    
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+    
+    # Update fields
+    if request.name is not None:
+        driver.name = request.name
+    if request.phone is not None:
+        driver.phone = request.phone
+    if request.whatsapp_phone is not None:
+        driver.whatsapp_phone = request.whatsapp_phone
+    if request.status is not None:
+        driver.status = CabDriverStatus(request.status)
+    
+    await session.commit()
+    await session.refresh(driver)
+    
+    logger.info(f"Driver updated for shop={ctx.shop_slug}: {driver.name}")
+    
+    return CabDriverResponse(
+        id=str(driver.id),
+        name=driver.name,
+        phone=driver.phone,
+        whatsapp_phone=driver.whatsapp_phone,
+        status=driver.status.value,
+        created_at=driver.created_at,
+    )
+
+
+# ============================================================================
+# DRIVER ASSIGNMENT ENDPOINT
+# ============================================================================
+
+class AssignDriverRequest(BaseModel):
+    """Request to assign a driver to a booking."""
+    driver_id: str
+
+
+class AssignDriverResponse(BaseModel):
+    """Response after assigning driver."""
+    booking_id: str
+    status: str
+    assigned_driver_id: str
+    assigned_driver: CabDriverResponse
+    assigned_at: datetime
+
+
+@router.post(
+    "/owner/cab/requests/{booking_id}/assign-driver",
+    response_model=AssignDriverResponse,
+    tags=["cab-owner"],
+    summary="Assign driver to booking",
+    description="Assign a driver to a confirmed cab booking.",
+)
+async def assign_driver_to_booking(
+    booking_id: str = Path(..., description="Booking UUID"),
+    request: AssignDriverRequest = ...,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Assign a driver to a booking."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    try:
+        booking_uuid = UUID(booking_id)
+        # Driver ID is an integer, not a UUID
+        driver_id = int(request.driver_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid booking or driver ID")
+    
+    # Get booking
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    
+    if booking.status != CabBookingStatus.CONFIRMED:
+        raise HTTPException(status_code=400, detail="Can only assign driver to confirmed bookings")
+    
+    # Get cab owner
+    result = await session.execute(
+        select(CabOwner).where(
+            CabOwner.shop_id == ctx.shop_id,
+            CabOwner.active == True,
+        )
+    )
+    owner = result.scalar_one_or_none()
+    
+    if not owner:
+        raise HTTPException(status_code=404, detail="Cab owner not configured")
+    
+    # Get driver (ensure belongs to this owner)
+    result = await session.execute(
+        select(CabDriver).where(
+            CabDriver.id == driver_id,
+            CabDriver.cab_owner_id == owner.id,
+        )
+    )
+    driver = result.scalar_one_or_none()
+    
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+    
+    if driver.status != CabDriverStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Driver is not active")
+    
+    # Assign driver
+    booking.assigned_driver_id = driver.id
+    booking.assigned_at = datetime.utcnow()
+    
+    await session.commit()
+    await session.refresh(booking)
+    
+    logger.info(f"Driver {driver.name} assigned to booking {booking_id} for shop={ctx.shop_slug}")
+    
+    # Send WhatsApp notification to customer if booking was via WhatsApp
+    if booking.channel == CabBookingChannel.WHATSAPP and booking.customer_phone:
+        try:
+            from .whatsapp import send_whatsapp_message, format_driver_assigned_message
+            
+            customer_number = booking.customer_phone
+            if not customer_number.startswith('whatsapp:'):
+                customer_number = f'whatsapp:{customer_number}'
+            
+            vehicle_info = f"{booking.vehicle_type.value.replace('_', ' ').title()}"
+            
+            message = format_driver_assigned_message(
+                booking_id=str(booking.id),
+                driver_name=driver.name,
+                driver_phone=driver.phone or driver.whatsapp_phone or "Contact via app",
+                vehicle_info=vehicle_info
+            )
+            
+            # Add full booking details
+            message += f"\n\n📍 Pickup: {booking.pickup_text}"
+            message += f"\n📍 Dropoff: {booking.drop_text}"
+            
+            try:
+                dt = booking.pickup_time
+                time_display = dt.strftime("%B %d at %I:%M %p")
+                message += f"\n🕐 Time: {time_display}"
+            except:
+                message += f"\n🕐 Time: {booking.pickup_time}"
+            
+            message += f"\n💵 Fare: ${booking.final_price:.2f}"
+            
+            send_whatsapp_message(customer_number, message)
+            logger.info(f"Driver assignment WhatsApp notification sent to {customer_number}")
+        except Exception as e:
+            logger.error(f"Failed to send driver assignment WhatsApp: {e}")
+    
+    return AssignDriverResponse(
+        booking_id=str(booking.id),
+        status=booking.status.value,
+        assigned_driver_id=str(driver.id),
+        assigned_driver=CabDriverResponse(
+            id=str(driver.id),
+            name=driver.name,
+            phone=driver.phone,
+            whatsapp_phone=driver.whatsapp_phone,
+            status=driver.status.value,
+            created_at=driver.created_at,
+        ),
+        assigned_at=booking.assigned_at,
+    )
+
+
+# ============================================================================
+# CAB OWNER SUMMARY/ANALYTICS ENDPOINT
+# ============================================================================
+
+class CabSummaryData(BaseModel):
+    """Summary metrics data for cab owner dashboard."""
+    total_rides: int = Field(..., description="Total number of rides in the period")
+    confirmed_revenue: float = Field(..., description="Revenue from COMPLETED rides")
+    upcoming_revenue: float = Field(..., description="Revenue from CONFIRMED rides with future pickup")
+    avg_ride_price: float = Field(..., description="Average price of confirmed/completed rides")
+    acceptance_rate: float = Field(..., description="Percentage of accepted bookings (0-100)")
+    cancellation_rate: float = Field(..., description="Percentage of cancelled bookings (0-100)")
+
+
+class CabSummaryResponse(BaseModel):
+    """Response for cab owner summary endpoint."""
+    data: CabSummaryData
+    status: str = "ok"
+    range_days: int = Field(..., description="Number of days in the query range")
+
+
+@router.get(
+    "/owner/cab/summary",
+    response_model=CabSummaryResponse,
+    tags=["cab-owner"],
+    summary="Get cab business summary metrics",
+    description="Get computed summary metrics for the cab owner dashboard (last 7 or 30 days).",
+)
+async def get_cab_summary(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+    range: str = Query("7d", regex="^(7d|30d)$", description="Time range: 7d or 30d"),
+):
+    """
+    Get computed summary metrics for the cab owner dashboard.
+    
+    Metrics are computed on-demand, NOT stored in the database.
+    
+    Requires OWNER or MANAGER role.
+    
+    Args:
+        range: Time range filter - "7d" for last 7 days, "30d" for last 30 days
+    
+    Returns:
+        CabSummaryResponse with computed metrics
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Determine the date range
+    range_days = 7 if range == "7d" else 30
+    now = datetime.utcnow()
+    start_date = now - timedelta(days=range_days)
+    
+    logger.info(f"Computing cab summary for shop={ctx.shop_slug}, range={range_days}d, user={user_id}")
+    
+    try:
+        # Single efficient query to get all the metrics we need
+        # Using SQL aggregation for performance
+        
+        from sqlalchemy import case, and_, or_
+        
+        # Count queries for status breakdown
+        status_counts_query = select(
+            func.count(CabBooking.id).label('total'),
+            func.count(case((CabBooking.status == CabBookingStatus.CONFIRMED, 1))).label('confirmed_count'),
+            func.count(case((CabBooking.status == CabBookingStatus.COMPLETED, 1))).label('completed_count'),
+            func.count(case((CabBooking.status == CabBookingStatus.REJECTED, 1))).label('rejected_count'),
+            func.count(case((CabBooking.status == CabBookingStatus.CANCELLED, 1))).label('cancelled_count'),
+            func.count(case((CabBooking.status == CabBookingStatus.PENDING, 1))).label('pending_count'),
+        ).where(
+            CabBooking.shop_id == ctx.shop_id,
+            CabBooking.created_at >= start_date,
+        )
+        
+        status_result = await session.execute(status_counts_query)
+        status_row = status_result.one()
+        
+        total_rides = status_row.total or 0
+        confirmed_count = status_row.confirmed_count or 0
+        completed_count = status_row.completed_count or 0
+        rejected_count = status_row.rejected_count or 0
+        cancelled_count = status_row.cancelled_count or 0
+        
+        # Revenue from COMPLETED rides (Confirmed Revenue)
+        completed_revenue_query = select(
+            func.coalesce(func.sum(CabBooking.final_price), 0).label('revenue')
+        ).where(
+            CabBooking.shop_id == ctx.shop_id,
+            CabBooking.created_at >= start_date,
+            CabBooking.status == CabBookingStatus.COMPLETED,
+        )
+        completed_revenue_result = await session.execute(completed_revenue_query)
+        confirmed_revenue = float(completed_revenue_result.scalar() or 0)
+        
+        # Revenue from CONFIRMED rides with FUTURE pickup time (Upcoming Revenue)
+        upcoming_revenue_query = select(
+            func.coalesce(func.sum(CabBooking.final_price), 0).label('revenue')
+        ).where(
+            CabBooking.shop_id == ctx.shop_id,
+            CabBooking.created_at >= start_date,
+            CabBooking.status == CabBookingStatus.CONFIRMED,
+            CabBooking.pickup_time > now,
+        )
+        upcoming_revenue_result = await session.execute(upcoming_revenue_query)
+        upcoming_revenue = float(upcoming_revenue_result.scalar() or 0)
+        
+        # Average ride price for CONFIRMED and COMPLETED rides
+        avg_price_query = select(
+            func.avg(CabBooking.final_price).label('avg_price')
+        ).where(
+            CabBooking.shop_id == ctx.shop_id,
+            CabBooking.created_at >= start_date,
+            or_(
+                CabBooking.status == CabBookingStatus.CONFIRMED,
+                CabBooking.status == CabBookingStatus.COMPLETED,
+            ),
+            CabBooking.final_price.isnot(None),
+        )
+        avg_price_result = await session.execute(avg_price_query)
+        avg_ride_price = float(avg_price_result.scalar() or 0)
+        
+        # Calculate acceptance rate
+        # Formula: (confirmed + completed) / total_requests * 100
+        # Where total_requests = total rides that had a decision made (not pending)
+        total_requests = total_rides  # All bookings that came in
+        accepted_count = confirmed_count + completed_count
+        
+        if total_requests > 0:
+            acceptance_rate = (accepted_count / total_requests) * 100
+        else:
+            acceptance_rate = 0.0
+        
+        # Calculate cancellation rate
+        # Formula: cancelled / total_requests * 100
+        if total_requests > 0:
+            cancellation_rate = (cancelled_count / total_requests) * 100
+        else:
+            cancellation_rate = 0.0
+        
+        logger.info(
+            f"Cab summary computed for shop={ctx.shop_slug}: "
+            f"total={total_rides}, confirmed_revenue=${confirmed_revenue:.2f}, "
+            f"upcoming=${upcoming_revenue:.2f}, avg=${avg_ride_price:.2f}, "
+            f"accept={acceptance_rate:.1f}%, cancel={cancellation_rate:.1f}%"
+        )
+        
+        return CabSummaryResponse(
+            data=CabSummaryData(
+                total_rides=total_rides,
+                confirmed_revenue=round(confirmed_revenue, 2),
+                upcoming_revenue=round(upcoming_revenue, 2),
+                avg_ride_price=round(avg_ride_price, 2),
+                acceptance_rate=round(acceptance_rate, 1),
+                cancellation_rate=round(cancellation_rate, 1),
+            ),
+            status="ok",
+            range_days=range_days,
+        )
+        
+    except Exception as e:
+        logger.error(f"Error computing cab summary for shop={ctx.shop_slug}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to compute summary: {str(e)}"
+        )
+
+
+# ============================================================================
+# MARK RIDE AS COMPLETED ENDPOINT
+# ============================================================================
+
+class CompleteRideResponse(BaseModel):
+    """Response after marking a ride as completed."""
+    booking_id: str
+    status: str
+    completed_at: datetime
+    message: str
+
+
+@router.post(
+    "/owner/cab/rides/{booking_id}/complete",
+    response_model=CompleteRideResponse,
+    tags=["cab-owner"],
+    summary="Mark ride as completed",
+    description="Mark a CONFIRMED cab ride as COMPLETED after the trip is done.",
+)
+async def complete_cab_ride(
+    booking_id: str = Path(..., description="Booking UUID"),
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Mark a cab ride as COMPLETED.
+    
+    Can only complete CONFIRMED rides.
+    
+    Requires OWNER or MANAGER role.
+    """
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from uuid import UUID
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format"
+        )
+    
+    # Fetch booking
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found"
+        )
+    
+    if booking.status != CabBookingStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot complete a {booking.status.value} booking. Only CONFIRMED rides can be completed."
+        )
+    
+    # Mark as completed
+    booking.status = CabBookingStatus.COMPLETED
+    completed_at = datetime.utcnow()
+    booking.updated_at = completed_at
+    
+    await session.commit()
+    
+    logger.info(f"Ride {booking_id} marked as COMPLETED for shop={ctx.shop_slug} by user={user_id}")
+    
+    return CompleteRideResponse(
+        booking_id=str(booking.id),
+        status=booking.status.value,
+        completed_at=completed_at,
+        message="Ride marked as completed",
+    )
+
+
+# ============================================================================
+# PUBLIC CAB BOOKING (for customer-facing page)
+# ============================================================================
+
+@router.post(
+    "/cab/book",
+    response_model=CabBookingResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["cab-booking"],
+    summary="Create a cab booking (public)",
+    description="Public endpoint for customers to create cab bookings.",
+)
+async def create_public_cab_booking(
+    request: CabBookingCreateRequest,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Create a cab booking from public booking page.
+    
+    This is the same as /cab/bookings but more semantically named
+    for the public booking flow.
+    """
+    logger.info(
+        f"Public cab booking for shop={ctx.shop_slug}: "
+        f"{request.pickup_text} -> {request.drop_text}"
+    )
+    
+    try:
+        # Get pricing rule (creates default if none exists)
+        pricing_rule = await get_pricing_rule_for_shop(session, ctx.shop_id)
+        
+        # Calculate route and price
+        calc_result = await calculate_route_and_price(
+            pickup_text=request.pickup_text,
+            drop_text=request.drop_text,
+            pricing_rule=pricing_rule,
+            vehicle_type=request.vehicle_type,
+        )
+        
+        # Create booking record
+        booking = await create_cab_booking_record(
+            session=session,
+            shop_id=ctx.shop_id,
+            request=request,
+            calc_result=calc_result,
+        )
+        
+        # Send notification (non-blocking)
+        try:
+            from .cab_notifications import notify_owner_new_booking
+            await notify_owner_new_booking(session, booking)
+        except Exception as e:
+            logger.warning(f"Failed to send booking notification: {e}")
+        
+        return booking_to_response(booking, calc_result.get("pricing_breakdown"))
+        
+    except RouteError as e:
+        logger.warning(f"Route calculation failed: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Route calculation failed: {e.message}"
+        )
+    except Exception as e:
+        logger.exception(f"Cab booking error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create booking. Please try again."
+        )
+
+
+# ────────────────────────────────────────────────────────────────
+# WhatsApp Webhook (Twilio Integration)
+# ────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/webhook/whatsapp",
+    tags=["whatsapp"],
+    summary="WhatsApp webhook for cab bookings",
+    description="Receives incoming WhatsApp messages from Twilio for cab booking requests.",
+)
+async def whatsapp_webhook(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    Body: str = Form(...),
+    From: str = Form(...),
+    MessageSid: Optional[str] = Form(None),
+):
+    """
+    Twilio WhatsApp webhook endpoint.
+    
+    Handles incoming customer messages for cab bookings.
+    
+    Flow:
+    1. Parse message to extract booking details
+    2. Calculate route and price
+    3. Send price quote to customer
+    4. Wait for confirmation (YES/NO)
+    5. Create booking if confirmed
+    6. Send confirmation message
+    
+    Twilio sends form-encoded data:
+    - From: Customer's WhatsApp number (e.g., whatsapp:+1234567890)
+    - Body: Message text
+    - MessageSid: Unique message ID
+    """
+    from .whatsapp import (
+        parse_booking_request,
+        BookingParseError,
+        format_price_quote,
+        format_booking_confirmation,
+        format_error_message,
+        send_whatsapp_message,
+        get_help_message,
+    )
+    from .whatsapp_ai import parse_booking_with_ai
+    from .cab_booking import (
+        get_pricing_rule_for_shop,
+        calculate_route_and_price,
+        create_cab_booking_record,
+        RouteError,
+    )
+    
+    logger.info(f"📱 WhatsApp message from {From} to shop {ctx.shop_slug}: {Body}")
+    
+    message_body = Body.strip()
+    customer_number = From  # Format: whatsapp:+1234567890
+    
+    # Handle HELP command
+    if message_body.upper() in ['HELP', 'HI', 'HELLO', 'START']:
+        help_text = get_help_message()
+        send_whatsapp_message(customer_number, help_text)
+        return {"status": "help_sent"}
+    
+    # Handle YES/NO confirmation (simplified - in production use session state)
+    if message_body.upper() in ['YES', 'NO', 'CONFIRM', 'CANCEL']:
+        if message_body.upper() in ['YES', 'CONFIRM']:
+            response = "✅ To create a booking, please send a new request with your pickup and dropoff locations."
+        else:
+            response = "❌ Booking cancelled. Send a new message anytime to book a ride."
+        send_whatsapp_message(customer_number, response)
+        return {"status": "confirmation_handled"}
+    
+    # Parse booking request - try AI first, fallback to regex
+    parsed = None
+    try:
+        # Try OpenAI parsing first
+        parsed = await parse_booking_with_ai(message_body)
+        if parsed:
+            logger.info(f"✅ AI parsed booking: {parsed}")
+        else:
+            # Fallback to regex parsing
+            parsed = parse_booking_request(message_body)
+            logger.info(f"✅ Regex parsed booking: {parsed}")
+        
+    except BookingParseError as e:
+        error_msg = format_error_message('parse_error')
+        send_whatsapp_message(customer_number, error_msg)
+        return {"status": "parse_error", "message": str(e)}
+    
+    # Calculate route and price
+    try:
+        pricing_rule = await get_pricing_rule_for_shop(session, ctx.shop_id)
+        
+        # Ensure vehicle_type is a string, not an enum
+        vehicle_type_str = parsed['vehicle_type']
+        if hasattr(vehicle_type_str, 'value'):
+            vehicle_type_str = vehicle_type_str.value
+        
+        calc_result = await calculate_route_and_price(
+            pickup_text=parsed['pickup_text'],
+            drop_text=parsed['drop_text'],
+            pricing_rule=pricing_rule,
+            vehicle_type=vehicle_type_str,
+        )
+        
+        # Send price quote
+        quote_msg = format_price_quote(
+            pickup_text=parsed['pickup_text'],
+            drop_text=parsed['drop_text'],
+            distance_miles=calc_result['distance_miles'],
+            final_price=calc_result['final_price'],
+            vehicle_type=vehicle_type_str,
+            duration_minutes=calc_result['duration_minutes'],
+        )
+        
+        # Send via Twilio or log (dev mode)
+        if not send_whatsapp_message(customer_number, quote_msg):
+            logger.info(f"📱 [DEV] Would send quote: {quote_msg}")
+        
+        # Auto-create booking (simplified - in production wait for YES confirmation)
+        from .models import CabBookingChannel, CabVehicleType
+        
+        # Create booking request object
+        # Convert enums to their string values for Pydantic
+        vehicle_type_value = vehicle_type_str.value if hasattr(vehicle_type_str, 'value') else vehicle_type_str
+        channel_value = "whatsapp"  # Use lowercase string value
+        
+        # DEBUG: Log what we're passing
+        logger.info(f"🔍 DEBUG: Passing channel_value={channel_value} (type={type(channel_value)})")
+        logger.info(f"🔍 DEBUG: Passing vehicle_type_value={vehicle_type_value} (type={type(vehicle_type_value)})")
+        
+        booking_request = CabBookingCreateRequest(
+            channel=channel_value,
+            pickup_text=parsed['pickup_text'],
+            drop_text=parsed['drop_text'],
+            pickup_time=parsed['pickup_time'],
+            vehicle_type=vehicle_type_value,
+            passengers=parsed['passengers'],
+            customer_name="WhatsApp Customer",  # Extract from Twilio profile in production
+            customer_phone=From.replace('whatsapp:', ''),
+            customer_email=None,
+        )
+        
+        # DEBUG: Log what Pydantic created
+        logger.info(f"🔍 DEBUG: After Pydantic: booking_request.channel={booking_request.channel} (type={type(booking_request.channel)})")
+        logger.info(f"🔍 DEBUG: After Pydantic: booking_request.channel.value={booking_request.channel.value if hasattr(booking_request.channel, 'value') else 'no .value'}")
+        
+        booking = await create_cab_booking_record(
+            session=session,
+            shop_id=ctx.shop_id,
+            request=booking_request,
+            calc_result=calc_result,
+        )
+        
+        # Send confirmation
+        confirmation_msg = format_booking_confirmation(
+            booking_id=str(booking.id),
+            pickup_text=parsed['pickup_text'],
+            drop_text=parsed['drop_text'],
+            pickup_time=parsed['pickup_time'],
+            final_price=calc_result['final_price'],
+        )
+        
+        if not send_whatsapp_message(customer_number, confirmation_msg):
+            logger.info(f"📱 [DEV] Would send confirmation: {confirmation_msg}")
+        
+        logger.info(f"✅ WhatsApp booking created: {booking.id}")
+        return {"status": "booking_created", "booking_id": str(booking.id)}
+        
+    except RouteError as e:
+        logger.warning(f"Route calculation failed: {e.message}")
+        error_msg = format_error_message('calc_error')
+        send_whatsapp_message(customer_number, error_msg)
+        return {"status": "route_error", "message": e.message}
+        
+    except Exception as e:
+        logger.exception(f"WhatsApp booking error: {e}")
+        error_msg = format_error_message('booking_error')
+        send_whatsapp_message(customer_number, error_msg)
+        return {"status": "error", "message": str(e)}

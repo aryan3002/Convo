@@ -36,6 +36,8 @@ export function useOwnerServiceBookings(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchBookingCounts = useCallback(async () => {
+    if (!shopSlug) return {};
+    
     setCountsLoading(true);
     try {
       const userId = getStoredUserId();
@@ -62,7 +64,7 @@ export function useOwnerServiceBookings(shopSlug?: string) {
       setCountsLoading(false);
     }
     return {};
-  }, [getEndpoint]);
+  }, [getEndpoint, shopSlug]);
 
   const fetchServiceBookings = useCallback(async (serviceId: number, serviceName: string) => {
     setLoading(true);

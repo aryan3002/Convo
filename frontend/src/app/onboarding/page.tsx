@@ -73,6 +73,7 @@ const CATEGORIES = [
   { value: "nails", label: "Nail Salon" },
   { value: "beauty", label: "Beauty Studio" },
   { value: "wellness", label: "Wellness Center" },
+  { value: "cab", label: "Cab/Transportation Service" },
   { value: "other", label: "Other" },
 ];
 
@@ -167,7 +168,7 @@ export default function OnboardingPage() {
       const shop = await createShop({
         owner_user_id: formData.ownerUserId.trim(),
         name: formData.shopName.trim(),
-        phone: formData.phone.trim() || undefined,
+        phone_number: formData.phone.trim() || undefined,
         timezone: formData.timezone || undefined,
         address: formData.address.trim() || undefined,
         category: formData.category || undefined,
@@ -181,9 +182,13 @@ export default function OnboardingPage() {
 
       setSuccess(`Shop "${shop.name}" created successfully! Redirecting to setup...`);
 
-      // Redirect to the shop setup wizard
+      // Redirect based on shop category
       setTimeout(() => {
-        router.push(`/s/${shop.slug}/setup`);
+        if (formData.category === "cab") {
+          router.push(`/s/${shop.slug}/owner/cab/setup`);
+        } else {
+          router.push(`/s/${shop.slug}/setup`);
+        }
       }, 1500);
     } catch (err) {
       console.error("Failed to create shop:", err);
@@ -192,12 +197,14 @@ export default function OnboardingPage() {
         if (err.status === 409) {
           setError("A shop with this name already exists. Please choose a different name.");
         } else if (err.status === 422) {
-          setError(err.detail || "Invalid input. Please check your form data.");
+          const detail = typeof err.detail === 'string' ? err.detail : JSON.stringify(err.detail);
+          setError(detail || "Invalid input. Please check your form data.");
         } else {
           setError(getErrorMessage(err));
         }
       } else {
-        setError("Failed to create shop. Please try again.");
+        const errorMsg = err instanceof Error ? err.message : "Failed to create shop. Please try again.";
+        setError(errorMsg);
       }
     } finally {
       setIsSubmitting(false);

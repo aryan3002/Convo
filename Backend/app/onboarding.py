@@ -29,6 +29,8 @@ class CreateShopRequest(BaseModel):
     timezone: str = Field(default="America/Phoenix")
     address: str | None = None
     category: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
     owner_user_id: str = Field(..., min_length=1, max_length=255, description="Auth provider user ID")
 
     @field_validator("name")
@@ -179,7 +181,9 @@ async def create_shop(
         timezone=request.timezone,
         address=request.address,
         category=request.category,
-        phone_number=request.phone_number  # Also store in legacy column
+        phone_number=request.phone_number,  # Also store in legacy column
+        latitude=request.latitude,
+        longitude=request.longitude
     )
     db.add(new_shop)
     await db.flush()  # Get shop.id without committing

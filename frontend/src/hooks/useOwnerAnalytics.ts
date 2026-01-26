@@ -31,6 +31,8 @@ export function useOwnerAnalytics(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchSummary = useCallback(async (rangeValue: AnalyticsRange = range) => {
+    if (!shopSlug) return;
+    
     setLoading(true);
     setError(null);
     try {
@@ -55,7 +57,7 @@ export function useOwnerAnalytics(shopSlug?: string) {
     } finally {
       setLoading(false);
     }
-  }, [range, getEndpoint]);
+  }, [range, getEndpoint, shopSlug]);
 
   const changeRange = useCallback((newRange: AnalyticsRange) => {
     setRange(newRange);

@@ -36,6 +36,8 @@ export function useOwnerCustomerLookup(shopSlug?: string) {
   }, [shopSlug]);
 
   const lookupCustomer = useCallback(async (searchIdentity?: string) => {
+    if (!shopSlug) return null;
+    
     const search = (searchIdentity || identity).trim();
     if (!search) {
       setError("Please enter an email or phone number");
@@ -75,12 +77,12 @@ export function useOwnerCustomerLookup(shopSlug?: string) {
       }
     } catch (err) {
       console.error("Failed to lookup customer:", err);
-      setError("Network error - could not reach server");
+      setError("Network error");
       return null;
     } finally {
       setLoading(false);
     }
-  }, [identity, getEndpoint]);
+  }, [identity, getEndpoint, shopSlug]);
 
   const clearProfile = useCallback(() => {
     setProfile(null);

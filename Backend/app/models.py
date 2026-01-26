@@ -604,3 +604,26 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
+
+
+# ============================================================================
+# CAB SERVICES MODELS (Import from cab_models for convenience)
+# ============================================================================
+# These are defined in cab_models.py to maintain isolation.
+# Re-exported here for convenience in imports.
+
+from .cab_models import (
+    CabBooking,
+    CabBookingChannel,
+    CabBookingStatus,
+    CabPricingRule,
+    CabVehicleType,
+)
+
+__all_cab__ = [
+    "CabBooking",
+    "CabBookingChannel",
+    "CabBookingStatus",
+    "CabPricingRule",
+    "CabVehicleType",
+]

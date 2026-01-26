@@ -35,6 +35,7 @@ export function useOwnerTimeOffRequests(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchPendingRequests = useCallback(async () => {
+    if (!shopSlug) return;
     setLoading(true);
     setError(null);
     try {

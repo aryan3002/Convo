@@ -36,7 +36,9 @@ export function useOwnerCallSummaries(shopSlug?: string) {
     return `${API_BASE}${path}`;
   }, [shopSlug]);
 
-  const fetchCallSummaries = useCallback(async (limit: number = 20) => {
+  const fetchCallSummaries = useCallback (async (limit: number = 20) => {
+    if (!shopSlug) return [];
+    
     setLoading(true);
     setError(null);
     try {
@@ -69,7 +71,7 @@ export function useOwnerCallSummaries(shopSlug?: string) {
     } finally {
       setLoading(false);
     }
-  }, [getEndpoint]);
+  }, [getEndpoint, shopSlug]);
 
   const toggleExpanded = useCallback(() => {
     setExpanded((prev) => {

@@ -51,6 +51,7 @@ class ShopContext:
         shop_slug: URL-safe identifier (e.g., "bishops-tempe"), may be None if resolved by ID
         shop_name: Human-readable shop name
         timezone: IANA timezone string (e.g., "America/Phoenix")
+        category: Business type (e.g., "salon", "cab") - used for dashboard routing
         source: How this context was determined (for audit logging)
     """
     
@@ -58,11 +59,24 @@ class ShopContext:
     shop_slug: Optional[str] = None
     shop_name: Optional[str] = None
     timezone: str = "America/Phoenix"
+    category: Optional[str] = None
     source: ShopResolutionSource = ShopResolutionSource.DEFAULT_FALLBACK
     
     def __post_init__(self):
         if self.shop_id <= 0:
             raise ValueError(f"shop_id must be positive, got {self.shop_id}")
+    
+    @property
+    def is_cab_service(self) -> bool:
+        """Check if this is a cab/transportation business."""
+        return self.category == "cab"
+    
+    @property
+    def owner_dashboard_path(self) -> str:
+        """Get the appropriate owner dashboard path based on category."""
+        if self.is_cab_service:
+            return f"/s/{self.shop_slug}/owner/cab"
+        return f"/s/{self.shop_slug}/owner"
 
 
 # ────────────────────────────────────────────────────────────────
@@ -95,6 +109,7 @@ async def get_legacy_default_shop_context(session: AsyncSession) -> ShopContext:
         shop_slug=shop.slug,
         shop_name=shop.name,
         timezone=shop.timezone,
+        category=shop.category,
         source=ShopResolutionSource.DEFAULT_FALLBACK,
     )
 
@@ -128,6 +143,7 @@ async def resolve_shop_from_slug(
         shop_slug=shop.slug,
         shop_name=shop.name,
         timezone=shop.timezone,
+        category=shop.category,
         source=ShopResolutionSource.URL_SLUG,
     )
 
@@ -192,6 +208,7 @@ async def resolve_shop_from_twilio_to(
         shop_slug=shop.slug,
         shop_name=shop.name,
         timezone=shop.timezone,
+        category=shop.category,
         source=ShopResolutionSource.TWILIO_TO,
     )
 
@@ -239,6 +256,7 @@ async def resolve_shop_from_api_key(
         shop_slug=shop.slug,
         shop_name=shop.name,
         timezone=shop.timezone,
+        category=shop.category,
         source=ShopResolutionSource.API_KEY,
     )
 

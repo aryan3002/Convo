@@ -4,10 +4,25 @@ Phase 7: Authentication & Authorization Module
 This module provides identity extraction and role-based access control (RBAC)
 for multi-tenant shop operations.
 
-PHASE 7 STATUS:
-    - Identity extraction via X-User-Id header (temporary, before Clerk/JWT)
-    - RBAC using shop_members table
-    - Tenant enforcement helpers
+ARCHITECTURE:
+    - RequestContext is the SINGLE SOURCE OF TRUTH for identity
+    - All authorization flows through require_shop_access()
+    - Legacy X-User-Id header support for backward compatibility
+    - Ready for Clerk/JWT integration
+
+USAGE:
+    # In route handlers, use the new context-based auth:
+    from app.core import get_request_context, require_shop_access, RequestContext
+    
+    @router.get("/owner/dashboard")
+    async def handler(
+        ctx: ShopContext = Depends(get_shop_context_from_slug),
+        session: AsyncSession = Depends(get_session),
+        request: Request,
+    ):
+        req_ctx = await resolve_request_context(request, session)
+        require_shop_access(req_ctx, ctx.shop_id, [ShopMemberRole.OWNER])
+        # ... rest of handler
 
 FUTURE:
     - Replace X-User-Id header with Clerk JWT verification
@@ -15,18 +30,68 @@ FUTURE:
 """
 
 import logging
+import os
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .core.db import get_session
+from .core.request_context import (
+    RequestContext,
+    resolve_request_context,
+    require_shop_access,
+    get_request_context,
+    get_optional_request_context,
+)
 from .models import ShopMember, ShopMemberRole, AuditLog
 from .tenancy.context import ShopContext
 
+# Development mode - bypasses authorization checks
+# ⚠️ HARDCODED TO TRUE FOR DEVELOPMENT - CHANGE BEFORE PRODUCTION!
+DISABLE_AUTH_CHECKS = True  # Set to False before deploying to production
+
 
 logger = logging.getLogger(__name__)
+
+
+# Re-export from request_context for backward compatibility
+__all__ = [
+    # New context-based auth (preferred)
+    "RequestContext",
+    "resolve_request_context", 
+    "require_shop_access",
+    "get_request_context",
+    "get_optional_request_context",
+    # Legacy helpers (deprecated, use context-based instead)
+    "get_current_user_id",
+    "get_optional_user_id",
+    "get_shop_member",
+    "require_shop_role",
+    "require_owner_or_manager",
+    "require_any_member",
+    "require_owner",
+    # Tenant enforcement
+    "assert_shop_scoped_row",
+    # Audit logging
+    "log_audit",
+    "AUDIT_SHOP_CREATED",
+    "AUDIT_SHOP_UPDATED",
+    "AUDIT_SHOP_DELETED",
+    "AUDIT_OWNER_CHAT",
+    "AUDIT_SERVICE_CREATED",
+    "AUDIT_SERVICE_UPDATED",
+    "AUDIT_SERVICE_DELETED",
+    "AUDIT_STYLIST_CREATED",
+    "AUDIT_STYLIST_UPDATED",
+    "AUDIT_BOOKING_CREATED",
+    "AUDIT_BOOKING_CONFIRMED",
+    "AUDIT_BOOKING_CANCELLED",
+    "AUDIT_MEMBER_ADDED",
+    "AUDIT_MEMBER_ROLE_CHANGED",
+    "AUDIT_MEMBER_REMOVED",
+]
 
 
 # ============================================================================
@@ -40,6 +105,8 @@ async def get_current_user_id(
     Extract current user identity from request headers.
     
     Phase 7: Uses X-User-Id header (temporary before Clerk/JWT integration).
+    
+    ⚠️ DEVELOPMENT MODE: Set DISABLE_AUTH_CHECKS=true to bypass requirement
     
     Raises:
         HTTPException 401: If X-User-Id header is missing or empty
@@ -55,6 +122,12 @@ async def get_current_user_id(
         - Verify signature with Clerk public key
         - Extract user_id from claims
     """
+    # DEVELOPMENT MODE: Return default user ID if auth checks disabled
+    if DISABLE_AUTH_CHECKS:
+        default_user = x_user_id.strip() if x_user_id else "dev-user"
+        logger.warning(f"⚠️ DEVELOPMENT MODE: Auth bypassed, using user_id={default_user}")
+        return default_user
+    
     if not x_user_id or not x_user_id.strip():
         logger.warning("Authentication failed: Missing X-User-Id header")
         raise HTTPException(

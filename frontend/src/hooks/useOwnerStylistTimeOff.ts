@@ -30,6 +30,8 @@ export function useOwnerStylistTimeOff(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchTimeOffForStylist = useCallback(async (stylistId: number) => {
+    if (!shopSlug) return [];
+    
     // Skip if already loaded
     if (timeOffEntries[stylistId]) return timeOffEntries[stylistId];
     
@@ -58,7 +60,7 @@ export function useOwnerStylistTimeOff(shopSlug?: string) {
       setLoading(false);
     }
     return [];
-  }, [timeOffEntries, getEndpoint]);
+  }, [timeOffEntries, getEndpoint, shopSlug]);
 
   const toggleStylistTimeOff = useCallback((stylistId: number) => {
     const next = openStylistId === stylistId ? null : stylistId;

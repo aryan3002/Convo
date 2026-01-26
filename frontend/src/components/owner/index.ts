@@ -10,3 +10,6 @@ export { CustomerLookupCard } from "./CustomerLookupCard";
 export { CallSummariesSection } from "./CallSummariesSection";
 export { TimeOffApprovalCard } from "./TimeOffApprovalCard";
 export { ServiceBookingsModal, ServiceBookingBadge } from "./ServiceBookingsModal";
+
+// Cab owner components
+export { CabSummaryBar } from "./CabSummaryBar";

@@ -33,6 +33,8 @@ export function useOwnerSchedule(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchSchedule = useCallback(async (targetDate = date) => {
+    if (!shopSlug) return;
+    
     setLoading(true);
     setError(null);
     try {
@@ -63,7 +65,7 @@ export function useOwnerSchedule(shopSlug?: string) {
     } finally {
       setLoading(false);
     }
-  }, [date, getEndpoint]);
+  }, [date, getEndpoint, shopSlug]);
 
   const changeDate = useCallback((newDate: string) => {
     setDate(newDate);

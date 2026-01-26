@@ -32,10 +32,12 @@ import {
   Trash2,
   Check,
   Save,
+  Car,
 } from "lucide-react";
 import {
   getApiBase,
   getShopBySlug,
+  getShopInfo,
   getServices,
   getStylists,
   getStoredUserId,
@@ -44,6 +46,7 @@ import {
   getErrorMessage,
   isApiError,
   type Shop,
+  type ShopInfo,
   type Service,
   type Stylist,
 } from "@/lib/api";
@@ -122,6 +125,7 @@ export default function ShopOwnerDashboard() {
   const [shop, setShop] = useState<Shop | null>(null);
   const [shopLoading, setShopLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [isRedirecting, setIsRedirecting] = useState(false);
 
   // Data State
   const [services, setServices] = useState<Service[]>([]);
@@ -148,16 +152,23 @@ export default function ShopOwnerDashboard() {
   // View State
   const [rightView, setRightView] = useState<RightView>("services");
 
-  // Integrated hooks for all features
-  const promos = useOwnerPromos(slug);
-  const analytics = useOwnerAnalytics(slug);
-  const schedule = useOwnerSchedule(slug);
-  const pinManagement = useOwnerPinManagement(slug);
-  const customerLookup = useOwnerCustomerLookup(slug);
-  const callSummaries = useOwnerCallSummaries(slug);
-  const timeOffRequests = useOwnerTimeOffRequests(slug);
-  const serviceBookings = useOwnerServiceBookings(slug);
-  const stylistTimeOff = useOwnerStylistTimeOff(slug);
+  // Note: Cab shop redirect now happens in loadShop() using server-authoritative /info endpoint
+  // The isRedirecting flag prevents double redirects
+
+  // Only run salon hooks if NOT a cab shop (shop will be null if redirected)
+  const isCabShop = shop?.category === "cab";
+  const shouldLoadSalonData = !isCabShop && !isRedirecting && shop !== null;
+
+  // Integrated hooks for all features (only for salon/service shops)
+  const promos = useOwnerPromos(shouldLoadSalonData ? slug : undefined);
+  const analytics = useOwnerAnalytics(shouldLoadSalonData ? slug : undefined);
+  const schedule = useOwnerSchedule(shouldLoadSalonData ? slug : undefined);
+  const pinManagement = useOwnerPinManagement(shouldLoadSalonData ? slug : undefined);
+  const customerLookup = useOwnerCustomerLookup(shouldLoadSalonData ? slug : undefined);
+  const callSummaries = useOwnerCallSummaries(shouldLoadSalonData ? slug : undefined);
+  const timeOffRequests = useOwnerTimeOffRequests(shouldLoadSalonData ? slug : undefined);
+  const serviceBookings = useOwnerServiceBookings(shouldLoadSalonData ? slug : undefined);
+  const stylistTimeOff = useOwnerStylistTimeOff(shouldLoadSalonData ? slug : undefined);
 
   // Quick actions
   const quickActions = useMemo(
@@ -190,6 +201,20 @@ export default function ShopOwnerDashboard() {
       setAuthError(null);
 
       try {
+        // First, get shop info with routing hints from server
+        // This is the SERVER-AUTHORITATIVE source for routing decisions
+        const shopInfo = await getShopInfo(slug);
+        
+        // If server says this is a cab service, redirect immediately
+        // Don't wait to load full shop data - trust the server
+        if (shopInfo.is_cab_service && !isRedirecting) {
+          setIsRedirecting(true);
+          console.log(`[Owner Dashboard] Server indicates cab service, redirecting to ${shopInfo.owner_dashboard_path}`);
+          router.replace(shopInfo.owner_dashboard_path);
+          return; // Don't continue loading salon data
+        }
+        
+        // For non-cab shops, get the full shop data for the dashboard
         const shopData = await getShopBySlug(slug);
         setShop(shopData);
       } catch (err) {
@@ -207,7 +232,7 @@ export default function ShopOwnerDashboard() {
     if (slug) {
       loadShop();
     }
-  }, [slug]);
+  }, [slug, router, isRedirecting]);
 
   // ──────────────────────────────────────────────────────────
   // Data Fetching
@@ -846,6 +871,14 @@ export default function ShopOwnerDashboard() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => router.push(`/s/${slug}/owner/cab`)}
+              className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 hover:text-white hover:border-[#00d4ff]/50 transition-all flex items-center gap-1.5"
+              title="Cab Services"
+            >
+              <Car className="w-3 h-3 text-[#00d4ff]" />
+              Cab Services
+            </button>
             <button
               onClick={() => router.push(`/employee/${slug}`)}
               className="text-xs px-3 py-1.5 rounded-full glass border border-white/10 text-gray-400 hover:text-white hover:border-[#a855f7]/50 transition-all flex items-center gap-1.5"

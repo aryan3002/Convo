@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -12,9 +12,10 @@ import {
   Sparkles,
   MapPin,
   Clock,
+  AlertCircle,
+  WifiOff,
 } from "lucide-react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:8000";
+import { getApiBase, apiFetch, isApiError } from "@/lib/api";
 
 type Shop = {
   id: number;
@@ -24,11 +25,15 @@ type Shop = {
   address?: string;
 };
 
+type FetchState = "idle" | "loading" | "success" | "error";
+type ErrorType = "network" | "server" | "empty" | null;
+
 export default function EmployeeShopSelectionPage() {
   const router = useRouter();
   const [shops, setShops] = useState<Shop[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [fetchState, setFetchState] = useState<FetchState>("idle");
+  const [errorType, setErrorType] = useState<ErrorType>(null);
+  const [errorMessage, setErrorMessage] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [recentShop, setRecentShop] = useState<string | null>(null);
 
@@ -41,33 +46,45 @@ export default function EmployeeShopSelectionPage() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchShops();
-  }, []);
+  const fetchShops = useCallback(async () => {
+    setFetchState("loading");
+    setErrorType(null);
+    setErrorMessage("");
 
-  async function fetchShops() {
-    setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/registry/shops`);
-      if (res.ok) {
-        const data = await res.json();
-        setShops(data);
-      } else {
-        const fallbackRes = await fetch(`${API_BASE}/shops`);
-        if (fallbackRes.ok) {
-          const data = await fallbackRes.json();
-          setShops(data);
-        } else {
-          setError("Unable to load shops. Please try again.");
-        }
+      // Use centralized apiFetch with proper proxy
+      const data = await apiFetch<Shop[]>("/registry/shops", { userId: false });
+      setShops(data);
+      setFetchState("success");
+      
+      if (data.length === 0) {
+        setErrorType("empty");
       }
     } catch (err) {
       console.error("Failed to fetch shops:", err);
-      setError("Connection error. Please check if the server is running.");
-    } finally {
-      setLoading(false);
+      setFetchState("error");
+      
+      if (isApiError(err)) {
+        if (err.status === 503) {
+          setErrorType("network");
+          setErrorMessage("Backend server is unavailable. Please try again later.");
+        } else if (err.status >= 500) {
+          setErrorType("server");
+          setErrorMessage("Server error. Please try again later.");
+        } else {
+          setErrorType("server");
+          setErrorMessage(err.detail || "Failed to load shops.");
+        }
+      } else {
+        setErrorType("network");
+        setErrorMessage("Connection error. Please check your network.");
+      }
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    fetchShops();
+  }, [fetchShops]);
 
   function selectShop(slug: string) {
     localStorage.setItem("employee_recent_shop", slug);
@@ -81,6 +98,8 @@ export default function EmployeeShopSelectionPage() {
   );
 
   const hasRecentShop = recentShop && shops.find((s) => s.slug === recentShop);
+  const isLoading = fetchState === "loading";
+  const hasError = fetchState === "error";
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center p-4 relative overflow-hidden">
@@ -169,18 +188,27 @@ export default function EmployeeShopSelectionPage() {
           </div>
 
           <div className="space-y-2 max-h-[300px] overflow-y-auto">
-            {loading ? (
+            {isLoading ? (
               <div className="text-center py-8">
                 <Loader2 className="w-8 h-8 text-[#00d4ff] animate-spin mx-auto mb-2" />
                 <p className="text-sm text-gray-400">Loading shops...</p>
               </div>
-            ) : error ? (
+            ) : hasError ? (
               <div className="text-center py-8">
-                <Store className="w-10 h-10 text-gray-600 mx-auto mb-2" />
-                <p className="text-sm text-red-400">{error}</p>
+                {errorType === "network" ? (
+                  <WifiOff className="w-10 h-10 text-amber-500 mx-auto mb-2" />
+                ) : (
+                  <AlertCircle className="w-10 h-10 text-red-500 mx-auto mb-2" />
+                )}
+                <p className="text-sm text-red-400 mb-1">{errorMessage}</p>
+                <p className="text-xs text-gray-500 mb-3">
+                  {errorType === "network" 
+                    ? "Make sure the backend server is running." 
+                    : "Please try again later."}
+                </p>
                 <button
                   onClick={fetchShops}
-                  className="mt-3 text-sm text-[#00d4ff] hover:text-[#00d4ff]/80 transition-colors"
+                  className="text-sm text-[#00d4ff] hover:text-[#00d4ff]/80 transition-colors"
                 >
                   Try again
                 </button>

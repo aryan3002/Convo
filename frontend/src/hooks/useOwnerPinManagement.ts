@@ -31,6 +31,8 @@ export function useOwnerPinManagement(shopSlug?: string) {
   }, [shopSlug]);
 
   const fetchPinStatus = useCallback(async (stylistId: number) => {
+    if (!shopSlug) return;
+    
     try {
       const userId = getStoredUserId();
       if (!userId) {
@@ -50,7 +52,7 @@ export function useOwnerPinManagement(shopSlug?: string) {
     } catch (err) {
       console.error("Failed to fetch PIN status:", err);
     }
-  }, [getEndpoint]);
+  }, [getEndpoint, shopSlug]);
 
   const fetchAllPinStatuses = useCallback(async (stylistIds: number[]) => {
     for (const stylistId of stylistIds) {

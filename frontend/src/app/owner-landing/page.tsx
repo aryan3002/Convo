@@ -12,6 +12,7 @@ import {
   Scissors,
   MessageSquare,
   UserCircle,
+  Car,
 } from "lucide-react";
 import { getStoredUserId } from "@/lib/api";
 
@@ -175,6 +176,32 @@ export default function OwnerLandingPage() {
               </form>
             </motion.div>
           </motion.div>
+
+          {/* Cab Owner Card - Full Width */}
+          <motion.button
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.12 }}
+            whileHover={{ scale: 1.02, y: -2 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={() => router.push("/onboarding/cab")}
+            className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#10b981]/30 transition-all group mb-4 flex items-center justify-between"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#10b981]/20 to-[#06b6d4]/20 flex items-center justify-center border border-white/10 group-hover:shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all">
+                <Car className="w-6 h-6 text-[#10b981]" />
+              </div>
+              <div className="text-left">
+                <h3 className="text-base font-semibold text-white">
+                  I Run a Cab Service
+                </h3>
+                <p className="text-xs text-gray-400">
+                  Set up your cab/taxi business with driver management and ride booking
+                </p>
+              </div>
+            </div>
+            <ArrowRight className="w-5 h-5 text-gray-500 group-hover:text-[#10b981] group-hover:translate-x-1 transition-all" />
+          </motion.button>
 
           {/* Employee Portal Card */}
           <motion.button
