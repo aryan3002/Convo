@@ -1,9 +1,5 @@
-Got it — clean, human, **copy-paste friendly**, no fluff.
-Here’s a **short, clear README** that works perfectly for GitHub 👇
 
----
-
-# Convo — AI Front Desk for Salons (Demo)
+# Convo — AI Front Desk for Small Shops (Demo)
 
 This repository is part of **Convo**, an AI-powered front desk solution built for salons and local service businesses.
 
