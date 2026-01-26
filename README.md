@@ -4,7 +4,7 @@
 This repository is part of **Convo**, an AI-powered front desk solution built for salons and local service businesses.
 
 ⚠️ **Important Note**
-The website https://www.convoaiservices.com/ is only a demo and marketing showcase of the product.
+The website https://www.convoaiservices.com/ is only a demo and showcase of the product.
 It is not the full production application or complete codebase.
 
 ## What Convo Does
