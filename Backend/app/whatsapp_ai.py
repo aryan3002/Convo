@@ -132,3 +132,63 @@ Return ONLY a JSON object with these exact keys:
     except Exception as e:
         logger.error(f"AI parsing failed: {e}")
         return None
+
+async def detect_cancel_intent(message: str) -> bool:
+    """
+    Detect if customer wants to cancel a ride.
+    
+    Args:
+        message: Customer's WhatsApp message
+        
+    Returns:
+        True if cancel intent detected, False otherwise
+    """
+    if not openai.api_key:
+        # Fallback to keyword matching
+        cancel_keywords = ['cancel', 'cancellation', 'delete', 'remove', 'stop', 'abort']
+        message_lower = message.lower()
+        return any(keyword in message_lower for keyword in cancel_keywords)
+    
+    try:
+        client = openai.OpenAI(api_key=openai.api_key)
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a cab booking assistant analyzing customer intent.
+
+Determine if the customer wants to CANCEL an existing ride/booking.
+
+Examples of cancel intent:
+- "I want to cancel my ride"
+- "Cancel booking"
+- "Delete my trip"
+- "I don't need the cab anymore"
+- "Please remove my booking"
+
+Return ONLY a JSON object:
+{
+  "is_cancel": true or false
+}"""
+                },
+                {
+                    "role": "user",
+                    "content": f"Does this message indicate cancel intent? Message: {message}"
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        
+        import json
+        result = json.loads(response.choices[0].message.content)
+        return result.get('is_cancel', False)
+        
+    except Exception as e:
+        logger.error(f"Cancel intent detection failed: {e}")
+        # Fallback to keyword matching
+        cancel_keywords = ['cancel', 'cancellation', 'delete', 'remove', 'stop', 'abort']
+        message_lower = message.lower()
+        return any(keyword in message_lower for keyword in cancel_keywords)

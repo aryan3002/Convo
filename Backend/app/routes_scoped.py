@@ -2904,12 +2904,22 @@ async def confirm_cab_booking(
     
     logger.info(f"Cab booking {booking.id} confirmed by user {user_id}")
     
-    # Send confirmation email to customer
+    # Send WhatsApp confirmation to customer
     try:
-        from .cab_notifications import notify_customer_booking_confirmed
-        await notify_customer_booking_confirmed(session, booking)
+        from .whatsapp import send_whatsapp_message, format_owner_confirmation_message
+        
+        if booking.customer_phone:
+            confirmation_msg = format_owner_confirmation_message(
+                booking_id=str(booking.id),
+                pickup_text=booking.pickup_text,
+                drop_text=booking.drop_text,
+                pickup_time=booking.pickup_time.isoformat(),
+                final_price=booking.final_price,
+            )
+            send_whatsapp_message(booking.customer_phone, confirmation_msg)
+            logger.info(f"✅ WhatsApp confirmation sent to {booking.customer_phone}")
     except Exception as e:
-        logger.error(f"Failed to send confirmation email: {e}")
+        logger.error(f"Failed to send WhatsApp confirmation: {e}")
     
     return CabBookingActionResponse(
         success=True,
@@ -2979,40 +2989,25 @@ async def reject_cab_booking(
     
     logger.info(f"Cab booking {booking.id} rejected by user {user_id}: {reason}")
     
-    # Send WhatsApp notification to customer if booking was via WhatsApp
-    if booking.channel == CabBookingChannel.WHATSAPP and booking.customer_phone:
+    # Send WhatsApp notification to customer
+    if booking.customer_phone:
         try:
-            from .whatsapp import send_whatsapp_message
+            from .whatsapp import send_whatsapp_message, format_rejection_notification
             
             customer_number = booking.customer_phone
             if not customer_number.startswith('whatsapp:'):
                 customer_number = f'whatsapp:{customer_number}'
             
-            message = f"""❌ *Booking Cancelled*
-
-🎫 Reference: #{str(booking.id)[:8].upper()}
-
-📍 From: {booking.pickup_text}
-📍 To: {booking.drop_text}
-
-"""
-            
-            if reason:
-                message += f"Reason: {reason}\n\n"
-            
-            message += "We apologize for any inconvenience. Please feel free to make a new booking or contact us for assistance."
-            
-            send_whatsapp_message(customer_number, message)
-            logger.info(f"Rejection WhatsApp notification sent to {customer_number}")
+            rejection_msg = format_rejection_notification(
+                booking_id=str(booking.id),
+                pickup_text=booking.pickup_text,
+                drop_text=booking.drop_text,
+                reason=reason,
+            )
+            send_whatsapp_message(customer_number, rejection_msg)
+            logger.info(f"✅ WhatsApp rejection notice sent to {customer_number}")
         except Exception as e:
             logger.error(f"Failed to send rejection WhatsApp: {e}")
-    
-    # Send rejection email to customer
-    try:
-        from .cab_notifications import notify_customer_booking_rejected
-        await notify_customer_booking_rejected(session, booking)
-    except Exception as e:
-        logger.error(f"Failed to send rejection email: {e}")
     
     return CabBookingActionResponse(
         success=True,
@@ -3805,6 +3800,123 @@ async def complete_cab_ride(
     )
 
 
+@router.post(
+    "/cab/cancel",
+    response_model=CabBookingActionResponse,
+    tags=["cab-customer"],
+    summary="Customer cancel ride",
+    description="Allow customer to cancel their own ride via phone number authentication.",
+)
+async def customer_cancel_ride(
+    booking_id: str,
+    customer_phone: str,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Customer self-service cancellation endpoint.
+    
+    Validates that the phone number matches the booking.
+    Only allows cancellation of PENDING or CONFIRMED rides.
+    """
+    from uuid import UUID
+    
+    try:
+        booking_uuid = UUID(booking_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid booking ID format",
+        )
+    
+    # Normalize phone number
+    normalized_phone = customer_phone.strip()
+    if normalized_phone.startswith('whatsapp:'):
+        normalized_phone = normalized_phone.replace('whatsapp:', '')
+    if not normalized_phone.startswith('+'):
+        normalized_phone = f'+{normalized_phone}'
+    
+    result = await session.execute(
+        select(CabBooking).where(
+            CabBooking.id == booking_uuid,
+            CabBooking.shop_id == ctx.shop_id,
+        )
+    )
+    booking = result.scalar_one_or_none()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found",
+        )
+    
+    # Verify customer owns this booking
+    booking_phone = booking.customer_phone.strip()
+    if booking_phone.startswith('whatsapp:'):
+        booking_phone = booking_phone.replace('whatsapp:', '')
+    if not booking_phone.startswith('+'):
+        booking_phone = f'+{booking_phone}'
+    
+    if booking_phone != normalized_phone:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Phone number does not match booking",
+        )
+    
+    # Check if booking can be cancelled
+    if booking.status not in [CabBookingStatus.PENDING, CabBookingStatus.CONFIRMED]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot cancel a {booking.status.value} booking",
+        )
+    
+    # Cancel the booking
+    booking.status = CabBookingStatus.CANCELLED
+    booking.cancelled_at = datetime.utcnow()
+    booking.cancelled_by = f"customer:{normalized_phone}"
+    
+    await session.commit()
+    
+    logger.info(f"Cab booking {booking.id} cancelled by customer {normalized_phone}")
+    
+    # Notify owner/shop about cancellation
+    try:
+        # Parse pickup time for display
+        try:
+            if hasattr(booking.pickup_time, 'strftime'):
+                time_display = booking.pickup_time.strftime("%B %d at %I:%M %p")
+            else:
+                dt = datetime.fromisoformat(str(booking.pickup_time).replace('Z', '+00:00'))
+                time_display = dt.strftime("%B %d at %I:%M %p")
+        except:
+            time_display = str(booking.pickup_time)
+        
+        # Log detailed notification (in production, send email/SMS to shop owner)
+        logger.warning(
+            f"🔔 OWNER ALERT: Customer cancelled booking!\n"
+            f"   Booking ID: {booking.id}\n"
+            f"   Customer: {booking.customer_name} ({booking.customer_phone})\n"
+            f"   Route: {booking.pickup_text} → {booking.drop_text}\n"
+            f"   Pickup Time: {time_display}\n"
+            f"   Fare: ${booking.final_price:.2f}\n"
+            f"   Shop: {ctx.shop_slug}"
+        )
+        
+        # TODO: Send actual notification via email/SMS to shop owner
+        # Example: await send_email(shop_owner_email, subject, body)
+        # Example: send_sms(shop_owner_phone, message)
+        
+    except Exception as e:
+        logger.error(f"Failed to notify owner of cancellation: {e}")
+    
+    return CabBookingActionResponse(
+        success=True,
+        booking_id=str(booking.id),
+        status=booking.status.value,
+        message="Ride cancelled successfully",
+    )
+
+
 # ============================================================================
 # PUBLIC CAB BOOKING (for customer-facing page)
 # ============================================================================
@@ -3896,14 +4008,14 @@ async def whatsapp_webhook(
     """
     Twilio WhatsApp webhook endpoint.
     
-    Handles incoming customer messages for cab bookings.
+    Handles incoming customer messages for cab bookings and cancellations.
     
     Flow:
-    1. Parse message to extract booking details
-    2. Calculate route and price
-    3. Send price quote to customer
-    4. Wait for confirmation (YES/NO)
-    5. Create booking if confirmed
+    1. Parse message to extract booking details OR detect cancel intent
+    2. If cancel: Show list of rides, handle selection
+    3. If booking: Calculate route and price
+    4. Send price quote to customer
+    5. Create booking (auto-confirm for now)
     6. Send confirmation message
     
     Twilio sends form-encoded data:
@@ -3919,8 +4031,12 @@ async def whatsapp_webhook(
         format_error_message,
         send_whatsapp_message,
         get_help_message,
+        format_ride_selection_list,
+        format_no_rides_to_cancel,
+        format_cancellation_confirmation,
     )
-    from .whatsapp_ai import parse_booking_with_ai
+    from .whatsapp_ai import parse_booking_with_ai, detect_cancel_intent
+    from .whatsapp_session import get_session as get_whatsapp_session, set_session, clear_session
     from .cab_booking import (
         get_pricing_rule_for_shop,
         calculate_route_and_price,
@@ -3933,11 +4049,169 @@ async def whatsapp_webhook(
     message_body = Body.strip()
     customer_number = From  # Format: whatsapp:+1234567890
     
+    # Normalize phone for lookups
+    normalized_phone = customer_number.replace('whatsapp:', '')
+    if not normalized_phone.startswith('+'):
+        normalized_phone = f'+{normalized_phone}'
+    
+    # Check if customer has an active session (e.g., selecting ride to cancel)
+    whatsapp_session = get_whatsapp_session(customer_number)
+    
+    if whatsapp_session and whatsapp_session.get('state') == 'awaiting_cancel_selection':
+        # Customer is selecting which ride to cancel
+        try:
+            # Extract number from message
+            selection = message_body.strip()
+            
+            if selection.upper() == 'CANCEL':
+                clear_session(customer_number)
+                send_whatsapp_message(customer_number, "❌ Cancellation aborted.")
+                return {"status": "cancel_aborted"}
+            
+            # Try to parse as number
+            ride_index = int(selection) - 1
+            bookings = whatsapp_session.get('data', {}).get('bookings', [])
+            
+            if ride_index < 0 or ride_index >= len(bookings):
+                send_whatsapp_message(
+                    customer_number,
+                    f"Invalid selection. Please reply with a number between 1 and {len(bookings)}, or 'CANCEL' to abort."
+                )
+                return {"status": "invalid_selection"}
+            
+            # Get the selected booking
+            selected_booking_data = bookings[ride_index]
+            booking_id = selected_booking_data['id']
+            
+            # Cancel the booking via the endpoint
+            result = await session.execute(
+                select(CabBooking).where(
+                    CabBooking.id == booking_id,
+                    CabBooking.shop_id == ctx.shop_id,
+                )
+            )
+            booking = result.scalar_one_or_none()
+            
+            if not booking:
+                clear_session(customer_number)
+                send_whatsapp_message(customer_number, "❌ Booking not found.")
+                return {"status": "booking_not_found"}
+            
+            # Cancel it
+            booking.status = CabBookingStatus.CANCELLED
+            booking.cancelled_at = datetime.utcnow()
+            booking.cancelled_by = f"customer:{normalized_phone}"
+            
+            await session.commit()
+            
+            # Log owner notification
+            logger.warning(
+                f"🔔 OWNER ALERT: Customer cancelled booking via WhatsApp!\n"
+                f"   Booking ID: {booking.id}\n"
+                f"   Customer: {booking.customer_name} ({booking.customer_phone})\n"
+                f"   Route: {booking.pickup_text} → {booking.drop_text}\n"
+                f"   Shop: {ctx.shop_slug}"
+            )
+            
+            # Send confirmation
+            confirmation_msg = format_cancellation_confirmation(
+                booking_id=str(booking.id),
+                pickup_text=booking.pickup_text,
+                drop_text=booking.drop_text,
+            )
+            send_whatsapp_message(customer_number, confirmation_msg)
+            
+            # Clear session
+            clear_session(customer_number)
+            
+            logger.info(f"✅ Booking {booking.id} cancelled by customer {normalized_phone}")
+            return {"status": "booking_cancelled", "booking_id": str(booking.id)}
+            
+        except ValueError:
+            send_whatsapp_message(
+                customer_number,
+                "Invalid input. Please reply with a number or 'CANCEL'."
+            )
+            return {"status": "invalid_input"}
+        except Exception as e:
+            logger.exception(f"Error processing cancel selection: {e}")
+            clear_session(customer_number)
+            send_whatsapp_message(customer_number, "❌ An error occurred. Please try again.")
+            return {"status": "error"}
+    
     # Handle HELP command
     if message_body.upper() in ['HELP', 'HI', 'HELLO', 'START']:
         help_text = get_help_message()
         send_whatsapp_message(customer_number, help_text)
         return {"status": "help_sent"}
+    
+    # Check for cancel intent
+    is_cancel_request = await detect_cancel_intent(message_body)
+    
+    if is_cancel_request:
+        # Customer wants to cancel a ride
+        # Find their active bookings (PENDING or CONFIRMED)
+        result = await session.execute(
+            select(CabBooking).where(
+                CabBooking.shop_id == ctx.shop_id,
+                CabBooking.customer_phone.in_([customer_number, normalized_phone]),
+                CabBooking.status.in_([CabBookingStatus.PENDING, CabBookingStatus.CONFIRMED]),
+            ).order_by(CabBooking.pickup_time)
+        )
+        active_bookings = result.scalars().all()
+        
+        if not active_bookings:
+            # No rides to cancel
+            no_rides_msg = format_no_rides_to_cancel()
+            send_whatsapp_message(customer_number, no_rides_msg)
+            return {"status": "no_rides_to_cancel"}
+        
+        if len(active_bookings) == 1:
+            # Only one ride - cancel it directly
+            booking = active_bookings[0]
+            booking.status = CabBookingStatus.CANCELLED
+            booking.cancelled_at = datetime.utcnow()
+            booking.cancelled_by = f"customer:{normalized_phone}"
+            
+            await session.commit()
+            
+            # Log owner notification
+            logger.warning(
+                f"🔔 OWNER ALERT: Customer cancelled booking via WhatsApp!\n"
+                f"   Booking ID: {booking.id}\n"
+                f"   Customer: {booking.customer_name} ({booking.customer_phone})\n"
+                f"   Route: {booking.pickup_text} → {booking.drop_text}\n"
+                f"   Shop: {ctx.shop_slug}"
+            )
+            
+            confirmation_msg = format_cancellation_confirmation(
+                booking_id=str(booking.id),
+                pickup_text=booking.pickup_text,
+                drop_text=booking.drop_text,
+            )
+            send_whatsapp_message(customer_number, confirmation_msg)
+            
+            logger.info(f"✅ Booking {booking.id} cancelled by customer {normalized_phone}")
+            return {"status": "booking_cancelled", "booking_id": str(booking.id)}
+        
+        else:
+            # Multiple rides - show selection list
+            selection_msg = format_ride_selection_list(active_bookings)
+            send_whatsapp_message(customer_number, selection_msg)
+            
+            # Store bookings in session
+            booking_data = [
+                {
+                    'id': booking.id,
+                    'pickup_text': booking.pickup_text,
+                    'drop_text': booking.drop_text,
+                }
+                for booking in active_bookings
+            ]
+            set_session(customer_number, 'awaiting_cancel_selection', {'bookings': booking_data})
+            
+            logger.info(f"📋 Showed {len(active_bookings)} rides to {customer_number} for cancellation")
+            return {"status": "awaiting_selection", "ride_count": len(active_bookings)}
     
     # Handle YES/NO confirmation (simplified - in production use session state)
     if message_body.upper() in ['YES', 'NO', 'CONFIRM', 'CANCEL']:

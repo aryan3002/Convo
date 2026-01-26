@@ -324,6 +324,79 @@ We'll notify you when a driver is assigned. Thank you for choosing us! 🙏"""
     return message
 
 
+def format_owner_confirmation_message(
+    booking_id: str,
+    pickup_text: str,
+    drop_text: str,
+    pickup_time: str,
+    final_price: float
+) -> str:
+    """
+    Format owner confirmation notification to customer.
+    
+    Args:
+        booking_id: Booking reference ID
+        pickup_text: Pickup location
+        drop_text: Dropoff location
+        pickup_time: Scheduled pickup time (ISO format)
+        final_price: Final fare
+        
+    Returns:
+        Formatted notification message
+    """
+    # Parse ISO time to readable format
+    try:
+        dt = datetime.fromisoformat(pickup_time.replace('Z', '+00:00'))
+        time_display = dt.strftime("%B %d at %I:%M %p")
+    except:
+        time_display = pickup_time
+    
+    message = f"""✅ *Booking Confirmed by Owner!*
+
+🎫 Reference: #{booking_id[:8].upper()}
+
+📍 Pickup: {pickup_text}
+📍 Dropoff: {drop_text}
+🕐 Time: {time_display}
+💵 Fare: ${final_price:.2f}
+
+Your ride has been confirmed! We'll notify you when a driver is assigned. 🙏"""
+    
+    return message
+
+
+def format_rejection_notification(
+    booking_id: str,
+    pickup_text: str,
+    drop_text: str,
+    reason: Optional[str] = None
+) -> str:
+    """
+    Format booking rejection notification to customer.
+    
+    Args:
+        booking_id: Booking reference ID
+        pickup_text: Pickup location
+        drop_text: Dropoff location
+        reason: Optional rejection reason
+        
+    Returns:
+        Formatted notification message
+    """
+    reason_text = f"\n\n📝 Reason: {reason}" if reason else ""
+    
+    message = f"""❌ *Booking Cancelled*
+
+🎫 Reference: #{booking_id[:8].upper()}
+
+📍 From: {pickup_text}
+📍 To: {drop_text}{reason_text}
+
+We apologize for the inconvenience. Please try booking again or contact us for assistance. 🙏"""
+    
+    return message
+
+
 def format_driver_assigned_message(
     booking_id: str,
     driver_name: str,
@@ -353,6 +426,91 @@ def format_driver_assigned_message(
 Your driver will arrive at the scheduled time. Have a great trip! 🎉"""
     
     return message
+
+
+def format_cancellation_confirmation(
+    booking_id: str,
+    pickup_text: str,
+    drop_text: str
+) -> str:
+    """
+    Format cancellation confirmation for customer.
+    
+    Args:
+        booking_id: Booking reference ID
+        pickup_text: Pickup location
+        drop_text: Dropoff location
+        
+    Returns:
+        Formatted confirmation message
+    """
+    message = f"""✅ *Ride Cancelled Successfully*
+
+🎫 Reference: #{booking_id[:8].upper()}
+
+📍 From: {pickup_text}
+📍 To: {drop_text}
+
+Your ride has been cancelled. No charges will be applied. Book again anytime! 🙏"""
+    
+    return message
+
+
+def format_ride_selection_list(bookings: list) -> str:
+    """
+    Format list of rides for customer to select which one to cancel.
+    
+    Args:
+        bookings: List of booking objects
+        
+    Returns:
+        Formatted message with numbered list
+    """
+    message = "You have multiple upcoming rides. Reply with the number to cancel:\n\n"
+    
+    for idx, booking in enumerate(bookings, 1):
+        # Parse pickup time
+        try:
+            if hasattr(booking.pickup_time, 'strftime'):
+                time_display = booking.pickup_time.strftime("%b %d at %I:%M %p")
+            else:
+                dt = datetime.fromisoformat(str(booking.pickup_time).replace('Z', '+00:00'))
+                time_display = dt.strftime("%b %d at %I:%M %p")
+        except:
+            time_display = str(booking.pickup_time)
+        
+        # Get status badge
+        status_emoji = {
+            'PENDING': '⏳',
+            'CONFIRMED': '✅',
+            'COMPLETED': '🏁',
+            'REJECTED': '❌',
+            'CANCELLED': '❌'
+        }.get(booking.status.value if hasattr(booking.status, 'value') else booking.status, '📋')
+        
+        message += f"""*{idx}.* {status_emoji} #{str(booking.id)[:8].upper()}
+   📍 {booking.pickup_text} → {booking.drop_text}
+   🕐 {time_display}
+   💵 ${booking.final_price:.2f}
+
+"""
+    
+    message += "Reply with just the number (e.g., '1') or 'CANCEL' to abort."
+    return message
+
+
+def format_no_rides_to_cancel() -> str:
+    """
+    Format message when customer has no cancellable rides.
+    
+    Returns:
+        Formatted message
+    """
+    return """ℹ️ *No Active Rides*
+
+You don't have any upcoming rides to cancel.
+
+To book a new ride, send me your pickup and dropoff locations! 🚖"""
 
 
 def format_error_message(error_type: str) -> str:
