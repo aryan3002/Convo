@@ -27,8 +27,7 @@
 'use client';
 
 import { useAuth } from '@clerk/nextjs';
-import { useCallback, useEffect } from 'react';
-import { clearStoredUserId } from './api';
+import { useCallback } from 'react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/backend';
 
@@ -139,21 +138,4 @@ export function isApiClientError(error: unknown): error is ApiClientError {
     'message' in error &&
     'status' in error
   );
-}
-
-/**
- * Hook that automatically clears old localStorage auth when Clerk is loaded
- * This ensures we use Clerk JWT instead of legacy owner_user_id
- * 
- * Call this in your root layout or in a useEffect on pages that need auth
- */
-export function useClearLegacyAuth() {
-  const { isSignedIn } = useAuth();
-  
-  useEffect(() => {
-    // When user is signed in with Clerk, clear the old localStorage ID
-    if (isSignedIn) {
-      clearStoredUserId();
-    }
-  }, [isSignedIn]);
 }

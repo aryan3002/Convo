@@ -1,9 +1,9 @@
 """
 Clerk Authentication Module - JWT Verification for FastAPI Backend
 
-This module provides JWT token verification using Clerk's public JWKS endpoint.
+This module provides JWT token verification using PyJWT with Clerk's JWKS.
 It handles:
-- Fetching and caching public keys from Clerk
+- Fetching public keys from Clerk's API
 - Verifying JWT signatures using RS256
 - Validating token expiration and issuer
 - Extracting user information from verified tokens
@@ -19,54 +19,60 @@ Usage:
 
 import logging
 import jwt
-import ssl
-import certifi
+import json
 from functools import lru_cache
 from typing import Optional
 
 from fastapi import HTTPException, Header, Depends, status
-from jwt import PyJWKClient, PyJWKClientError
+import httpx
 
 from .core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
-def get_jwks_url() -> str:
-    """Get the JWKS URL from Clerk frontend API domain."""
-    settings = get_settings()
-    if not settings.clerk_frontend_api:
-        raise ValueError(
-            "CLERK_FRONTEND_API environment variable is not set. "
-            "Get this from your Clerk dashboard (usually something like 'myapp.clerk.accounts.dev')"
-        )
-    return f"https://{settings.clerk_frontend_api}/.well-known/jwks.json"
-
-
 @lru_cache(maxsize=1)
-def get_jwks_client() -> PyJWKClient:
+def fetch_clerk_jwks() -> dict:
     """
-    Create and cache a PyJWKClient for JWKS verification.
+    Fetch JWKS from Clerk's API with authentication.
     
-    The client is cached to avoid repeated HTTP requests to Clerk's JWKS endpoint.
-    In production, this typically fetches the keys once and caches them for hours.
+    Clerk's JWKS endpoint at api.clerk.com requires the secret key.
+    This is cached to avoid repeated requests.
     
-    Uses certifi's SSL certificates to avoid certificate verification errors on macOS.
+    Returns:
+        dict: The JWKS response containing public keys
     """
-    url = get_jwks_url()
-    logger.info(f"Creating JWKS client for URL: {url}")
+    settings = get_settings()
+    url = "https://api.clerk.com/v1/jwks"
     
-    # Create SSL context with certifi certificates (fixes macOS SSL issues)
-    ssl_context = ssl.create_default_context(cafile=certifi.where())
-    
-    # PyJWKClient doesn't directly support ssl_context, but we can configure urllib
-    # by setting the default SSL context for the process
-    import urllib.request
-    https_handler = urllib.request.HTTPSHandler(context=ssl_context)
-    opener = urllib.request.build_opener(https_handler)
-    urllib.request.install_opener(opener)
-    
-    return PyJWKClient(url)
+    try:
+        # Use httpx instead of urllib - less likely to be blocked by Cloudflare
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                url,
+                headers={
+                    'Authorization': f'Bearer {settings.clerk_secret_key}',
+                    'User-Agent': 'Convo-Backend/1.0',
+                }
+            )
+            response.raise_for_status()
+            jwks_data = response.json()
+            logger.info(f"Successfully fetched JWKS from Clerk API")
+            return jwks_data
+            
+    except httpx.HTTPStatusError as e:
+        error_body = e.response.text if e.response else 'No error body'
+        logger.error(f"HTTP {e.response.status_code} fetching JWKS: {error_body}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Unable to fetch Clerk JWKS: HTTP Error {e.response.status_code}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch JWKS from Clerk: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Unable to fetch Clerk JWKS: {str(e)}"
+        )
 
 
 def verify_clerk_token(token: str) -> dict:
@@ -74,7 +80,7 @@ def verify_clerk_token(token: str) -> dict:
     Verify a Clerk JWT token and return the decoded payload.
     
     This function:
-    1. Fetches the signing key from Clerk's JWKS endpoint
+    1. Fetches the signing keys from Clerk's JWKS endpoint (cached)
     2. Verifies the token signature using RS256
     3. Validates the issuer matches your Clerk domain
     4. Validates the token is not expired
@@ -87,7 +93,6 @@ def verify_clerk_token(token: str) -> dict:
         
     Raises:
         HTTPException 401: If token is invalid, expired, or signature doesn't match
-        HTTPException 500: If Clerk JWKS endpoint is unreachable
         
     Example:
         token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImtleTEifQ..."
@@ -97,29 +102,70 @@ def verify_clerk_token(token: str) -> dict:
     try:
         settings = get_settings()
         
-        # Get JWKS client (cached)
-        jwks_client = get_jwks_client()
+        # Fetch JWKS from Clerk API (cached)
+        jwks_data = fetch_clerk_jwks()
         
-        # Extract signing key from JWKS
-        # This fetches from Clerk's public endpoint and caches the keys
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        # Get the key ID from token header
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get('kid')
+        
+        if not kid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token header missing key ID (kid)",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Find the matching key in JWKS
+        signing_key = None
+        for key in jwks_data.get('keys', []):
+            if key.get('kid') == kid:
+                # PyJWT's PyJWK handles JWK to key conversion
+                try:
+                    from jwt import PyJWK
+                    signing_key = PyJWK.from_dict(key).key
+                except ImportError:
+                    # Fallback: manually construct key from JWK (for older PyJWT versions)
+                    # This should not happen with modern jwt library
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Unable to import PyJWT utilities"
+                    )
+                break
+        
+        if not signing_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"No matching key found for kid: {kid}",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         
         # Decode and verify the token
         # IMPORTANT: issuer MUST match your Clerk domain for security
         issuer = f"https://{settings.clerk_frontend_api}"
         
+        # First, decode without verification to see what's in the token
+        try:
+            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            token_issuer = unverified_payload.get('iss', 'MISSING')
+            token_user = unverified_payload.get('sub', 'MISSING')
+            
+            logger.info(f"Incoming JWT - issuer: '{token_issuer}', user_id: '{token_user}'")
+            logger.info(f"Expected issuer: '{issuer}'")
+        except Exception as e:
+            logger.warning(f"Could not decode unverified payload: {e}")
+            token_issuer = None
+            token_user = None
+        
         decoded = jwt.decode(
             token,
-            signing_key.key,
+            signing_key,
             algorithms=["RS256"],
             issuer=issuer,
-            # Audience validation is optional - Clerk may not set it
-            # If you set a custom audience in Clerk, add it here:
-            # audience="your-custom-audience"
             options={
-                "verify_signature": True,  # Always verify signature
-                "verify_exp": True,        # Always check expiration
-                "verify_iss": True,        # Always verify issuer
+                "verify_signature": True,
+                "verify_exp": True,
+                "verify_iss": True,
             }
         )
         
@@ -136,20 +182,28 @@ def verify_clerk_token(token: str) -> dict:
         
     except jwt.InvalidTokenError as e:
         logger.warning(f"Token verification failed: {str(e)}")
+        # Try to provide more debugging info
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+            logger.warning(f"Token issuer: {unverified.get('iss')}, Expected: https://{settings.clerk_frontend_api}")
+            logger.warning(f"Token sub (user_id): {unverified.get('sub')}")
+        except:
+            pass
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from e
         
-    except PyJWKClientError as e:
-        jwks_url = get_jwks_url()
-        logger.error(f"JWKS client error (Clerk unreachable?): {str(e)}")
-        logger.error(f"Attempted JWKS URL: {jwks_url}")
-        logger.error(f"Check that CLERK_FRONTEND_API is correct: {get_settings().clerk_frontend_api}")
+    except Exception as e:
+        # Catch any other errors (including JWKS fetch failures)
+        logger.error(f"Token verification error: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Authentication service temporarily unavailable",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token verification failed: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
         ) from e
 
 

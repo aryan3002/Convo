@@ -198,6 +198,8 @@ class CabBookingListItem(BaseModel):
     drop_text: str
     pickup_time: datetime
     vehicle_type: CabVehicleType
+    assigned_driver_id: Optional[int] = None
+    assigned_driver: Optional[dict] = None  # {"id": int, "name": str, "phone": str}
     distance_miles: Optional[float]
     final_price: Optional[float]
     customer_name: Optional[str]
@@ -407,6 +409,16 @@ def booking_to_detail_response(booking: CabBooking) -> CabBookingDetailResponse:
 
 def booking_to_list_item(booking: CabBooking) -> CabBookingListItem:
     """Convert a CabBooking to CabBookingListItem."""
+    # Prepare assigned driver info if present
+    assigned_driver_dict = None
+    if booking.assigned_driver:
+        assigned_driver_dict = {
+            "id": str(booking.assigned_driver.id),
+            "name": booking.assigned_driver.name,
+            "phone": booking.assigned_driver.phone,
+            "status": booking.assigned_driver.status.value,
+        }
+    
     return CabBookingListItem(
         booking_id=booking.id,
         status=booking.status,
@@ -420,4 +432,6 @@ def booking_to_list_item(booking: CabBooking) -> CabBookingListItem:
         customer_name=booking.customer_name,
         customer_phone=booking.customer_phone,
         created_at=booking.created_at,
+        assigned_driver_id=booking.assigned_driver_id,
+        assigned_driver=assigned_driver_dict,
     )

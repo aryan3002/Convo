@@ -5,10 +5,10 @@ This module provides identity extraction and role-based access control (RBAC)
 for multi-tenant shop operations.
 
 ARCHITECTURE:
+    - All authentication is via Clerk JWT tokens
     - RequestContext is the SINGLE SOURCE OF TRUTH for identity
     - All authorization flows through require_shop_access()
-    - Legacy X-User-Id header support for backward compatibility
-    - Ready for Clerk/JWT integration
+    - NO dev-user fallbacks - all requests must have valid JWT
 
 USAGE:
     # In route handlers, use the new context-based auth:
@@ -24,13 +24,14 @@ USAGE:
         require_shop_access(req_ctx, ctx.shop_id, [ShopMemberRole.OWNER])
         # ... rest of handler
 
-FUTURE:
-    - Replace X-User-Id header with Clerk JWT verification
-    - Add session/token management
+SECURITY:
+    - All authenticated endpoints require a valid Clerk JWT
+    - JWT is verified against Clerk's JWKS public keys
+    - No X-User-Id header accepted (removed for security)
+    - No dev-user fallback (removed for security)
 """
 
 import logging
-import os
 from typing import Optional
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -47,11 +48,6 @@ from .core.request_context import (
 )
 from .models import ShopMember, ShopMemberRole, AuditLog
 from .tenancy.context import ShopContext
-
-# Development mode - bypasses authorization checks
-# Read from environment variable, default to True for development
-# ⚠️ PRODUCTION: Set DISABLE_AUTH_CHECKS=false in environment!
-DISABLE_AUTH_CHECKS = os.environ.get("DISABLE_AUTH_CHECKS", "true").lower() in ("true", "1", "yes")
 
 
 logger = logging.getLogger(__name__)
@@ -101,161 +97,93 @@ __all__ = [
 # ============================================================================
 
 async def get_current_user_id(
-    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
     authorization: Optional[str] = Header(None),
 ) -> str:
     """
-    Extract current user identity from JWT token or X-User-Id header.
+    Extract current user identity from Clerk JWT token.
     
-    SECURITY BEHAVIOR:
-    
-    When DISABLE_AUTH_CHECKS=False (PRODUCTION):
+    SECURITY:
     - REQUIRES valid JWT token in Authorization header
-    - X-User-Id header is IGNORED completely (security measure)
-    - Invalid/expired JWT returns 401
-    
-    When DISABLE_AUTH_CHECKS=True (DEVELOPMENT):
-    - Allows X-User-Id header for testing
-    - Falls back to "dev-user" if no auth provided
-    
-    ⚠️ SECURITY: In production, NEVER accept X-User-Id as it can be spoofed.
+    - NO fallback to dev-user or X-User-Id header
+    - Invalid/expired/missing JWT returns 401
     
     Raises:
-        HTTPException 401: If no valid JWT provided (when auth checks enabled)
+        HTTPException 401: If no valid JWT provided
     
     Returns:
         User ID string (Clerk user ID like "user_2abc123...")
     
     Example:
-        # Production (JWT required):
         curl -H "Authorization: Bearer eyJhbGciOiJSUzI1NiJ..." http://api.convo.com/...
-        
-        # Development (X-User-Id allowed):
-        curl -H "X-User-Id: user_abc123" http://localhost:8000/...
     """
-    # ========================================
-    # PRODUCTION MODE: JWT Required
-    # ========================================
-    if not DISABLE_AUTH_CHECKS:
-        # In production, ONLY accept JWT tokens - X-User-Id is IGNORED
-        if not authorization:
-            logger.warning("Production auth failed: Missing Authorization header")
+    if not authorization:
+        logger.warning("Auth failed: Missing Authorization header")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please sign in.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not authorization.startswith("Bearer "):
+        logger.warning(f"Auth failed: Invalid Authorization header format")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization header format. Expected: Bearer <token>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    try:
+        from .clerk_auth import verify_clerk_token
+        token = authorization.split(" ", 1)[1]
+        logger.debug(f"🔐 Verifying JWT token...")
+        user_data = verify_clerk_token(token)
+        user_id = user_data.get("sub")
+        
+        if not user_id:
+            logger.error("JWT verified but missing 'sub' claim")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required. Provide a valid JWT token in the Authorization header.",
+                detail="Invalid token: missing user identifier",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        if not authorization.startswith("Bearer "):
-            logger.warning(f"Production auth failed: Invalid Authorization header format. Received: {authorization[:50]}...")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid Authorization header format. Expected: Bearer <token>",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        
-        try:
-            from .clerk_auth import verify_clerk_token
-            token = authorization.split(" ", 1)[1]
-            logger.info(f"🔐 Attempting to verify JWT token (first 20 chars): {token[:20]}...")
-            user_data = verify_clerk_token(token)
-            user_id = user_data.get("sub")
-            
-            if not user_id:
-                logger.error("JWT verified but missing 'sub' claim")
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid token: missing user identifier",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-            
-            logger.info(f"✅ Production auth successful: {user_id}")
-            return user_id
-            
-        except HTTPException:
-            # Re-raise HTTP exceptions from verify_clerk_token
-            raise
-        except Exception as e:
-            logger.error(f"JWT verification failed: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired token",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-    
-    # ========================================
-    # DEVELOPMENT MODE: X-User-Id Allowed
-    # ========================================
-    logger.warning("⚠️ DEVELOPMENT MODE: Auth checks disabled")
-    
-    # Try JWT first even in dev mode (for testing JWT flow)
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            from .clerk_auth import verify_clerk_token
-            token = authorization.split(" ", 1)[1]
-            logger.info(f"🔐 Dev mode: Attempting to verify JWT token (first 20 chars): {token[:20]}...")
-            user_data = verify_clerk_token(token)
-            user_id = user_data.get("sub")
-            if user_id:
-                logger.info(f"✅ Dev mode: Authenticated via JWT: {user_id}")
-                return user_id
-        except Exception as e:
-            logger.debug(f"Dev mode: JWT verification failed ({e}), trying X-User-Id")
-    
-    # Fall back to X-User-Id in dev mode
-    if x_user_id and x_user_id.strip():
-        user_id = x_user_id.strip()
-        logger.warning(f"⚠️ Dev mode: Using X-User-Id header: {user_id}")
+        logger.debug(f"✅ Auth successful: {user_id}")
         return user_id
-    
-    # Default user for dev mode
-    logger.warning("⚠️ Dev mode: No auth provided, using default 'dev-user'")
-    return "dev-user"
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions from verify_clerk_token
+        raise
+    except Exception as e:
+        logger.error(f"JWT verification failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token. Please sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 async def get_optional_user_id(
-    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
     authorization: Optional[str] = Header(None),
 ) -> Optional[str]:
     """
     Extract user identity if present, without requiring it.
     
     Useful for endpoints that behave differently for authenticated vs anonymous users.
-    
-    In production: Only JWT is accepted
-    In development: X-User-Id is also accepted
+    Only JWT is accepted - no X-User-Id header.
     
     Returns:
-        User ID string if valid auth provided, None otherwise
+        User ID string if valid JWT provided, None otherwise
     """
-    # Production: only accept JWT
-    if not DISABLE_AUTH_CHECKS:
-        if authorization and authorization.startswith("Bearer "):
-            try:
-                from .clerk_auth import verify_clerk_token
-                token = authorization.split(" ", 1)[1]
-                user_data = verify_clerk_token(token)
-                return user_data.get("sub")
-            except Exception:
-                return None
+    if not authorization or not authorization.startswith("Bearer "):
         return None
     
-    # Development: try JWT first, then X-User-Id
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            from .clerk_auth import verify_clerk_token
-            token = authorization.split(" ", 1)[1]
-            user_data = verify_clerk_token(token)
-            user_id = user_data.get("sub")
-            if user_id:
-                return user_id
-        except Exception:
-            pass
-    
-    if x_user_id and x_user_id.strip():
-        return x_user_id.strip()
-    
-    return None
+    try:
+        from .clerk_auth import verify_clerk_token
+        token = authorization.split(" ", 1)[1]
+        user_data = verify_clerk_token(token)
+        return user_data.get("sub")
+    except Exception:
+        return None
 
 
 # ============================================================================

@@ -25,7 +25,7 @@ import {
   isApiError,
   type Shop,
 } from "@/lib/api";
-import { useApiClient, useClearLegacyAuth } from "@/lib/api.client";
+import { useApiClient } from "@/lib/api.client";
 
 // Auth status from debug endpoint
 interface AuthStatus {
@@ -41,9 +41,6 @@ export default function CabOwnerSetupPage() {
   const params = useParams();
   const router = useRouter();
   const slug = params?.slug as string;
-
-  // Automatically clear old localStorage auth when Clerk is available
-  useClearLegacyAuth();
 
   // Clerk Auth
   const { isLoaded: authLoaded, isSignedIn, userId: clerkUserId } = useAuth();

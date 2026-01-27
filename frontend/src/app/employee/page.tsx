@@ -53,7 +53,7 @@ export default function EmployeeShopSelectionPage() {
 
     try {
       // Use centralized apiFetch with proper proxy
-      const data = await apiFetch<Shop[]>("/registry/shops", { userId: false });
+      const data = await apiFetch<Shop[]>("/registry/shops", { skipAuth: true });
       setShops(data);
       setFetchState("success");
       

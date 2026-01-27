@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, status, Request, Fo
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from .core.config import get_settings
 from .core.db import get_session
@@ -2450,6 +2451,7 @@ from .cab_models import (
     CabOwner, 
     CabDriver, 
     CabDriverStatus,
+    CabPricingRule,
 )
 from .cab_distance import RouteError
 
@@ -2712,6 +2714,7 @@ async def list_cab_requests(
     offset = (page - 1) * page_size
     result = await session.execute(
         select(CabBooking)
+        .options(joinedload(CabBooking.assigned_driver))
         .where(
             CabBooking.shop_id == ctx.shop_id,
             CabBooking.status == CabBookingStatus.PENDING,
@@ -3039,8 +3042,10 @@ async def list_cab_rides(
     """
     await require_owner_or_manager(ctx, user_id, session)
     
-    # Build query
-    query = select(CabBooking).where(
+    # Build query with joined driver relationship
+    query = select(CabBooking).options(
+        joinedload(CabBooking.assigned_driver)
+    ).where(
         CabBooking.shop_id == ctx.shop_id,
         CabBooking.status == CabBookingStatus.CONFIRMED,
     )
@@ -3198,6 +3203,119 @@ async def setup_cab_owner(
 
 
 # ============================================================================
+# CAB PRICING MANAGEMENT ENDPOINTS
+# ============================================================================
+
+class CabPricingResponse(BaseModel):
+    """Response model for pricing rule."""
+    id: int
+    shop_id: int
+    per_mile_rate: float
+    rounding_step: float
+    minimum_fare: float
+    currency: str
+    vehicle_multipliers: dict
+    active: bool
+
+
+class UpdatePricingRateRequest(BaseModel):
+    """Request to update per-mile rate."""
+    per_mile_rate: float = Field(..., ge=0.5, le=50.0, description="Rate per mile in dollars")
+
+
+@router.get(
+    "/owner/cab/pricing",
+    response_model=CabPricingResponse,
+    tags=["cab-owner"],
+    summary="Get cab pricing rule",
+    description="Get the current pricing configuration for this shop's cab service.",
+)
+async def get_cab_pricing(
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Get pricing rule for the shop."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    result = await session.execute(
+        select(CabPricingRule).where(
+            CabPricingRule.shop_id == ctx.shop_id,
+            CabPricingRule.active == True,
+        )
+    )
+    pricing_rule = result.scalar_one_or_none()
+    
+    if not pricing_rule:
+        raise HTTPException(status_code=404, detail="Pricing rule not configured for this shop")
+    
+    return CabPricingResponse(
+        id=pricing_rule.id,
+        shop_id=pricing_rule.shop_id,
+        per_mile_rate=float(pricing_rule.per_mile_rate),
+        rounding_step=float(pricing_rule.rounding_step),
+        minimum_fare=float(pricing_rule.minimum_fare),
+        currency=pricing_rule.currency,
+        vehicle_multipliers=pricing_rule.vehicle_multipliers,
+        active=pricing_rule.active,
+    )
+
+
+@router.patch(
+    "/owner/cab/pricing/rate",
+    response_model=CabPricingResponse,
+    tags=["cab-owner"],
+    summary="Update per-mile rate",
+    description="Update the per-mile rate for cab pricing. This will apply to new bookings.",
+)
+async def update_per_mile_rate(
+    request: UpdatePricingRateRequest,
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Update per-mile rate for the shop's cab service."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    from decimal import Decimal
+    
+    # Get existing pricing rule
+    result = await session.execute(
+        select(CabPricingRule).where(
+            CabPricingRule.shop_id == ctx.shop_id,
+            CabPricingRule.active == True,
+        )
+    )
+    pricing_rule = result.scalar_one_or_none()
+    
+    if not pricing_rule:
+        raise HTTPException(status_code=404, detail="Pricing rule not configured for this shop")
+    
+    # Update the rate
+    old_rate = float(pricing_rule.per_mile_rate)
+    pricing_rule.per_mile_rate = Decimal(str(request.per_mile_rate))
+    
+    await session.commit()
+    await session.refresh(pricing_rule)
+    
+    logger.info(
+        f"Per-mile rate updated for shop={ctx.shop_slug}: "
+        f"${old_rate:.2f} -> ${request.per_mile_rate:.2f} by user {user_id}"
+    )
+    
+    return CabPricingResponse(
+        id=pricing_rule.id,
+        shop_id=pricing_rule.shop_id,
+        per_mile_rate=float(pricing_rule.per_mile_rate),
+        rounding_step=float(pricing_rule.rounding_step),
+        minimum_fare=float(pricing_rule.minimum_fare),
+        currency=pricing_rule.currency,
+        vehicle_multipliers=pricing_rule.vehicle_multipliers,
+        active=pricing_rule.active,
+    )
+
+
+# ============================================================================
 # CAB DRIVER MANAGEMENT ENDPOINTS
 # ============================================================================
 
@@ -3341,7 +3459,7 @@ async def create_cab_driver(
     description="Update driver info or status.",
 )
 async def update_cab_driver(
-    driver_id: str = Path(..., description="Driver UUID"),
+    driver_id: int = Path(..., description="Driver ID"),
     request: CabDriverUpdateRequest = ...,
     ctx: ShopContext = Depends(get_shop_context_from_slug),
     session: AsyncSession = Depends(get_session),
@@ -3349,12 +3467,6 @@ async def update_cab_driver(
 ):
     """Update a driver."""
     await require_owner_or_manager(ctx, user_id, session)
-    
-    from uuid import UUID
-    try:
-        driver_uuid = UUID(driver_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid driver ID")
     
     # Get cab owner
     result = await session.execute(
@@ -3371,7 +3483,7 @@ async def update_cab_driver(
     # Get driver (ensure it belongs to this owner)
     result = await session.execute(
         select(CabDriver).where(
-            CabDriver.id == driver_uuid,
+            CabDriver.id == driver_id,
             CabDriver.cab_owner_id == owner.id,
         )
     )
@@ -3402,6 +3514,61 @@ async def update_cab_driver(
         whatsapp_phone=driver.whatsapp_phone,
         status=driver.status.value,
         created_at=driver.created_at,
+    )
+
+
+@router.get(
+    "/owner/cab/drivers/{driver_id}/bookings",
+    response_model=CabBookingListResponse,
+    tags=["cab-owner"],
+    summary="Get driver's bookings",
+    description="Get all bookings assigned to a specific driver.",
+)
+async def get_driver_bookings(
+    driver_id: int = Path(..., description="Driver ID"),
+    ctx: ShopContext = Depends(get_shop_context_from_slug),
+    session: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user_id),
+    upcoming_only: bool = Query(False, description="Only show upcoming bookings"),
+):
+    """Get all bookings for a specific driver."""
+    await require_owner_or_manager(ctx, user_id, session)
+    
+    # Verify driver exists
+    result = await session.execute(
+        select(CabDriver).where(
+            CabDriver.id == driver_id,
+        )
+    )
+    driver = result.scalar_one_or_none()
+    
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+    
+    # Build query for driver's bookings
+    query = select(CabBooking).options(
+        joinedload(CabBooking.assigned_driver)
+    ).where(
+        CabBooking.shop_id == ctx.shop_id,
+        CabBooking.assigned_driver_id == driver_id,
+        CabBooking.status == CabBookingStatus.CONFIRMED,
+    )
+    
+    if upcoming_only:
+        now = datetime.utcnow()
+        query = query.where(CabBooking.pickup_time > now)
+    
+    # Order by pickup time
+    query = query.order_by(CabBooking.pickup_time.asc())
+    
+    result = await session.execute(query)
+    bookings = result.scalars().all()
+    
+    return CabBookingListResponse(
+        items=[booking_to_list_item(b) for b in bookings],
+        total=len(bookings),
+        page=1,
+        page_size=len(bookings),
     )
 
 

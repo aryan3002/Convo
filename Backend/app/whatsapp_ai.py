@@ -61,19 +61,21 @@ IMPORTANT - Current date/time context:
 Rules:
 - Extract pickup location (pickup_text) - include full address with city/state
 - Extract dropoff location (drop_text) - include full address with city/state
-- Extract pickup time (pickup_time) - convert to ISO datetime format
+- Extract pickup time (pickup_time) - IMPORTANT: Return in YYYY-MM-DDTHH:MM:SS format in LOCAL TIME (not UTC)
 - For "tomorrow", use {(now + timedelta(days=1)).strftime("%Y-%m-%d")}
 - For "today", use {now.strftime("%Y-%m-%d")}
-- If only time given (like "10 am"), assume tomorrow if that makes sense
+- If only time given (like "10 am" or "12 pm"), use tomorrow's date at that time
+- If customer says "12 pm", interpret as 12:00 (noon), NOT 00:00
 - Extract number of passengers (passengers) - default to 1 if not mentioned
 - Extract vehicle type (vehicle_type): SEDAN_4, SUV, or VAN - default to SEDAN_4
 - If time not specified, use 1 hour from current time
+- TIMEZONE: Assume customer is in Arizona/Phoenix timezone (MST/Arizona - no DST)
 
 Return ONLY a JSON object with these exact keys:
 {{
   "pickup_text": "full pickup address",
   "drop_text": "full dropoff address",
-  "pickup_time": "ISO datetime string (YYYY-MM-DDTHH:MM:SS)",
+  "pickup_time": "ISO datetime string in LOCAL Arizona time (YYYY-MM-DDTHH:MM:SS)",
   "passengers": number,
   "vehicle_type": "SEDAN_4|SUV|VAN"
 }}"""
@@ -109,22 +111,38 @@ Return ONLY a JSON object with these exact keys:
         if result['vehicle_type'] not in ['SEDAN_4', 'SUV', 'VAN']:
             result['vehicle_type'] = 'SEDAN_4'
         
-        # Validate and fix pickup_time - ensure it's not in October when we're in January
+        # Validate and convert pickup_time from Arizona local time to UTC
         try:
-            parsed_time = datetime.fromisoformat(result['pickup_time'].replace('Z', '+00:00'))
-            current_time = datetime.now()
+            from zoneinfo import ZoneInfo
             
-            # If the parsed date is way in the past (like October when it's January), fix it
-            if parsed_time < current_time - timedelta(days=30):
-                logger.warning(f"AI returned past date {parsed_time}, fixing to tomorrow")
-                # Use tomorrow at the same time
-                tomorrow = current_time + timedelta(days=1)
-                fixed_time = tomorrow.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
-                result['pickup_time'] = fixed_time.isoformat()
+            # Parse the time (should be in Arizona local time)
+            time_str = result['pickup_time'].replace('Z', '')
+            parsed_time = datetime.fromisoformat(time_str)
+            
+            # If time is naive (no timezone), assume it's Arizona time
+            if parsed_time.tzinfo is None:
+                arizona_tz = ZoneInfo("America/Phoenix")  # Arizona doesn't observe DST
+                # Create aware datetime in Arizona timezone
+                local_time = parsed_time.replace(tzinfo=arizona_tz)
+                # Convert to UTC
+                utc_time = local_time.astimezone(ZoneInfo("UTC"))
+                result['pickup_time'] = utc_time.isoformat()
+                logger.info(f"Converted pickup time: {parsed_time} (AZ) -> {utc_time} (UTC)")
+            else:
+                # Already has timezone info, just convert to UTC
+                utc_time = parsed_time.astimezone(ZoneInfo("UTC"))
+                result['pickup_time'] = utc_time.isoformat()
+            
+            # Validate it's not in the past
+            current_utc = datetime.now(ZoneInfo("UTC"))
+            if utc_time < current_utc - timedelta(hours=1):  # Allow 1 hour grace period
+                logger.warning(f"AI returned past time {utc_time}, fixing to 1 hour from now")
+                result['pickup_time'] = (current_utc + timedelta(hours=1)).isoformat()
         except Exception as e:
             logger.error(f"Error validating pickup_time: {e}")
-            # Default to 1 hour from now
-            result['pickup_time'] = (datetime.now() + timedelta(hours=1)).isoformat()
+            # Default to 1 hour from now in UTC
+            from zoneinfo import ZoneInfo
+            result['pickup_time'] = (datetime.now(ZoneInfo("UTC")) + timedelta(hours=1)).isoformat()
         
         logger.info(f"✅ AI parsed booking: {result}")
         return result

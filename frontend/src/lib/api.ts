@@ -4,31 +4,18 @@
  * 
  * ## Architecture
  * - Uses Next.js backend proxy by default (/api/backend/...)
- * - This eliminates port configuration issues between frontend and backend
- * - Falls back to NEXT_PUBLIC_API_BASE if explicitly set (for backward compatibility)
+ * - All authenticated requests use Clerk JWT tokens
+ * - NO X-User-Id header or localStorage - Clerk is the ONLY auth method
  * 
- * ## Identity Management (TRANSITIONAL)
- * 
- * CURRENT STATE (Temporary):
- * - User ID is stored in localStorage under 'owner_user_id'
- * - All authenticated requests automatically include X-User-Id header
- * - This is INSECURE but works for development/pilot
- * 
- * FUTURE STATE (When Clerk is integrated):
- * - User ID will come from Clerk session/JWT
- * - X-User-Id header will be removed
- * - Server will verify JWT signature
+ * ## Authentication
+ * - User identity comes from Clerk JWT token
+ * - Backend verifies JWT against Clerk's public keys
+ * - No dev-user fallbacks - always requires real authentication
  * 
  * ## Best Practices
  * - ALWAYS use apiFetch() for API calls - it handles auth automatically
- * - NEVER pass userId in URL query params (security risk)
- * - Use getStoredUserId() to read the current user ID
- * - Use setStoredUserId() only during onboarding
- * 
- * ## Debugging Auth Issues
- * - If you get 403 errors, check that localStorage has the correct owner_user_id
- * - The backend endpoint /s/{slug}/owner/auth-status can help diagnose issues
- * - The user_id must match what was used when creating the shop
+ * - For authenticated endpoints, user must be signed in via Clerk
+ * - Public endpoints can be called with skipAuth: true
  */
 
 // ──────────────────────────────────────────────────────────
@@ -140,41 +127,16 @@ export interface ApiError {
 
 export interface ApiFetchOptions extends Omit<RequestInit, "body"> {
   /** 
-   * User ID for authenticated requests. 
-   * If not provided, will automatically use getStoredUserId().
-   * Pass false to explicitly skip auth header.
+   * Skip authentication for public endpoints.
+   * When true, no Authorization header is sent.
    */
-  userId?: string | false;
+  skipAuth?: boolean;
   /** Request body - will be JSON.stringify'd if object */
   body?: BodyInit | object | null;
   /** Skip automatic JSON content-type header */
   skipContentType?: boolean;
   /** Request timeout in milliseconds (default: 30000) */
   timeout?: number;
-}
-
-// ──────────────────────────────────────────────────────────
-// Storage Helpers (defined early for use in apiFetch)
-// ──────────────────────────────────────────────────────────
-
-const OWNER_USER_ID_KEY = "owner_user_id";
-
-export function getStoredUserId(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(OWNER_USER_ID_KEY);
-}
-
-export function setStoredUserId(userId: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(OWNER_USER_ID_KEY, userId);
-}
-
-export function clearStoredUserId(): void {
-  if (typeof window === "undefined") return;
-  localStorage.removeItem(OWNER_USER_ID_KEY);
-  if (DEBUG_LOGGING) {
-    console.log("[API] Cleared old owner_user_id from localStorage");
-  }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -221,11 +183,10 @@ async function getClerkToken(): Promise<string | null> {
 }
 
 /**
- * Centralized API fetch wrapper with automatic auth injection.
+ * Centralized API fetch wrapper with automatic Clerk JWT auth.
  * 
  * Features:
  * - Automatic Clerk JWT token injection in Authorization header
- * - Falls back to X-User-Id from localStorage for dev/legacy compatibility
  * - Request timeout handling
  * - Consistent error handling with ApiError type
  * - Debug logging in development
@@ -242,14 +203,14 @@ async function getClerkToken(): Promise<string | null> {
  * });
  * 
  * // Skip auth for public endpoints
- * const publicData = await apiFetch('/public/info', { userId: false });
+ * const publicData = await apiFetch('/public/info', { skipAuth: true });
  */
 export async function apiFetch<T>(
   endpoint: string,
   options: ApiFetchOptions = {}
 ): Promise<T> {
   const { 
-    userId: explicitUserId, 
+    skipAuth = false, 
     body, 
     skipContentType,
     timeout = 30000,
@@ -266,26 +227,17 @@ export async function apiFetch<T>(
     headers["Content-Type"] = "application/json";
   }
   
-  // Try to get Clerk JWT token first (for production auth)
-  let hasAuth = false;
-  if (explicitUserId !== false) {
+  // Get Clerk JWT token for authentication (unless skipped)
+  if (!skipAuth) {
     const clerkToken = await getClerkToken();
     if (clerkToken) {
       headers["Authorization"] = `Bearer ${clerkToken}`;
-      hasAuth = true;
       if (DEBUG_LOGGING) {
         console.log(`[API Auth] Using Clerk JWT token`);
       }
-    }
-  }
-  
-  // Fallback to X-User-Id from localStorage if no JWT available (for dev mode)
-  if (!hasAuth && explicitUserId !== false) {
-    const userId = explicitUserId || getStoredUserId();
-    if (userId) {
-      headers["X-User-Id"] = userId;
+    } else {
       if (DEBUG_LOGGING) {
-        console.log(`[API Auth] Using X-User-Id header: ${userId}`);
+        console.warn(`[API Auth] No Clerk token available - user may not be signed in`);
       }
     }
   }
@@ -416,7 +368,7 @@ export async function createShop(payload: CreateShopPayload): Promise<Shop> {
  * Get public shop info by slug.
  */
 export async function getShopBySlug(slug: string): Promise<Shop> {
-  return apiFetch<Shop>(`/shops/${slug}`, { userId: false }); // Public endpoint
+  return apiFetch<Shop>(`/shops/${slug}`, { skipAuth: true }); // Public endpoint
 }
 
 /**
@@ -427,7 +379,7 @@ export async function getShopBySlug(slug: string): Promise<Shop> {
  * @returns ShopInfo including is_cab_service and owner_dashboard_path
  */
 export async function getShopInfo(slug: string): Promise<ShopInfo> {
-  return apiFetch<ShopInfo>(`/s/${slug}/info`, { userId: false }); // Public endpoint
+  return apiFetch<ShopInfo>(`/s/${slug}/info`, { skipAuth: true }); // Public endpoint
 }
 
 // ──────────────────────────────────────────────────────────
@@ -438,14 +390,14 @@ export async function getShopInfo(slug: string): Promise<ShopInfo> {
  * Get services for a shop.
  */
 export async function getServices(slug: string): Promise<Service[]> {
-  return apiFetch<Service[]>(`/s/${slug}/services`, { userId: false }); // Public endpoint
+  return apiFetch<Service[]>(`/s/${slug}/services`, { skipAuth: true }); // Public endpoint
 }
 
 /**
  * Get stylists for a shop.
  */
 export async function getStylists(slug: string): Promise<Stylist[]> {
-  return apiFetch<Stylist[]>(`/s/${slug}/stylists`, { userId: false }); // Public endpoint
+  return apiFetch<Stylist[]>(`/s/${slug}/stylists`, { skipAuth: true }); // Public endpoint
 }
 
 /**
@@ -503,4 +455,47 @@ export function getErrorMessage(err: unknown): string {
     return err.message;
   }
   return "An unexpected error occurred.";
+}
+
+// ──────────────────────────────────────────────────────────
+// DEPRECATED: Legacy localStorage Auth Stubs
+// ──────────────────────────────────────────────────────────
+// These functions are deprecated and will be removed.
+// Authentication is now handled exclusively via Clerk JWT.
+// These stubs exist only to provide clear migration errors.
+
+/**
+ * @deprecated Authentication is now via Clerk JWT only. Use useAuth() from @clerk/nextjs
+ */
+export function getStoredUserId(): null {
+  if (DEBUG_LOGGING) {
+    console.warn(
+      "[DEPRECATED] getStoredUserId() is deprecated. " +
+      "Use Clerk's useAuth().userId instead. " +
+      "localStorage auth has been removed."
+    );
+  }
+  return null;
+}
+
+/**
+ * @deprecated Authentication is now via Clerk JWT only. Use Clerk for user identity.
+ */
+export function setStoredUserId(_userId: string): void {
+  console.warn(
+    "[DEPRECATED] setStoredUserId() is deprecated and has no effect. " +
+    "User identity is now managed by Clerk."
+  );
+}
+
+/**
+ * @deprecated Authentication is now via Clerk JWT only.
+ */
+export function clearStoredUserId(): void {
+  if (DEBUG_LOGGING) {
+    console.warn(
+      "[DEPRECATED] clearStoredUserId() is deprecated and has no effect. " +
+      "localStorage auth has been removed."
+    );
+  }
 }

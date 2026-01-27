@@ -27,6 +27,8 @@ import {
   ShieldOff,
   ServerOff,
   CheckCircle2,
+  LogOut,
+  Settings,
 } from "lucide-react";
 import {
   getShopBySlug,
@@ -35,8 +37,10 @@ import {
   isApiError,
   type Shop,
 } from "@/lib/api";
-import { useApiClient, useClearLegacyAuth } from "@/lib/api.client";
+import { useApiClient } from "@/lib/api.client";
 import { CabSummaryBar } from "@/components/owner/CabSummaryBar";
+import { PricingSettings } from "@/components/owner/PricingSettings";
+import { SignOutButton } from "@clerk/nextjs";
 
 // Check if we're in development mode
 const isDev = process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_CAB_DEV_TOOLS === "true";
@@ -186,9 +190,6 @@ export default function CabManagementPage() {
   const router = useRouter();
   const slug = params.slug as string;
 
-  // Automatically clear old localStorage auth when Clerk is available
-  useClearLegacyAuth();
-
   // Clerk Auth
   const { isLoaded: authLoaded, isSignedIn, userId: clerkUserId } = useAuth();
   const { user: clerkUser } = useUser();
@@ -222,6 +223,7 @@ export default function CabManagementPage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [priceOverrideValue, setPriceOverrideValue] = useState("");
   const [showPriceOverride, setShowPriceOverride] = useState(false);
+  const [showPricingModal, setShowPricingModal] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
   const [showRejectModal, setShowRejectModal] = useState(false);
   
@@ -231,6 +233,11 @@ export default function CabManagementPage() {
   const [newDriverPhone, setNewDriverPhone] = useState("");
   const [newDriverWhatsapp, setNewDriverWhatsapp] = useState("");
   const [driverLoading, setDriverLoading] = useState(false);
+  
+  // Driver Schedule State
+  const [selectedDriver, setSelectedDriver] = useState<CabDriver | null>(null);
+  const [driverBookings, setDriverBookings] = useState<CabBooking[]>([]);
+  const [driverBookingsLoading, setDriverBookingsLoading] = useState(false);
   
   // Driver Assignment State
   const [selectedDriverId, setSelectedDriverId] = useState<string>("");
@@ -420,6 +427,28 @@ export default function CabManagementPage() {
     }
   }, [slug, userId]);
 
+  const fetchDriverBookings = useCallback(async (driverId: string) => {
+    if (!userId) return;
+    setDriverBookingsLoading(true);
+
+    try {
+      const data = await apiFetch<{ items: CabBooking[] }>(
+        `/s/${slug}/owner/cab/drivers/${driverId}/bookings?upcoming_only=false`
+      );
+      setDriverBookings(data.items || []);
+    } catch (err) {
+      console.error("Error fetching driver bookings:", err);
+      setDriverBookings([]);
+    } finally {
+      setDriverBookingsLoading(false);
+    }
+  }, [slug, userId]);
+
+  const handleDriverClick = (driver: CabDriver) => {
+    setSelectedDriver(driver);
+    fetchDriverBookings(driver.id);
+  };
+
   // Fetch all data on initial load
   useEffect(() => {
     if (userId) {
@@ -475,7 +504,7 @@ export default function CabManagementPage() {
       await apiFetch(`/s/${slug}/cab/book`, {
         method: "POST",
         body: testBooking,
-        userId: false, // Public booking endpoint doesn't need auth
+        skipAuth: true, // Public booking endpoint doesn't need auth
       });
 
       console.log('[Test Booking] Success!');
@@ -610,7 +639,7 @@ export default function CabManagementPage() {
     }
   };
 
-  const handleToggleDriverStatus = async (driverId: string, currentStatus: string) => {
+  const handleToggleDriverStatus = async (driverId: number, currentStatus: string) => {
     if (!userId) return;
     setDriverLoading(true);
 
@@ -801,13 +830,30 @@ export default function CabManagementPage() {
               <p className="text-xs text-gray-500">{shop?.name} · Manage bookings</p>
             </div>
           </div>
-          <button
-            onClick={() => (activeTab === "requests" ? fetchRequests() : fetchRides())}
-            disabled={loading}
-            className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={`w-5 h-5 ${loading ? "animate-spin" : ""}`} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowPricingModal(true)}
+              className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+              title="Pricing Settings"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => (activeTab === "requests" ? fetchRequests() : fetchRides())}
+              disabled={loading}
+              className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
+            >
+              <RefreshCw className={`w-5 h-5 ${loading ? "animate-spin" : ""}`} />
+            </button>
+            <SignOutButton redirectUrl={`/owner-landing`}>
+              <button
+                className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="Sign Out"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </SignOutButton>
+          </div>
         </div>
       </header>
 
@@ -1000,7 +1046,8 @@ export default function CabManagementPage() {
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
-                    className="glass-card rounded-2xl p-5 border border-white/5"
+                    onClick={() => handleDriverClick(driver)}
+                    className="glass-card rounded-2xl p-5 border border-white/5 cursor-pointer hover:bg-white/5 transition-colors"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-4">
@@ -1125,16 +1172,39 @@ export default function CabManagementPage() {
                       {booking.price_override && (
                         <p className="text-xs text-yellow-400">Price adjusted</p>
                       )}
-                      <div
-                        className={`mt-1 px-2 py-0.5 rounded-full text-xs inline-block ${
-                          booking.status === "PENDING"
-                            ? "bg-yellow-500/20 text-yellow-400"
-                            : booking.status === "CONFIRMED"
-                            ? "bg-green-500/20 text-green-400"
-                            : "bg-red-500/20 text-red-400"
-                        }`}
-                      >
-                        {booking.status}
+                      <div className="flex flex-col gap-1 mt-1">
+                        <div
+                          className={`px-2 py-0.5 rounded-full text-xs inline-block ${
+                            booking.status === "PENDING"
+                              ? "bg-yellow-500/20 text-yellow-400"
+                              : booking.status === "CONFIRMED"
+                              ? "bg-green-500/20 text-green-400"
+                              : "bg-red-500/20 text-red-400"
+                          }`}
+                        >
+                          {booking.status}
+                        </div>
+                        {booking.status === "CONFIRMED" && (
+                          <div
+                            className={`px-2 py-0.5 rounded-full text-xs inline-block ${
+                              booking.assigned_driver
+                                ? "bg-blue-500/20 text-blue-400"
+                                : "bg-orange-500/20 text-orange-400"
+                            }`}
+                          >
+                            {booking.assigned_driver ? (
+                              <span className="flex items-center gap-1">
+                                <Check className="w-3 h-3" />
+                                Driver Assigned
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1">
+                                <AlertCircle className="w-3 h-3" />
+                                Unassigned
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1400,16 +1470,22 @@ export default function CabManagementPage() {
                     )}
                   </div>
 
-                  {/* Mark as Complete button for CONFIRMED rides */}
-                  {selectedBooking.status === "CONFIRMED" && selectedBooking.id && (
-                    <button
-                      onClick={() => handleCompleteRide(selectedBooking.id)}
-                      disabled={actionLoading}
-                      className="w-full px-4 py-3 rounded-xl bg-[#00d4ff]/20 text-[#00d4ff] hover:bg-[#00d4ff]/30 transition-colors flex items-center justify-center gap-2 disabled:opacity-50 font-medium"
-                    >
-                      <CheckCircle2 className="w-5 h-5" />
-                      {actionLoading ? "Marking..." : "Mark as Complete"}
-                    </button>
+                  {/* Assigned Driver Status for CONFIRMED rides */}
+                  {selectedBooking.status === "CONFIRMED" && selectedBooking.assigned_driver && (
+                    <div className="glass rounded-xl p-4 mt-4 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center">
+                          <User className="w-5 h-5 text-green-400" />
+                        </div>
+                        <div>
+                          <p className="font-medium">{selectedBooking.assigned_driver.name}</p>
+                          <p className="text-sm text-gray-400">{selectedBooking.assigned_driver.phone}</p>
+                        </div>
+                      </div>
+                      <div className="px-2 py-1 rounded-full bg-green-500/20 text-green-400 text-xs">
+                        Assigned
+                      </div>
+                    </div>
                   )}
                 </div>
               )}
@@ -1605,6 +1681,184 @@ export default function CabManagementPage() {
                 >
                   Cancel
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Pricing Settings Modal */}
+      <AnimatePresence>
+        {showPricingModal && (
+          <div
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4"
+            onClick={() => setShowPricingModal(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              onClick={(e) => e.stopPropagation()}
+              className="glass-strong rounded-2xl shadow-neon p-6 max-w-lg w-full relative border border-white/10 max-h-[90vh] overflow-y-auto"
+            >
+              <button
+                onClick={() => setShowPricingModal(false)}
+                className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              
+              <h2 className="text-lg font-bold mb-6">Pricing Settings</h2>
+              <PricingSettings slug={slug} />
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Driver Schedule Modal */}
+      <AnimatePresence>
+        {selectedDriver && (
+          <div
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4"
+            onClick={() => {
+              setSelectedDriver(null);
+              setDriverBookings([]);
+            }}
+          >
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              onClick={(e) => e.stopPropagation()}
+              className="glass-strong rounded-2xl shadow-neon p-6 max-w-2xl w-full relative border border-white/10 max-h-[90vh] overflow-y-auto"
+            >
+              <button
+                onClick={() => {
+                  setSelectedDriver(null);
+                  setDriverBookings([]);
+                }}
+                className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              
+              {/* Driver Info Header */}
+              <div className="mb-6">
+                <div className="flex items-center gap-4 mb-2">
+                  <div className="w-12 h-12 rounded-full bg-purple-500/20 flex items-center justify-center">
+                    <User className="w-6 h-6 text-purple-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold">{selectedDriver.name}</h2>
+                    <div className="flex items-center gap-3 text-sm text-gray-400">
+                      <span className="flex items-center gap-1">
+                        <Phone className="w-3 h-3" />
+                        {selectedDriver.phone}
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-xs ${
+                          selectedDriver.status === "ACTIVE"
+                            ? "bg-green-500/20 text-green-400"
+                            : "bg-gray-500/20 text-gray-400"
+                        }`}
+                      >
+                        {selectedDriver.status}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Driver's Bookings */}
+              <div>
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-[#00d4ff]" />
+                  Scheduled Rides ({driverBookings.length})
+                </h3>
+
+                {driverBookingsLoading ? (
+                  <div className="text-center py-8">
+                    <div className="spinner mb-4" />
+                    <p className="text-gray-400">Loading schedule...</p>
+                  </div>
+                ) : driverBookings.length === 0 ? (
+                  <div className="text-center py-8 glass rounded-xl">
+                    <Calendar className="w-12 h-12 text-gray-600 mx-auto mb-3" />
+                    <p className="text-gray-400">No bookings assigned yet</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {driverBookings.map((booking) => (
+                      <motion.div
+                        key={booking.booking_id}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="glass rounded-xl p-4 border border-white/5 hover:bg-white/5 transition-colors"
+                      >
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              <Clock className="w-4 h-4 text-[#00d4ff]" />
+                              <span className="font-medium">
+                                {new Date(booking.pickup_time).toLocaleString('en-US', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  hour: 'numeric',
+                                  minute: '2-digit',
+                                  hour12: true,
+                                })}
+                              </span>
+                            </div>
+                            <div className="space-y-1.5 text-sm">
+                              <div className="flex items-start gap-2">
+                                <MapPin className="w-3.5 h-3.5 text-green-400 mt-0.5 flex-shrink-0" />
+                                <span className="text-gray-300">{booking.pickup_text}</span>
+                              </div>
+                              <div className="flex items-start gap-2">
+                                <MapPin className="w-3.5 h-3.5 text-red-400 mt-0.5 flex-shrink-0" />
+                                <span className="text-gray-300">{booking.drop_text}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            {booking.vehicle_type && (
+                              <div className="px-2 py-1 rounded-lg bg-white/5 text-xs text-gray-400 mb-1">
+                                {booking.vehicle_type === "SEDAN_4" ? "Sedan" :
+                                 booking.vehicle_type === "SUV" ? "SUV" : "Van"}
+                              </div>
+                            )}
+                            {booking.final_price && (
+                              <div className="text-[#00d4ff] font-semibold">
+                                ${booking.final_price.toFixed(2)}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {booking.customer_name && (
+                          <div className="flex items-center gap-2 text-xs text-gray-500 pt-2 border-t border-white/5">
+                            <User className="w-3 h-3" />
+                            <span>{booking.customer_name}</span>
+                            {booking.customer_phone && (
+                              <span className="ml-auto">{booking.customer_phone}</span>
+                            )}
+                          </div>
+                        )}
+                      </motion.div>
+                    ))}
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>

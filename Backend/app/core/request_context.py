@@ -2,42 +2,34 @@
 Request Context Resolution Module
 
 This module provides the SINGLE SOURCE OF TRUTH for identity resolution.
-All API routes should use this module instead of directly reading X-User-Id.
+All API routes should use this module for authentication.
 
 ARCHITECTURE:
     1. resolveRequestContext() extracts identity from request
-    2. It checks multiple auth methods in order of security
+    2. It verifies Clerk JWT tokens
     3. Returns a standardized RequestContext object
     4. All authorization checks use this context
 
-AUTH METHODS (in order of precedence):
-    1. JWT Bearer token (production - when Clerk is integrated)
-    2. Session cookie (server-side sessions)
-    3. X-User-Id header (development/transitional only)
-
-FUTURE:
-    - Integrate Clerk JWT verification
-    - Remove X-User-Id support in production
+AUTH METHOD:
+    - JWT Bearer token verified against Clerk's public keys
+    - NO fallback to headers or dev-users
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from fastapi import Request, HTTPException, status, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Shop, ShopMember, ShopMemberRole
 from .db import get_session
 
-logger = logging.getLogger(__name__)
+# Deferred import to avoid circular dependency
+if TYPE_CHECKING:
+    from ..models import Shop, ShopMember, ShopMemberRole
 
-# Development mode - bypasses authorization checks
-# Read from environment variable DISABLE_AUTH_CHECKS
-import os
-DISABLE_AUTH_CHECKS = os.environ.get("DISABLE_AUTH_CHECKS", "false").lower() in ("true", "1", "yes")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,38 +107,33 @@ async def resolve_request_context(
     user_id: Optional[str] = None
     auth_method: str = "none"
     
-    # 1. Try JWT Bearer token (highest precedence, most secure)
+    # Verify JWT Bearer token (only method - Clerk authentication)
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
-        # TODO: Integrate Clerk JWT verification
-        # For now, we don't support JWT yet
-        # user_id = await verify_clerk_jwt(token)
-        # auth_method = "jwt"
-        pass
+        try:
+            from ..clerk_auth import verify_clerk_token
+            user_data = verify_clerk_token(token)
+            user_id = user_data.get("sub")
+            if user_id:
+                auth_method = "jwt"
+                logger.debug(f"Auth via Clerk JWT: {user_id}")
+        except Exception as e:
+            logger.warning(f"JWT verification failed: {e}")
+            if require_auth:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or expired token. Please sign in again.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
     
-    # 2. Try session cookie (server-side sessions)
-    # TODO: Implement session-based auth
-    # session_id = request.cookies.get("session_id")
-    # if session_id:
-    #     user_id = await get_user_from_session(session_id)
-    #     auth_method = "session"
-    
-    # 3. Fall back to X-User-Id header (development/transitional)
-    if not user_id:
-        x_user_id = request.headers.get("X-User-Id", "").strip()
-        if x_user_id:
-            user_id = x_user_id
-            auth_method = "header"
-            logger.debug(f"Auth via X-User-Id header: {user_id}")
-    
-    # 4. Check if we got a user
+    # Check if we got a user
     if not user_id:
         if require_auth:
-            logger.warning("Authentication failed: No valid identity found")
+            logger.warning("Authentication failed: No valid JWT token found")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required. Please log in.",
+                detail="Authentication required. Please sign in.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         return RequestContext(
@@ -155,7 +142,7 @@ async def resolve_request_context(
             is_authenticated=False,
         )
     
-    # 5. Build the context with access info
+    # Build the context with access info
     ctx = RequestContext(
         user_id=user_id,
         auth_method=auth_method,
@@ -177,6 +164,9 @@ async def _populate_access_info(ctx: RequestContext, session: AsyncSession) -> N
     This queries shop_members to find all shops the user can access
     and their roles in each shop.
     """
+    # Import here to avoid circular dependency
+    from ..models import ShopMember
+    
     result = await session.execute(
         select(ShopMember).where(ShopMember.user_id == ctx.user_id)
     )
@@ -194,7 +184,7 @@ async def _populate_access_info(ctx: RequestContext, session: AsyncSession) -> N
 def require_shop_access(
     ctx: RequestContext,
     shop_id: int,
-    allowed_roles: list[ShopMemberRole] | None = None,
+    allowed_roles: list["ShopMemberRole"] | None = None,
 ) -> str:
     """
     Check if the user has access to a specific shop.
@@ -202,8 +192,6 @@ def require_shop_access(
     This is the ONE authorization rule for shop access:
     - User must be a member of the shop
     - If allowed_roles specified, user must have one of those roles
-    
-    ⚠️ DEVELOPMENT MODE: Set DISABLE_AUTH_CHECKS=true to bypass all checks
     
     Args:
         ctx: The resolved request context
@@ -220,12 +208,8 @@ def require_shop_access(
         ctx = await resolve_request_context(request, session)
         role = require_shop_access(ctx, shop_id, [ShopMemberRole.OWNER, ShopMemberRole.MANAGER])
     """
-    # DEVELOPMENT MODE: Bypass all authorization checks
-    if DISABLE_AUTH_CHECKS:
-        logger.warning(
-            f"⚠️ DEVELOPMENT MODE: Auth check bypassed for user {ctx.user_id} accessing shop {shop_id}"
-        )
-        return "OWNER"  # Return OWNER role so all operations succeed
+    # Import at runtime to avoid circular dependency
+    from ..models import ShopMemberRole as SMR
     
     if shop_id not in ctx.accessible_shop_ids:
         logger.warning(
@@ -239,8 +223,8 @@ def require_shop_access(
     user_role = ctx.roles_by_shop.get(shop_id, "")
     
     if allowed_roles:
-        # Normalize role comparison
-        allowed_values = [r.value if isinstance(r, ShopMemberRole) else r for r in allowed_roles]
+        # Normalize role comparison - use local import SMR
+        allowed_values = [r.value if isinstance(r, SMR) else r for r in allowed_roles]
         user_role_upper = user_role.upper() if user_role else ""
         
         if user_role_upper not in allowed_values:

@@ -16,14 +16,15 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Shop, ShopMember, ShopMemberRole
-from app.core.db import get_database_url
+from app.core.config import get_settings
 
 
 async def add_owner(shop_slug: str, user_id: str):
     """Add a user as OWNER to a shop."""
     
-    # Create async engine
-    database_url = get_database_url()
+    # Get database URL from settings
+    settings = get_settings()
+    database_url = settings.database_url
     engine = create_async_engine(database_url, echo=True)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     
