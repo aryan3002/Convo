@@ -86,7 +86,9 @@ function SignUpContent() {
   // Priority: redirect_url param > default onboarding
   const afterSignUpUrl = redirectUrl || "/onboarding";
   const afterSignInUrl = redirectUrl || "/onboarding";
-   relative overflow-hidden">
+  
+  return (
+    <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center p-4 relative overflow-hidden">
       {/* Animated Background gradient effects */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none" suppressHydrationWarning>
         <div className="absolute top-1/4 right-1/4 w-96 h-96 bg-[#a855f7]/10 rounded-full blur-3xl animate-pulse" />
