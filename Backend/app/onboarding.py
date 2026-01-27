@@ -260,3 +260,28 @@ async def get_shop_by_slug(
         )
     
     return ShopResponse.model_validate(shop)
+
+
+@router.get("/users/{user_id}/shops", response_model=list[ShopResponse])
+async def get_user_shops(
+    user_id: str,
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Get all shops where the user is a member.
+    
+    Returns a list of shops where the user has any role (OWNER, MANAGER, EMPLOYEE).
+    Useful for displaying "My Shops" in the UI.
+    
+    Returns:
+    - 200: List of shops (may be empty if user has no memberships)
+    """
+    result = await db.execute(
+        select(Shop)
+        .join(ShopMember, Shop.id == ShopMember.shop_id)
+        .where(ShopMember.user_id == user_id)
+        .order_by(Shop.created_at.desc())
+    )
+    shops = result.scalars().all()
+    
+    return [ShopResponse.model_validate(shop) for shop in shops]

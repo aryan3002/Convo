@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { useParams, useRouter } from "next/navigation";
+import { useAuth, useUser } from "@clerk/nextjs";
 import {
   Car,
   ArrowLeft,
@@ -14,6 +15,7 @@ import {
   AlertCircle,
   DollarSign,
   RefreshCw,
+  LogIn,
 } from "lucide-react";
 import {
   getShopBySlug,
@@ -23,6 +25,7 @@ import {
   isApiError,
   type Shop,
 } from "@/lib/api";
+import { useApiClient, useClearLegacyAuth } from "@/lib/api.client";
 
 // Auth status from debug endpoint
 interface AuthStatus {
@@ -38,6 +41,14 @@ export default function CabOwnerSetupPage() {
   const params = useParams();
   const router = useRouter();
   const slug = params?.slug as string;
+
+  // Automatically clear old localStorage auth when Clerk is available
+  useClearLegacyAuth();
+
+  // Clerk Auth
+  const { isLoaded: authLoaded, isSignedIn, userId: clerkUserId } = useAuth();
+  const { user: clerkUser } = useUser();
+  const apiClient = useApiClient();
 
   // Auth & shop state
   const [userId, setUserId] = useState<string | null>(null);
@@ -62,16 +73,28 @@ export default function CabOwnerSetupPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-  // Load user ID from localStorage (single source of truth)
+  // Initialize Auth - Use Clerk if signed in, fallback to localStorage
   useEffect(() => {
-    const id = getStoredUserId();
-    if (!id) {
-      setAuthError("Please log in to access this page. Go to the onboarding page to create your shop first.");
-      setTimeout(() => router.push("/onboarding"), 3000);
-    } else {
-      setUserId(id);
+    if (!authLoaded) return;
+    
+    if (isSignedIn && clerkUserId) {
+      setUserId(clerkUserId);
+      // Pre-fill email from Clerk user
+      if (clerkUser?.primaryEmailAddress?.emailAddress && !contactEmail) {
+        setContactEmail(clerkUser.primaryEmailAddress.emailAddress);
+      }
+      return;
     }
-  }, [router]);
+    
+    // Not signed in via Clerk - check localStorage for dev mode
+    const storedId = getStoredUserId();
+    if (storedId) {
+      setUserId(storedId);
+    } else {
+      // No auth at all - redirect to sign-up
+      setAuthError("Please sign up to set up your cab service.");
+    }
+  }, [authLoaded, isSignedIn, clerkUserId, clerkUser, contactEmail]);
 
   // Load shop
   useEffect(() => {

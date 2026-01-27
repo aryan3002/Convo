@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useParams, useRouter } from "next/navigation";
+import { useAuth, useUser } from "@clerk/nextjs";
 import {
   Car,
   MapPin,
@@ -34,6 +35,7 @@ import {
   isApiError,
   type Shop,
 } from "@/lib/api";
+import { useApiClient, useClearLegacyAuth } from "@/lib/api.client";
 import { CabSummaryBar } from "@/components/owner/CabSummaryBar";
 
 // Check if we're in development mode
@@ -184,7 +186,15 @@ export default function CabManagementPage() {
   const router = useRouter();
   const slug = params.slug as string;
 
-  // Auth & Shop State
+  // Automatically clear old localStorage auth when Clerk is available
+  useClearLegacyAuth();
+
+  // Clerk Auth
+  const { isLoaded: authLoaded, isSignedIn, userId: clerkUserId } = useAuth();
+  const { user: clerkUser } = useUser();
+  const apiClient = useApiClient();
+
+  // Auth & Shop State - use Clerk user ID or fall back to localStorage in dev
   const [userId, setUserId] = useState<string | null>(null);
   const [shop, setShop] = useState<Shop | null>(null);
   const [shopLoading, setShopLoading] = useState(true);
@@ -226,15 +236,23 @@ export default function CabManagementPage() {
   const [selectedDriverId, setSelectedDriverId] = useState<string>("");
 
   // ──────────────────────────────────────────────────────────
-  // Initialize
+  // Initialize Auth - Use Clerk if signed in, fallback to localStorage
   // ──────────────────────────────────────────────────────────
 
   useEffect(() => {
-    const storedId = getStoredUserId();
-    if (storedId) {
-      setUserId(storedId);
+    if (authLoaded && isSignedIn && clerkUserId) {
+      setUserId(clerkUserId);
+      return;
     }
-  }, []);
+    
+    // Fallback to localStorage for dev mode
+    if (authLoaded && !isSignedIn) {
+      const storedId = getStoredUserId();
+      if (storedId) {
+        setUserId(storedId);
+      }
+    }
+  }, [authLoaded, isSignedIn, clerkUserId]);
 
   useEffect(() => {
     async function loadShop() {
@@ -268,12 +286,13 @@ export default function CabManagementPage() {
         setCabOwner(data);
       } catch (err) {
         if (isApiError(err) && err.status === 404) {
-          // No cab owner - redirect to setup
+          // No cab owner - this is expected for shops without cab services
+          // Don't log error as it's not actually an error condition
           router.push(`/s/${slug}/owner/cab/setup`);
           return;
         }
+        // Only log unexpected errors
         console.error("Error checking cab owner:", err);
-        // Don't block - might be a new feature
       } finally {
         setCabOwnerLoading(false);
       }

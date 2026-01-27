@@ -172,6 +172,9 @@ export function setStoredUserId(userId: string): void {
 export function clearStoredUserId(): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem(OWNER_USER_ID_KEY);
+  if (DEBUG_LOGGING) {
+    console.log("[API] Cleared old owner_user_id from localStorage");
+  }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -179,17 +182,57 @@ export function clearStoredUserId(): void {
 // ──────────────────────────────────────────────────────────
 
 /**
+ * Get Clerk JWT token if available
+ * This function safely retrieves the JWT from Clerk's session
+ */
+async function getClerkToken(): Promise<string | null> {
+  try {
+    if (typeof window === "undefined") return null;
+    
+    // Use Clerk's public API if available
+    if ((window as any).Clerk) {
+      // First try default template
+      const token = await (window as any).Clerk.session?.getToken().catch((err: any) => {
+        if (DEBUG_LOGGING) {
+          console.log('[API Auth] Clerk.session.getToken() failed:', err);
+        }
+        return null;
+      });
+      
+      if (token) {
+        if (DEBUG_LOGGING) {
+          console.log('[API Auth] Successfully retrieved Clerk JWT token');
+        }
+        return token;
+      }
+    } else {
+      if (DEBUG_LOGGING) {
+        console.log('[API Auth] window.Clerk is not available yet');
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    if (DEBUG_LOGGING) {
+      console.log(`[API Auth] Failed to get Clerk token:`, error);
+    }
+    return null;
+  }
+}
+
+/**
  * Centralized API fetch wrapper with automatic auth injection.
  * 
  * Features:
- * - Automatic X-User-Id header injection from localStorage
+ * - Automatic Clerk JWT token injection in Authorization header
+ * - Falls back to X-User-Id from localStorage for dev/legacy compatibility
  * - Request timeout handling
  * - Consistent error handling with ApiError type
  * - Debug logging in development
  * - Safe JSON body handling
  * 
  * @example
- * // Simple GET (auto-authenticates)
+ * // Simple GET (auto-authenticates with Clerk JWT)
  * const shops = await apiFetch<Shop[]>('/shops');
  * 
  * // POST with body
@@ -197,9 +240,6 @@ export function clearStoredUserId(): void {
  *   method: 'POST',
  *   body: { name: 'My Shop' },
  * });
- * 
- * // Explicit userId override
- * const data = await apiFetch('/s/shop/data', { userId: 'user_123' });
  * 
  * // Skip auth for public endpoints
  * const publicData = await apiFetch('/public/info', { userId: false });
@@ -226,14 +266,27 @@ export async function apiFetch<T>(
     headers["Content-Type"] = "application/json";
   }
   
-  // Inject X-User-Id header (automatic identity injection)
-  // - If explicitUserId is provided, use it
-  // - If explicitUserId is false, skip auth header
-  // - Otherwise, use stored userId from localStorage
+  // Try to get Clerk JWT token first (for production auth)
+  let hasAuth = false;
   if (explicitUserId !== false) {
+    const clerkToken = await getClerkToken();
+    if (clerkToken) {
+      headers["Authorization"] = `Bearer ${clerkToken}`;
+      hasAuth = true;
+      if (DEBUG_LOGGING) {
+        console.log(`[API Auth] Using Clerk JWT token`);
+      }
+    }
+  }
+  
+  // Fallback to X-User-Id from localStorage if no JWT available (for dev mode)
+  if (!hasAuth && explicitUserId !== false) {
     const userId = explicitUserId || getStoredUserId();
     if (userId) {
       headers["X-User-Id"] = userId;
+      if (DEBUG_LOGGING) {
+        console.log(`[API Auth] Using X-User-Id header: ${userId}`);
+      }
     }
   }
 
@@ -285,7 +338,15 @@ export async function apiFetch<T>(
       }
       
       if (DEBUG_LOGGING) {
-        console.error(`[API] Error ${res.status}: ${detail}`, { endpoint });
+        // Don't log expected 404s (like checking if cab owner exists)
+        const isExpected404 = res.status === 404 && (
+          endpoint.includes('/owner/cab/owner') ||
+          endpoint.includes('not configured')
+        );
+        
+        if (!isExpected404) {
+          console.error(`[API] Error ${res.status}: ${detail}`, { endpoint });
+        }
       }
       
       const error: ApiError = { detail, status: res.status };

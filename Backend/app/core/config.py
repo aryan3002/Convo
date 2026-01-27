@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         alias="PUBLIC_BOOKING_API_KEY",
         description="API key for ChatGPT Custom GPT public booking endpoints"
     )
+    # Clerk Authentication (Clerk.com)
+    clerk_secret_key: str | None = Field(default=None, alias="CLERK_SECRET_KEY")
+    clerk_publishable_key: str | None = Field(default=None, alias="CLERK_PUBLISHABLE_KEY")
+    clerk_frontend_api: str | None = Field(default=None, alias="CLERK_FRONTEND_API")
 
     model_config = SettingsConfigDict(env_file=(".env", "Backend/.env", "backend/.env"), extra="ignore")
 

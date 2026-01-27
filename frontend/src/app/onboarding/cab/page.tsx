@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useRouter } from "next/navigation";
+import { useUser } from "@clerk/nextjs";
 import {
   Car,
   User,
@@ -22,6 +23,7 @@ import {
   getErrorMessage,
   isApiError,
 } from "@/lib/api";
+import { useApiClient } from "@/lib/clerk-api";
 
 // ──────────────────────────────────────────────────────────
 // Cab Onboarding - Creates shop with category="cab"
@@ -55,10 +57,26 @@ const TIMEZONES = [
 
 export default function CabOnboardingPage() {
   const router = useRouter();
+  const { user, isLoaded } = useUser();
+  const apiClient = useApiClient();
   const [formData, setFormData] = useState<FormData>(initialFormData);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Initialize form with Clerk user ID
+  useEffect(() => {
+    if (isLoaded && user) {
+      setFormData(prev => ({
+        ...prev,
+        ownerUserId: user.id, // Clerk user ID
+        email: user.primaryEmailAddress?.emailAddress || "",
+      }));
+    } else if (isLoaded && !user) {
+      // Redirect to sign-up if not logged in
+      router.push('/sign-up?redirect_url=' + encodeURIComponent('/onboarding/cab'));
+    }
+  }, [isLoaded, user, router]);
 
   const updateField = useCallback(
     <K extends keyof FormData>(field: K, value: FormData[K]) => {
@@ -99,21 +117,20 @@ export default function CabOnboardingPage() {
     setIsSubmitting(true);
 
     try {
-      const shop = await createShop({
-        owner_user_id: formData.ownerUserId.trim(),
-        name: formData.businessName.trim(),
-        phone_number: normalizedPhone,
-        timezone: formData.timezone || "America/Phoenix",
-        category: "cab", // Key: this creates a cab service shop
+      const shop = await apiClient.fetch('/shops', {
+        method: 'POST',
+        body: JSON.stringify({
+          owner_user_id: formData.ownerUserId.trim(),
+          name: formData.businessName.trim(),
+          phone_number: normalizedPhone,
+          timezone: formData.timezone || "America/Phoenix",
+          category: "cab", // Key: this creates a cab service shop
+        }),
       });
-
-      // Store the owner user ID for future API calls (single source of truth)
-      setStoredUserId(formData.ownerUserId.trim());
 
       setSuccess(`Cab service "${shop.name}" created! Redirecting to setup...`);
 
       // Redirect to the CAB-specific setup wizard
-      // userId is already in localStorage - no need to pass in URL (security risk)
       setTimeout(() => {
         router.push(`/s/${shop.slug}/owner/cab/setup`);
       }, 1500);

@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useRouter } from "next/navigation";
+import { useUser } from "@clerk/nextjs";
 import {
   Store,
   User,
@@ -24,6 +25,7 @@ import {
   getErrorMessage,
   isApiError,
 } from "@/lib/api";
+import { useApiClient } from "@/lib/clerk-api";
 import { geocodeAddress, isValidCoordinates } from "@/lib/geocoding";
 
 // ──────────────────────────────────────────────────────────
@@ -83,6 +85,9 @@ const CATEGORIES = [
 
 export default function OnboardingPage() {
   const router = useRouter();
+  const { user, isLoaded } = useUser();
+  const apiClient = useApiClient();
+  
   const [formData, setFormData] = useState<FormData>(initialFormData);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -91,6 +96,19 @@ export default function OnboardingPage() {
   // Phase 3: Geocoding state
   const [geocodingStatus, setGeocodingStatus] = useState<GeocodingStatus>('idle');
   const [geocodingError, setGeocodingError] = useState<string | null>(null);
+
+  // Initialize form with Clerk user ID
+  useEffect(() => {
+    if (isLoaded && user) {
+      setFormData(prev => ({
+        ...prev,
+        ownerUserId: user.id, // Clerk user ID
+      }));
+    } else if (isLoaded && !user) {
+      // Redirect to sign-up if not logged in
+      router.push('/sign-up');
+    }
+  }, [isLoaded, user, router]);
 
   const updateField = useCallback(
     <K extends keyof FormData>(field: K, value: FormData[K]) => {

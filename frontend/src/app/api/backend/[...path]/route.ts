@@ -95,25 +95,19 @@ async function proxyRequest(
   const targetUrl = `${backendUrl}/${path}${url.search}`;
   
   logProxy("info", `${request.method} ${targetUrl}`, { 
-    hasUserId: !!request.headers.get("x-user-id") 
+    hasUserId: !!request.headers.get("x-user-id"),
+    hasAuth: !!request.headers.get("authorization")
   });
   
   // Forward headers, excluding hop-by-hop headers
   const headers: Record<string, string> = {};
   request.headers.forEach((value, key) => {
     const lowerKey = key.toLowerCase();
-    // Skip hop-by-hop headers and defer X-User-Id so we only set it once
-    if (!SKIP_HEADERS.has(lowerKey) && lowerKey !== "x-user-id") {
+    // Skip hop-by-hop headers but allow authorization and x-user-id
+    if (!SKIP_HEADERS.has(lowerKey)) {
       headers[key] = value;
     }
   });
-  
-  // Ensure X-User-Id is forwarded for owner auth
-  const userId = request.headers.get("x-user-id");
-  if (userId) {
-    // Use a single canonical header to avoid duplicate values being joined with commas
-    headers["x-user-id"] = userId;
-  }
   
   // Create timeout controller
   const { controller, timeoutId } = createTimeoutController(REQUEST_TIMEOUT_MS);

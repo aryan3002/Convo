@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useParams, useRouter } from "next/navigation";
+import { useAuth, useUser, SignOutButton } from "@clerk/nextjs";
 import {
   MessageSquare,
   Send,
@@ -33,6 +34,8 @@ import {
   Check,
   Save,
   Car,
+  LogIn,
+  UserPlus,
 } from "lucide-react";
 import {
   getApiBase,
@@ -120,7 +123,12 @@ export default function ShopOwnerDashboard() {
   const slug = params.slug as string;
   const API_BASE = getApiBase();
 
+  // Clerk Auth - primary auth source
+  const { isLoaded: authLoaded, isSignedIn, userId: clerkUserId, getToken } = useAuth();
+  const { user: clerkUser } = useUser();
+
   // Auth & Shop State
+  // userId now comes from Clerk (or falls back to localStorage for dev)
   const [userId, setUserId] = useState<string | null>(null);
   const [shop, setShop] = useState<Shop | null>(null);
   const [shopLoading, setShopLoading] = useState(true);
@@ -185,15 +193,24 @@ export default function ShopOwnerDashboard() {
   );
 
   // ──────────────────────────────────────────────────────────
-  // Initialize
+  // Initialize Auth - Prefer Clerk, fallback to localStorage (dev)
   // ──────────────────────────────────────────────────────────
 
   useEffect(() => {
-    const storedId = getStoredUserId();
-    if (storedId) {
-      setUserId(storedId);
+    // If Clerk is loaded and user is signed in, use Clerk user ID
+    if (authLoaded && isSignedIn && clerkUserId) {
+      setUserId(clerkUserId);
+      return;
     }
-  }, []);
+    
+    // Fallback to localStorage for dev mode (when not signed in via Clerk)
+    if (authLoaded && !isSignedIn) {
+      const storedId = getStoredUserId();
+      if (storedId) {
+        setUserId(storedId);
+      }
+    }
+  }, [authLoaded, isSignedIn, clerkUserId]);
 
   useEffect(() => {
     async function loadShop() {
@@ -683,61 +700,137 @@ export default function ShopOwnerDashboard() {
   }
 
   // ──────────────────────────────────────────────────────────
-  // User ID Modal
+  // Public Owner Landing Page (when not signed in)
+  // Shows Login button and Create Cab Service CTA
   // ──────────────────────────────────────────────────────────
 
   if (!userId) {
+    // Build redirect URLs for auth pages
+    const currentPath = `/s/${slug}/owner`;
+    const cabSetupPath = `/s/${slug}/owner/cab/setup`;
+    const loginUrl = `/sign-in?redirect_url=${encodeURIComponent(currentPath)}`;
+    const signupUrl = `/sign-up?redirect_url=${encodeURIComponent(cabSetupPath)}`;
+    
     return (
-      <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center px-4">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="glass-card rounded-2xl p-8 max-w-md w-full border border-white/5"
-        >
-          <div className="text-center mb-6">
-            <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-br from-[#00d4ff]/20 via-[#a855f7]/20 to-[#ec4899]/20 flex items-center justify-center border border-white/10 mb-4">
-              <User className="w-8 h-8 text-[#00d4ff]" />
+      <div className="min-h-screen bg-[#0a0e1a] text-white relative">
+        {/* Background Effects */}
+        <div className="fixed inset-0 overflow-hidden pointer-events-none -z-10">
+          <div className="absolute w-[600px] h-[600px] rounded-full blur-[150px]" style={{ background: "rgba(0, 212, 255, 0.08)", top: "-10%", left: "-10%" }} />
+          <div className="absolute w-[500px] h-[500px] rounded-full blur-[150px]" style={{ background: "rgba(168, 85, 247, 0.08)", top: "30%", right: "-5%" }} />
+          <div className="absolute w-[400px] h-[400px] rounded-full blur-[150px]" style={{ background: "rgba(236, 72, 153, 0.06)", bottom: "-5%", left: "30%" }} />
+        </div>
+
+        {/* Header */}
+        <header className="sticky top-0 z-50 backdrop-blur-xl bg-[#0a0e1a]/80 border-b border-white/5">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#00d4ff] via-[#a855f7] to-[#ec4899] flex items-center justify-center shadow-neon">
+                <Car className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-white">Convo</h1>
+                <p className="text-xs text-gray-500">AI-Powered Cab Services</p>
+              </div>
             </div>
-            <h2 className="text-xl font-bold text-white mb-2">Sign In</h2>
-            <p className="text-sm text-gray-400">
-              Enter your Owner ID to access {shop?.name || "this shop"}
+            <button
+              onClick={() => router.push(loginUrl)}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl btn-neon text-sm font-medium"
+            >
+              <LogIn className="w-4 h-4" />
+              Login
+            </button>
+          </div>
+        </header>
+
+        {/* Main Content - Public Landing */}
+        <main className="max-w-4xl mx-auto px-4 sm:px-6 py-16">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-center mb-12"
+          >
+            <h1 className="text-4xl sm:text-5xl font-bold bg-gradient-to-r from-[#00d4ff] via-[#a855f7] to-[#ec4899] bg-clip-text text-transparent mb-4">
+              {shop?.name || "Owner Dashboard"}
+            </h1>
+            <p className="text-lg text-gray-400 max-w-2xl mx-auto">
+              Manage your cab service, track bookings, and grow your business with AI-powered tools.
             </p>
+          </motion.div>
+
+          {/* CTA Cards */}
+          <div className="grid md:grid-cols-2 gap-6 max-w-2xl mx-auto">
+            {/* Login Card */}
+            <motion.div
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.1 }}
+              className="glass-card rounded-2xl p-6 border border-white/5 hover:border-[#00d4ff]/30 transition-all"
+            >
+              <div className="w-12 h-12 rounded-xl bg-[#00d4ff]/10 flex items-center justify-center mb-4 border border-[#00d4ff]/30">
+                <LogIn className="w-6 h-6 text-[#00d4ff]" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">Existing Owner?</h3>
+              <p className="text-sm text-gray-400 mb-4">
+                Sign in to access your dashboard and manage your cab service.
+              </p>
+              <button
+                onClick={() => router.push(loginUrl)}
+                className="w-full py-3 rounded-xl btn-neon text-sm font-medium flex items-center justify-center gap-2"
+              >
+                <LogIn className="w-4 h-4" />
+                Sign In
+              </button>
+            </motion.div>
+
+            {/* Create Cab Service Card */}
+            <motion.div
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.2 }}
+              className="glass-card rounded-2xl p-6 border border-white/5 hover:border-[#a855f7]/30 transition-all"
+            >
+              <div className="w-12 h-12 rounded-xl bg-[#a855f7]/10 flex items-center justify-center mb-4 border border-[#a855f7]/30">
+                <UserPlus className="w-6 h-6 text-[#a855f7]" />
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">New to Convo?</h3>
+              <p className="text-sm text-gray-400 mb-4">
+                Create an account and set up your cab service in minutes.
+              </p>
+              <button
+                onClick={() => router.push(signupUrl)}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-[#a855f7] to-[#ec4899] text-white text-sm font-medium flex items-center justify-center gap-2 hover:shadow-lg hover:shadow-[#a855f7]/25 transition-all"
+              >
+                <Plus className="w-4 h-4" />
+                Create New Cab Service
+              </button>
+            </motion.div>
           </div>
 
-          <form onSubmit={handleSetUserId} className="space-y-4">
-            <input
-              name="userId"
-              type="text"
-              placeholder="Enter your Owner ID"
-              className="w-full px-4 py-3 rounded-xl input-glass text-sm"
-              autoFocus
-            />
-
-            {authError && (
-              <div className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-500/30">
-                <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
-                <p className="text-xs text-red-300">{authError}</p>
-              </div>
-            )}
-
-            <button
-              type="submit"
-              className="w-full py-3 rounded-xl btn-neon text-sm font-medium"
-            >
-              Continue
-            </button>
-          </form>
-
-          <p className="text-xs text-gray-500 text-center mt-4">
-            Don't have an account?{" "}
-            <button
-              onClick={() => router.push("/onboarding")}
-              className="text-[#00d4ff] hover:underline"
-            >
-              Create a shop
-            </button>
-          </p>
-        </motion.div>
+          {/* Features Section */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3 }}
+            className="mt-16"
+          >
+            <h2 className="text-2xl font-bold text-white text-center mb-8">
+              Why Choose Convo?
+            </h2>
+            <div className="grid sm:grid-cols-3 gap-6">
+              {[
+                { icon: Car, title: "Easy Bookings", desc: "Customers can book rides 24/7 via web or WhatsApp" },
+                { icon: BarChart3, title: "Real-time Analytics", desc: "Track revenue, bookings, and driver performance" },
+                { icon: Users, title: "Driver Management", desc: "Assign drivers and manage your fleet effortlessly" },
+              ].map((feature, i) => (
+                <div key={i} className="glass p-4 rounded-xl border border-white/5 text-center">
+                  <feature.icon className="w-8 h-8 text-[#00d4ff] mx-auto mb-3" />
+                  <h3 className="font-semibold text-white mb-1">{feature.title}</h3>
+                  <p className="text-xs text-gray-400">{feature.desc}</p>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        </main>
       </div>
     );
   }

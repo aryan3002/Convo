@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { useRouter } from "next/navigation";
+import { useUser, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
+import { useApiClient } from "@/lib/clerk-api";
 import {
   Store,
   Plus,
@@ -13,8 +15,8 @@ import {
   MessageSquare,
   UserCircle,
   Car,
+  LogIn,
 } from "lucide-react";
-import { getStoredUserId } from "@/lib/api";
 
 // ──────────────────────────────────────────────────────────
 // Landing Page - Shop Selector / Onboarding Entry
@@ -22,12 +24,58 @@ import { getStoredUserId } from "@/lib/api";
 
 export default function OwnerLandingPage() {
   const router = useRouter();
-  const [hasUserId, setHasUserId] = useState(false);
+  const { user, isLoaded } = useUser();
+  const apiClient = useApiClient();
+  const [userShops, setUserShops] = useState<any[]>([]);
+  const [loadingShops, setLoadingShops] = useState(false);
 
+  // Fetch user's shops when signed in - only once per user
   useEffect(() => {
-    const userId = getStoredUserId();
-    setHasUserId(!!userId);
-  }, []);
+    if (!isLoaded || !user) {
+      console.log("Skipping shop fetch - not loaded or no user", { isLoaded, hasUser: !!user });
+      return;
+    }
+
+    let isMounted = true;
+
+    async function fetchUserShops() {
+      setLoadingShops(true);
+      try {
+        console.log("Fetching shops for user:", user.id);
+        const response = await fetch(`/api/backend/users/${user.id}/shops`, {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Failed to fetch shops: ${response.status}`);
+        }
+        
+        const shops = await response.json();
+        console.log("Fetched shops:", shops);
+        
+        if (isMounted) {
+          setUserShops(Array.isArray(shops) ? shops : []);
+        }
+      } catch (error) {
+        console.error("Failed to fetch user shops:", error);
+        if (isMounted) {
+          setUserShops([]);
+        }
+      } finally {
+        if (isMounted) {
+          setLoadingShops(false);
+        }
+      }
+    }
+
+    fetchUserShops();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isLoaded, user?.id]);
 
   const features = [
     {
@@ -65,6 +113,56 @@ export default function OwnerLandingPage() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {/* My Shops - Show when user is logged in (with loading/empty state) */}
+            {isLoaded && user && (
+              <div className="relative group">
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  className="text-xs px-4 py-2 rounded-full glass border border-white/10 text-white hover:border-[#00d4ff]/50 transition-all flex items-center gap-2"
+                >
+                  <Store className="w-3 h-3 text-[#00d4ff]" />
+                  {loadingShops ? "Loading..." : `My Shops (${userShops.length})`}
+                </motion.button>
+                {/* Dropdown - only show when there are shops */}
+                {userShops.length > 0 && (
+                  <div className="absolute right-0 mt-2 w-64 glass-card rounded-xl border border-white/10 shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                    <div className="p-2 space-y-1">
+                      {userShops.map((shop) => (
+                        <button
+                          key={shop.id}
+                          onClick={() => router.push(`/s/${shop.slug}/owner`)}
+                          className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/5 transition-colors"
+                        >
+                          <div className="text-sm font-medium text-white">{shop.name}</div>
+                          <div className="text-xs text-gray-400">/{shop.slug}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* Clerk Authentication */}
+            {isLoaded && user ? (
+              <UserButton afterSignOutUrl="/owner-landing" />
+            ) : (
+              <div className="flex items-center gap-2">
+                <SignInButton mode="modal" forceRedirectUrl="/owner-landing">
+                  <div className="text-xs px-4 py-2 rounded-full glass border border-white/10 text-gray-400 hover:text-white hover:border-[#00d4ff]/50 transition-all flex items-center gap-2 cursor-pointer">
+                    <LogIn className="w-3 h-3 text-[#00d4ff]" />
+                    Sign In
+                  </div>
+                </SignInButton>
+                <SignUpButton mode="modal" forceRedirectUrl="/onboarding">
+                  <div className="text-xs px-4 py-2 rounded-full bg-gradient-to-r from-[#00d4ff] to-[#a855f7] text-white font-medium transition-all flex items-center gap-2 shadow-neon cursor-pointer">
+                    <Sparkles className="w-3 h-3" />
+                    Sign Up
+                  </div>
+                </SignUpButton>
+              </div>
+            )}
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}
@@ -119,7 +217,14 @@ export default function OwnerLandingPage() {
             <motion.button
               whileHover={{ scale: 1.02, y: -2 }}
               whileTap={{ scale: 0.98 }}
-              onClick={() => router.push("/onboarding")}
+              onClick={() => {
+                if (!isLoaded || !user) {
+                  // Redirect to sign up if not logged in
+                  router.push("/sign-up?redirect_url=" + encodeURIComponent("/onboarding"));
+                } else {
+                  router.push("/onboarding");
+                }
+              }}
               className="glass-card rounded-2xl p-6 border border-white/5 text-left hover:border-[#00d4ff]/30 transition-all group"
             >
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#00d4ff]/20 to-[#a855f7]/20 flex items-center justify-center border border-white/10 mb-4 group-hover:shadow-neon transition-all">
@@ -130,6 +235,7 @@ export default function OwnerLandingPage() {
               </h3>
               <p className="text-sm text-gray-400 mb-4">
                 Set up your business in minutes with our guided onboarding.
+                {!isLoaded || !user ? " (Sign in required)" : ""}
               </p>
               <span className="text-sm text-[#00d4ff] flex items-center gap-1 group-hover:gap-2 transition-all">
                 Get started <ArrowRight className="w-4 h-4" />
@@ -184,7 +290,14 @@ export default function OwnerLandingPage() {
             transition={{ delay: 0.12 }}
             whileHover={{ scale: 1.02, y: -2 }}
             whileTap={{ scale: 0.98 }}
-            onClick={() => router.push("/onboarding/cab")}
+            onClick={() => {
+              if (!isLoaded || !user) {
+                // Redirect to sign up if not logged in
+                router.push("/sign-up?redirect_url=" + encodeURIComponent("/onboarding/cab"));
+              } else {
+                router.push("/onboarding/cab");
+              }
+            }}
             className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#10b981]/30 transition-all group mb-4 flex items-center justify-between"
           >
             <div className="flex items-center gap-4">
@@ -197,6 +310,7 @@ export default function OwnerLandingPage() {
                 </h3>
                 <p className="text-xs text-gray-400">
                   Set up your cab/taxi business with driver management and ride booking
+                  {!isLoaded || !user ? " (Sign in required)" : ""}
                 </p>
               </div>
             </div>

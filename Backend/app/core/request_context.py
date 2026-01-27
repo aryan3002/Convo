@@ -35,8 +35,9 @@ from .db import get_session
 logger = logging.getLogger(__name__)
 
 # Development mode - bypasses authorization checks
-# ⚠️ HARDCODED TO TRUE FOR DEVELOPMENT - CHANGE BEFORE PRODUCTION!
-DISABLE_AUTH_CHECKS = True  # Set to False before deploying to production
+# Read from environment variable DISABLE_AUTH_CHECKS
+import os
+DISABLE_AUTH_CHECKS = os.environ.get("DISABLE_AUTH_CHECKS", "false").lower() in ("true", "1", "yes")
 
 
 @dataclass
