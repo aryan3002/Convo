@@ -3,7 +3,9 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
 import "./globals.css";
 
-const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+const clerkPublishableKey =
+  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY || "pk_test_placeholder";
+const isFallbackClerkKey = !process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -46,22 +48,17 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // Fail-safe: allow the app to build even if the Clerk key is missing in the environment.
-  if (!clerkPublishableKey) {
-    console.warn("Clerk publishable key is missing. Rendering without ClerkProvider.");
-    return (
-      <html lang="en">
-        <body
-          className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-        >
-          {children}
-        </body>
-      </html>
+  if (isFallbackClerkKey && typeof console !== "undefined") {
+    console.warn(
+      "Clerk publishable key is missing. Using placeholder key; please set NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY for production."
     );
   }
 
   return (
-    <ClerkProvider appearance={clerkAppearance} publishableKey={clerkPublishableKey}>
+    <ClerkProvider
+      appearance={clerkAppearance}
+      publishableKey={clerkPublishableKey}
+    >
       <html lang="en">
         <body
           className={`${geistSans.variable} ${geistMono.variable} antialiased`}
