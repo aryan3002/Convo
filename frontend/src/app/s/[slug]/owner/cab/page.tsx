@@ -639,7 +639,7 @@ export default function CabManagementPage() {
     }
   };
 
-  const handleToggleDriverStatus = async (driverId: number, currentStatus: string) => {
+  const handleToggleDriverStatus = async (driverId: string, currentStatus: string) => {
     if (!userId) return;
     setDriverLoading(true);
 
