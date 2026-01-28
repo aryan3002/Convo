@@ -137,9 +137,7 @@ function SignUpContent() {
             className="font-semibold text-[#a855f7] hover:text-[#00d4ff] transition-all duration-300 hover:drop-shadow-[0_0_8px_rgba(168,85,247,0.8)] relative group"
           >
             Sign in
-            <span className="absolute -bottom-1 left-0 w-0 h-[2px] bg-gradient-to-r from-[#a855f7] to-[#00d4ff] group-hover:w-full transition-all duration-300" />me="font-semibold text-[#00d4ff] hover:text-[#a855f7] transition-colors"
-          >
-            Sign in
+            <span className="absolute -bottom-1 left-0 w-0 h-[2px] bg-gradient-to-r from-[#a855f7] to-[#00d4ff] group-hover:w-full transition-all duration-300" />
           </a>
         </p>
       </div>
