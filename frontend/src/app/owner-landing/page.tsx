@@ -28,22 +28,22 @@ export default function OwnerLandingPage() {
   const apiClient = useApiClient();
   const [userShops, setUserShops] = useState<any[]>([]);
   const [loadingShops, setLoadingShops] = useState(false);
+  const userId = user?.id;
 
   // Fetch user's shops when signed in - only once per user
   useEffect(() => {
-    if (!isLoaded || !user) {
-      console.log("Skipping shop fetch - not loaded or no user", { isLoaded, hasUser: !!user });
+    if (!isLoaded || !userId) {
+      console.log("Skipping shop fetch - not loaded or no user", { isLoaded, hasUser: !!userId });
       return;
     }
 
     let isMounted = true;
 
-    async function fetchUserShops() {
+    async function fetchUserShops(currentUserId: string) {
       setLoadingShops(true);
       try {
-        const userId = user.id;
-        console.log("Fetching shops for user:", userId);
-        const response = await fetch(`/api/backend/users/${userId}/shops`, {
+        console.log("Fetching shops for user:", currentUserId);
+        const response = await fetch(`/api/backend/users/${currentUserId}/shops`, {
           headers: {
             'Content-Type': 'application/json',
           },
@@ -71,12 +71,12 @@ export default function OwnerLandingPage() {
       }
     }
 
-    fetchUserShops();
+    fetchUserShops(userId);
 
     return () => {
       isMounted = false;
     };
-  }, [isLoaded, user?.id]);
+  }, [isLoaded, userId]);
 
   const features = [
     {
