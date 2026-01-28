@@ -432,10 +432,14 @@ export default function CabManagementPage() {
     setDriverBookingsLoading(true);
 
     try {
-      const data = await apiFetch<{ items: CabBooking[] }>(
+      const data = await apiFetch<{ items: CabBooking[] | { booking_id: string }[] }>(
         `/s/${slug}/owner/cab/drivers/${driverId}/bookings?upcoming_only=false`
       );
-      setDriverBookings(data.items || []);
+      const items = (data.items || []).map((item: any) => ({
+        ...item,
+        id: item.id || item.booking_id, // normalize legacy booking_id field
+      })) as CabBooking[];
+      setDriverBookings(items);
     } catch (err) {
       console.error("Error fetching driver bookings:", err);
       setDriverBookings([]);
@@ -1802,7 +1806,7 @@ export default function CabManagementPage() {
                   <div className="space-y-3">
                     {driverBookings.map((booking) => (
                       <motion.div
-                        key={booking.booking_id}
+                        key={booking.id}
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         className="glass rounded-xl p-4 border border-white/5 hover:bg-white/5 transition-colors"
