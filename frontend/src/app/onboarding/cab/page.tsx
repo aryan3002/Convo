@@ -117,7 +117,7 @@ export default function CabOnboardingPage() {
     setIsSubmitting(true);
 
     try {
-      const shop = await apiClient.fetch('/shops', {
+      const shop = await apiClient.fetch<{ name: string; slug: string }>('/shops', {
         method: 'POST',
         body: JSON.stringify({
           owner_user_id: formData.ownerUserId.trim(),
