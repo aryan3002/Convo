@@ -43,19 +43,9 @@ export default function OwnerLandingPage() {
       setLoadingShops(true);
       try {
         console.log("Fetching shops for user:", currentUserId);
-        const response = await fetch(`/api/backend/users/${currentUserId}/shops`, {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
-        
-        if (!response.ok) {
-          throw new Error(`Failed to fetch shops: ${response.status}`);
-        }
-        
-        const shops = await response.json();
-        console.log("Fetched shops:", shops);
-        
+        // Use authenticated client so Clerk token is included
+        const shops = await apiClient.fetch<any[]>(`/users/${currentUserId}/shops`);
+
         if (isMounted) {
           setUserShops(Array.isArray(shops) ? shops : []);
         }
