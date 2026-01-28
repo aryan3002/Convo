@@ -41,8 +41,9 @@ export default function OwnerLandingPage() {
     async function fetchUserShops() {
       setLoadingShops(true);
       try {
-        console.log("Fetching shops for user:", user.id);
-        const response = await fetch(`/api/backend/users/${user.id}/shops`, {
+        const userId = user.id;
+        console.log("Fetching shops for user:", userId);
+        const response = await fetch(`/api/backend/users/${userId}/shops`, {
           headers: {
             'Content-Type': 'application/json',
           },
