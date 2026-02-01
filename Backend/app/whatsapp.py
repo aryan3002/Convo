@@ -319,7 +319,11 @@ def format_booking_confirmation(
 🕐 Time: {time_display}
 💵 Fare: ${final_price:.2f}
 
-We'll notify you when a driver is assigned. Thank you for choosing us! 🙏"""
+Your booking has been received! We'll notify you when:
+• The owner confirms your ride
+• A driver is assigned
+
+Thank you for choosing us! 🙏"""
     
     return message
 
@@ -360,7 +364,7 @@ def format_owner_confirmation_message(
 🕐 Time: {time_display}
 💵 Fare: ${final_price:.2f}
 
-Your ride has been confirmed! We'll notify you when a driver is assigned. 🙏"""
+🎉 Great news! Your ride has been confirmed by the owner. We'll notify you as soon as a driver is assigned. 🙏"""
     
     return message
 

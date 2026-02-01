@@ -4221,8 +4221,86 @@ async def whatsapp_webhook(
     if not normalized_phone.startswith('+'):
         normalized_phone = f'+{normalized_phone}'
     
-    # Check if customer has an active session (e.g., selecting ride to cancel)
+    # Check if customer has an active session (e.g., selecting ride to cancel or confirming booking)
     whatsapp_session = get_whatsapp_session(customer_number)
+    
+    # Handle YES/NO confirmation for pending quote
+    if whatsapp_session and whatsapp_session.get('state') == 'awaiting_booking_confirmation':
+        message_upper = message_body.upper().strip()
+        
+        if message_upper in ['YES', 'Y', 'CONFIRM', 'OK']:
+            # User confirmed - create the booking
+            try:
+                quote_data = whatsapp_session.get('data', {})
+                parsed = quote_data.get('parsed')
+                calc_result = quote_data.get('calc_result')
+                
+                if not parsed or not calc_result:
+                    clear_session(customer_number)
+                    send_whatsapp_message(customer_number, "❌ Session expired. Please send your booking request again.")
+                    return {"status": "session_expired"}
+                
+                # Create the booking
+                from .models import CabBookingChannel
+                
+                vehicle_type_value = parsed['vehicle_type']
+                if hasattr(vehicle_type_value, 'value'):
+                    vehicle_type_value = vehicle_type_value.value
+                
+                booking_request = CabBookingCreateRequest(
+                    channel="whatsapp",
+                    pickup_text=parsed['pickup_text'],
+                    drop_text=parsed['drop_text'],
+                    pickup_time=parsed['pickup_time'],
+                    vehicle_type=vehicle_type_value,
+                    passengers=parsed['passengers'],
+                    customer_name="WhatsApp Customer",
+                    customer_phone=normalized_phone,
+                    customer_email=None,
+                )
+                
+                booking = await create_cab_booking_record(
+                    session=session,
+                    shop_id=ctx.shop_id,
+                    request=booking_request,
+                    calc_result=calc_result,
+                )
+                
+                # Send confirmation with reference number
+                confirmation_msg = format_booking_confirmation(
+                    booking_id=str(booking.id),
+                    pickup_text=parsed['pickup_text'],
+                    drop_text=parsed['drop_text'],
+                    pickup_time=booking.pickup_time.isoformat(),
+                    final_price=calc_result['final_price'],
+                )
+                
+                # Add note about owner confirmation
+                owner_pending_msg = "\n\n⏳ Your booking is pending owner confirmation. We'll notify you when it's confirmed and when a driver is assigned."
+                
+                send_whatsapp_message(customer_number, confirmation_msg + owner_pending_msg)
+                
+                # Clear session
+                clear_session(customer_number)
+                
+                logger.info(f"✅ WhatsApp booking created after YES confirmation: {booking.id}")
+                return {"status": "booking_created", "booking_id": str(booking.id)}
+                
+            except Exception as e:
+                logger.exception(f"Error creating booking after confirmation: {e}")
+                clear_session(customer_number)
+                send_whatsapp_message(customer_number, "❌ An error occurred. Please try again.")
+                return {"status": "error"}
+                
+        elif message_upper in ['NO', 'N', 'CANCEL']:
+            # User declined the quote
+            clear_session(customer_number)
+            send_whatsapp_message(customer_number, "❌ Booking cancelled. Send us a new message anytime to book a ride.")
+            return {"status": "booking_declined"}
+        else:
+            # Invalid response - remind them
+            send_whatsapp_message(customer_number, "Please reply *YES* to confirm booking or *NO* to cancel.")
+            return {"status": "awaiting_response"}
     
     if whatsapp_session and whatsapp_session.get('state') == 'awaiting_cancel_selection':
         # Customer is selecting which ride to cancel
@@ -4380,15 +4458,6 @@ async def whatsapp_webhook(
             logger.info(f"📋 Showed {len(active_bookings)} rides to {customer_number} for cancellation")
             return {"status": "awaiting_selection", "ride_count": len(active_bookings)}
     
-    # Handle YES/NO confirmation (simplified - in production use session state)
-    if message_body.upper() in ['YES', 'NO', 'CONFIRM', 'CANCEL']:
-        if message_body.upper() in ['YES', 'CONFIRM']:
-            response = "✅ To create a booking, please send a new request with your pickup and dropoff locations."
-        else:
-            response = "❌ Booking cancelled. Send a new message anytime to book a ride."
-        send_whatsapp_message(customer_number, response)
-        return {"status": "confirmation_handled"}
-    
     # Parse booking request - try AI first, fallback to regex
     parsed = None
     try:
@@ -4436,55 +4505,16 @@ async def whatsapp_webhook(
         if not send_whatsapp_message(customer_number, quote_msg):
             logger.info(f"📱 [DEV] Would send quote: {quote_msg}")
         
-        # Auto-create booking (simplified - in production wait for YES confirmation)
-        from .models import CabBookingChannel, CabVehicleType
+        # Store quote data in session and wait for YES/NO confirmation
+        set_session(customer_number, 'awaiting_booking_confirmation', {
+            'parsed': parsed,
+            'calc_result': calc_result,
+            'shop_id': ctx.shop_id,
+            'timestamp': datetime.utcnow().isoformat(),
+        })
         
-        # Create booking request object
-        # Convert enums to their string values for Pydantic
-        vehicle_type_value = vehicle_type_str.value if hasattr(vehicle_type_str, 'value') else vehicle_type_str
-        channel_value = "whatsapp"  # Use lowercase string value
-        
-        # DEBUG: Log what we're passing
-        logger.info(f"🔍 DEBUG: Passing channel_value={channel_value} (type={type(channel_value)})")
-        logger.info(f"🔍 DEBUG: Passing vehicle_type_value={vehicle_type_value} (type={type(vehicle_type_value)})")
-        
-        booking_request = CabBookingCreateRequest(
-            channel=channel_value,
-            pickup_text=parsed['pickup_text'],
-            drop_text=parsed['drop_text'],
-            pickup_time=parsed['pickup_time'],
-            vehicle_type=vehicle_type_value,
-            passengers=parsed['passengers'],
-            customer_name="WhatsApp Customer",  # Extract from Twilio profile in production
-            customer_phone=From.replace('whatsapp:', ''),
-            customer_email=None,
-        )
-        
-        # DEBUG: Log what Pydantic created
-        logger.info(f"🔍 DEBUG: After Pydantic: booking_request.channel={booking_request.channel} (type={type(booking_request.channel)})")
-        logger.info(f"🔍 DEBUG: After Pydantic: booking_request.channel.value={booking_request.channel.value if hasattr(booking_request.channel, 'value') else 'no .value'}")
-        
-        booking = await create_cab_booking_record(
-            session=session,
-            shop_id=ctx.shop_id,
-            request=booking_request,
-            calc_result=calc_result,
-        )
-        
-        # Send confirmation
-        confirmation_msg = format_booking_confirmation(
-            booking_id=str(booking.id),
-            pickup_text=parsed['pickup_text'],
-            drop_text=parsed['drop_text'],
-            pickup_time=parsed['pickup_time'],
-            final_price=calc_result['final_price'],
-        )
-        
-        if not send_whatsapp_message(customer_number, confirmation_msg):
-            logger.info(f"📱 [DEV] Would send confirmation: {confirmation_msg}")
-        
-        logger.info(f"✅ WhatsApp booking created: {booking.id}")
-        return {"status": "booking_created", "booking_id": str(booking.id)}
+        logger.info(f"✅ Quote sent, awaiting customer confirmation")
+        return {"status": "quote_sent", "awaiting_confirmation": True}
         
     except RouteError as e:
         logger.warning(f"Route calculation failed: {e.message}")

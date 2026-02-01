@@ -224,16 +224,20 @@ export default function ShopOwnerDashboard() {
         
         // If server says this is a cab service, redirect immediately
         // Don't wait to load full shop data - trust the server
-        if (shopInfo.is_cab_service && !isRedirecting) {
-          setIsRedirecting(true);
-          console.log(`[Owner Dashboard] Server indicates cab service, redirecting to ${shopInfo.owner_dashboard_path}`);
-          router.replace(shopInfo.owner_dashboard_path);
+        if (shopInfo.is_cab_service) {
+          if (!isRedirecting) {
+            setIsRedirecting(true);
+            console.log(`[Owner Dashboard] Server indicates cab service, redirecting to ${shopInfo.owner_dashboard_path}`);
+            router.replace(shopInfo.owner_dashboard_path);
+          }
+          // Keep shopLoading true and don't execute finally block
           return; // Don't continue loading salon data
         }
         
         // For non-cab shops, get the full shop data for the dashboard
         const shopData = await getShopBySlug(slug);
         setShop(shopData);
+        setShopLoading(false);
       } catch (err) {
         console.error("Failed to load shop:", err);
         if (isApiError(err) && err.status === 404) {
@@ -241,7 +245,6 @@ export default function ShopOwnerDashboard() {
         } else {
           setAuthError(getErrorMessage(err));
         }
-      } finally {
         setShopLoading(false);
       }
     }
@@ -646,7 +649,8 @@ export default function ShopOwnerDashboard() {
   // Loading State
   // ──────────────────────────────────────────────────────────
 
-  if (shopLoading) {
+  // Show loading during shop load OR when redirecting to cab dashboard
+  if (shopLoading || isRedirecting) {
     return (
       <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center">
         <motion.div
@@ -655,7 +659,9 @@ export default function ShopOwnerDashboard() {
           className="text-center"
         >
           <Loader2 className="w-10 h-10 text-[#00d4ff] animate-spin mx-auto mb-4" />
-          <p className="text-sm text-gray-400">Loading shop...</p>
+          <p className="text-sm text-gray-400">
+            {isRedirecting ? "Redirecting to cab dashboard..." : "Loading shop..."}
+          </p>
         </motion.div>
       </div>
     );

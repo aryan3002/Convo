@@ -16,6 +16,7 @@ import {
   UserCircle,
   Car,
   LogIn,
+  ChevronDown,
 } from "lucide-react";
 
 // ──────────────────────────────────────────────────────────
@@ -28,6 +29,7 @@ export default function OwnerLandingPage() {
   const apiClient = useApiClient();
   const [userShops, setUserShops] = useState<any[]>([]);
   const [loadingShops, setLoadingShops] = useState(false);
+  const [showShopsDropdown, setShowShopsDropdown] = useState(false);
   const userId = user?.id;
 
   // Fetch user's shops when signed in - only once per user
@@ -66,7 +68,22 @@ export default function OwnerLandingPage() {
     return () => {
       isMounted = false;
     };
-  }, [isLoaded, userId]);
+  }, [isLoaded, userId]); // Removed apiClient from dependencies
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (showShopsDropdown && !target.closest('.shops-dropdown-container')) {
+        setShowShopsDropdown(false);
+      }
+    };
+
+    if (showShopsDropdown) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [showShopsDropdown]);
 
   const features = [
     {
@@ -106,24 +123,31 @@ export default function OwnerLandingPage() {
           <div className="flex items-center gap-3">
             {/* My Shops - Show when user is logged in (with loading/empty state) */}
             {isLoaded && user && (
-              <div className="relative group">
+              <div className="relative shops-dropdown-container">
                 <motion.button
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
-                  className="text-xs px-4 py-2 rounded-full glass border border-white/10 text-white hover:border-[#00d4ff]/50 transition-all flex items-center gap-2"
+                  onClick={() => setShowShopsDropdown(!showShopsDropdown)}
+                  className="text-xs px-4 py-2 rounded-full glass border border-white/10 text-white hover:border-[#00d4ff]/50 active:border-[#00d4ff]/70 transition-all flex items-center gap-2"
                 >
                   <Store className="w-3 h-3 text-[#00d4ff]" />
                   {loadingShops ? "Loading..." : `My Shops (${userShops.length})`}
+                  {userShops.length > 0 && (
+                    <ChevronDown className={`w-3 h-3 transition-transform ${showShopsDropdown ? 'rotate-180' : ''}`} />
+                  )}
                 </motion.button>
-                {/* Dropdown - only show when there are shops */}
-                {userShops.length > 0 && (
-                  <div className="absolute right-0 mt-2 w-64 glass-card rounded-xl border border-white/10 shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                {/* Dropdown - only show when there are shops and dropdown is open */}
+                {userShops.length > 0 && showShopsDropdown && (
+                  <div className="absolute right-0 mt-2 w-64 glass-card rounded-xl border border-white/10 shadow-2xl z-50">
                     <div className="p-2 space-y-1">
                       {userShops.map((shop) => (
                         <button
                           key={shop.id}
-                          onClick={() => router.push(`/s/${shop.slug}/owner`)}
-                          className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/5 transition-colors"
+                          onClick={() => {
+                            setShowShopsDropdown(false);
+                            router.push(`/s/${shop.slug}/owner`);
+                          }}
+                          className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/5 active:bg-white/10 transition-colors"
                         >
                           <div className="text-sm font-medium text-white">{shop.name}</div>
                           <div className="text-xs text-gray-400">/{shop.slug}</div>
@@ -216,7 +240,7 @@ export default function OwnerLandingPage() {
                   router.push("/onboarding");
                 }
               }}
-              className="glass-card rounded-2xl p-6 border border-white/5 text-left hover:border-[#00d4ff]/30 transition-all group"
+              className="glass-card rounded-2xl p-6 border border-white/5 text-left hover:border-[#00d4ff]/30 active:border-[#00d4ff]/50 transition-all group cursor-pointer"
             >
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#00d4ff]/20 to-[#a855f7]/20 flex items-center justify-center border border-white/10 mb-4 group-hover:shadow-neon transition-all">
                 <Plus className="w-6 h-6 text-[#00d4ff]" />
@@ -289,7 +313,7 @@ export default function OwnerLandingPage() {
                 router.push("/onboarding/cab");
               }
             }}
-            className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#10b981]/30 transition-all group mb-4 flex items-center justify-between"
+            className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#10b981]/30 active:border-[#10b981]/50 transition-all group mb-4 flex items-center justify-between cursor-pointer"
           >
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#10b981]/20 to-[#06b6d4]/20 flex items-center justify-center border border-white/10 group-hover:shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all">
@@ -316,7 +340,7 @@ export default function OwnerLandingPage() {
             whileHover={{ scale: 1.02, y: -2 }}
             whileTap={{ scale: 0.98 }}
             onClick={() => router.push("/employee")}
-            className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#ec4899]/30 transition-all group mb-12 flex items-center justify-between"
+            className="w-full glass-card rounded-2xl p-5 border border-white/5 hover:border-[#ec4899]/30 active:border-[#ec4899]/50 transition-all group mb-12 flex items-center justify-between cursor-pointer"
           >
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-[#ec4899]/20 to-[#f97316]/20 flex items-center justify-center border border-white/10 group-hover:shadow-[0_0_20px_rgba(236,72,153,0.3)] transition-all">

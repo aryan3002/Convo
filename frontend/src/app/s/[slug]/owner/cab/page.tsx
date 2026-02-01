@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import {
   getShopBySlug,
+  getShopInfo,
   getStoredUserId,
   apiFetch,
   isApiError,
@@ -207,7 +208,7 @@ export default function CabManagementPage() {
   const [cabOwnerLoading, setCabOwnerLoading] = useState(true);
 
   // Tab & Data State
-  const [activeTab, setActiveTab] = useState<TabType>("requests");
+  const [activeTab, setActiveTab] = useState<TabType>("rides");
   const [requests, setRequests] = useState<CabBooking[]>([]);
   const [rides, setRides] = useState<CabBooking[]>([]);
   const [drivers, setDrivers] = useState<CabDriver[]>([]);
@@ -267,12 +268,22 @@ export default function CabManagementPage() {
       setAuthError(null);
 
       try {
+        // Check if this is actually a cab service shop
+        const shopInfo = await getShopInfo(slug);
+        
+        // If NOT a cab service, redirect to regular barber dashboard
+        if (!shopInfo.is_cab_service) {
+          console.log(`[Cab Dashboard] Shop is not a cab service, redirecting to /s/${slug}/owner`);
+          router.replace(`/s/${slug}/owner`);
+          return;
+        }
+        
         const shopData = await getShopBySlug(slug);
         setShop(shopData);
+        setShopLoading(false);
       } catch (err) {
         console.error("Failed to load shop:", err);
         setAuthError("Shop not found");
-      } finally {
         setShopLoading(false);
       }
     }
@@ -280,7 +291,7 @@ export default function CabManagementPage() {
     if (slug) {
       loadShop();
     }
-  }, [slug]);
+  }, [slug, router]);
 
   // Check if cab owner exists for this shop
   useEffect(() => {
@@ -596,9 +607,11 @@ export default function CabManagementPage() {
         }
       );
 
+      // Update the selected booking with new data
       setSelectedBooking(updatedBooking);
       setShowPriceOverride(false);
       setPriceOverrideValue("");
+      // Refresh the requests list
       await fetchRequests();
     } catch (err) {
       console.error("Error overriding price:", err);
@@ -821,23 +834,24 @@ export default function CabManagementPage() {
         <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => router.push(`/s/${slug}/owner`)}
-              className="w-10 h-10 rounded-xl glass border border-white/10 flex items-center justify-center hover:bg-white/10 transition-colors"
+              onClick={() => router.push('/owner-landing')}
+              className="w-10 h-10 rounded-xl glass border border-white/10 flex items-center justify-center hover:bg-white/10 active:bg-white/20 transition-colors"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
             <div>
-              <h1 className="text-lg font-bold flex items-center gap-2">
-                <Car className="w-5 h-5 text-[#00d4ff]" />
-                Cab Services
+              <h1 className="text-base sm:text-lg font-bold flex items-center gap-2">
+                <Car className="w-4 sm:w-5 h-4 sm:h-5 text-[#00d4ff]" />
+                <span className="hidden sm:inline">Cab Services</span>
+                <span className="sm:hidden">Cab</span>
               </h1>
-              <p className="text-xs text-gray-500">{shop?.name} · Manage bookings</p>
+              <p className="text-xs text-gray-500">{shop?.name} · <span className="hidden sm:inline">Manage bookings</span><span className="sm:hidden">Dashboard</span></p>
             </div>
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowPricingModal(true)}
-              className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+              className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white active:text-white hover:bg-white/10 active:bg-white/20 transition-colors"
               title="Pricing Settings"
             >
               <Settings className="w-5 h-5" />
@@ -845,13 +859,13 @@ export default function CabManagementPage() {
             <button
               onClick={() => (activeTab === "requests" ? fetchRequests() : fetchRides())}
               disabled={loading}
-              className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
+              className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-white active:text-white hover:bg-white/10 active:bg-white/20 transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`w-5 h-5 ${loading ? "animate-spin" : ""}`} />
             </button>
             <SignOutButton redirectUrl={`/owner-landing`}>
               <button
-                className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                className="p-2 rounded-lg glass border border-white/10 text-gray-400 hover:text-red-400 active:text-red-400 hover:bg-red-500/10 active:bg-red-500/20 transition-colors"
                 title="Sign Out"
               >
                 <LogOut className="w-5 h-5" />
@@ -866,37 +880,19 @@ export default function CabManagementPage() {
         {/* Summary Bar - Business Metrics */}
         <CabSummaryBar slug={slug} />
 
-        {/* DEV Test Tools */}
-        {isDev && (
-          <div className="mb-6 p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/30">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-yellow-400">
-                <AlertCircle className="w-4 h-4" />
-                <span className="text-sm font-medium">DEV MODE</span>
-              </div>
-              <button
-                onClick={createTestBooking}
-                disabled={creatingTestBooking}
-                className="px-3 py-1.5 rounded-lg bg-yellow-500/20 text-yellow-400 text-sm font-medium hover:bg-yellow-500/30 transition-colors disabled:opacity-50"
-              >
-                {creatingTestBooking ? "Creating..." : "➕ Create Test Booking"}
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Tabs */}
-        <div className="flex gap-2 mb-6 p-1 glass rounded-2xl w-fit">
+        <div className="flex gap-2 mb-6 p-1 glass rounded-2xl w-fit overflow-x-auto">
           <button
             onClick={() => setActiveTab("requests")}
-            className={`px-4 py-2 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
+            className={`px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-medium transition-all flex items-center gap-1 sm:gap-2 whitespace-nowrap ${
               activeTab === "requests"
                 ? "btn-neon"
-                : "text-gray-400 hover:text-white hover:bg-white/5"
+                : "text-gray-400 hover:text-white active:text-white hover:bg-white/5 active:bg-white/10"
             }`}
           >
             <Clock className="w-4 h-4" />
-            Pending Requests
+            <span className="hidden sm:inline">Pending Requests</span>
+            <span className="sm:hidden">Requests</span>
             {requests.length > 0 && (
               <span className="px-2 py-0.5 rounded-full bg-[#00d4ff]/20 text-[#00d4ff] text-xs">
                 {requests.length}
@@ -905,14 +901,15 @@ export default function CabManagementPage() {
           </button>
           <button
             onClick={() => setActiveTab("rides")}
-            className={`px-4 py-2 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
+            className={`px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-medium transition-all flex items-center gap-1 sm:gap-2 whitespace-nowrap ${
               activeTab === "rides"
                 ? "btn-neon"
-                : "text-gray-400 hover:text-white hover:bg-white/5"
+                : "text-gray-400 hover:text-white active:text-white hover:bg-white/5 active:bg-white/10"
             }`}
           >
             <Calendar className="w-4 h-4" />
-            Confirmed Rides
+            <span className="hidden sm:inline">Confirmed Rides</span>
+            <span className="sm:hidden">Confirmed</span>
             {rides.length > 0 && (
               <span className="px-2 py-0.5 rounded-full bg-green-500/20 text-green-400 text-xs">
                 {rides.length}
@@ -921,10 +918,10 @@ export default function CabManagementPage() {
           </button>
           <button
             onClick={() => setActiveTab("drivers")}
-            className={`px-4 py-2 rounded-xl text-sm font-medium transition-all flex items-center gap-2 ${
+            className={`px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-medium transition-all flex items-center gap-1 sm:gap-2 whitespace-nowrap ${
               activeTab === "drivers"
                 ? "btn-neon"
-                : "text-gray-400 hover:text-white hover:bg-white/5"
+                : "text-gray-400 hover:text-white active:text-white hover:bg-white/5 active:bg-white/10"
             }`}
           >
             <User className="w-4 h-4" />
